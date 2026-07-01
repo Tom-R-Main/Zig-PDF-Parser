@@ -147,6 +147,16 @@ pub fn build(b: *std.Build) void {
 
     const run_runtime_unit_tests = b.addRunArtifact(runtime_unit_tests);
 
+    const complexity_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/complexity.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_complexity_unit_tests = b.addRunArtifact(complexity_unit_tests);
+
     const interpreter_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/interpreter.zig"),
@@ -198,6 +208,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_xref_unit_tests.step);
     test_step.dependOn(&run_encoding_unit_tests.step);
     test_step.dependOn(&run_runtime_unit_tests.step);
+    test_step.dependOn(&run_complexity_unit_tests.step);
     test_step.dependOn(&run_interpreter_unit_tests.step);
     test_step.dependOn(&run_testpdf_unit_tests.step);
     test_step.dependOn(&run_integration_tests.step);

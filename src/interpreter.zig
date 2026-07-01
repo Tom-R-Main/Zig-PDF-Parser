@@ -409,6 +409,7 @@ pub const SpanCollector = struct {
     current_y: f64 = 0,
     current_font_size: f64 = 12,
     current_font_name: ?[]const u8 = null,
+    current_font_has_to_unicode: ?bool = null,
     page_index: u32 = 0,
     current_block_id: u32 = 0,
     current_line_id: u32 = 0,
@@ -446,9 +447,10 @@ pub const SpanCollector = struct {
         self.current_font_size = size;
     }
 
-    pub fn setFont(self: *SpanCollector, name: ?[]const u8, size: f64) void {
+    pub fn setFont(self: *SpanCollector, name: ?[]const u8, size: f64, has_to_unicode: ?bool) void {
         self.current_font_name = name;
         self.current_font_size = size;
+        self.current_font_has_to_unicode = has_to_unicode;
     }
 
     pub fn setMcid(self: *SpanCollector, mcid: ?i32) void {
@@ -483,7 +485,7 @@ pub const SpanCollector = struct {
             .text = text,
             .source = .native_pdf,
             .confidence = 1.0,
-            .font = .{ .name = self.current_font_name, .size = self.current_font_size },
+            .font = .{ .name = self.current_font_name, .size = self.current_font_size, .has_to_unicode = self.current_font_has_to_unicode },
             .block_id = self.current_block_id,
             .line_id = self.current_line_id,
             .mcid = self.current_mcid,

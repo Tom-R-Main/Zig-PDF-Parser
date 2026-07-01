@@ -190,6 +190,8 @@ pub const FontEncoding = struct {
     cff_parser: ?cff.CffParser = null,
     /// Underlying CFF data (owned)
     cff_data: ?[]const u8 = null,
+    /// True when this font dictionary supplied an explicit ToUnicode CMap.
+    has_to_unicode: bool = false,
 
     allocator: std.mem.Allocator,
 
@@ -577,6 +579,7 @@ pub fn parseFontEncoding(
         }
     }
 
+    encoding.has_to_unicode = parsed_tounicode;
     return encoding;
 }
 

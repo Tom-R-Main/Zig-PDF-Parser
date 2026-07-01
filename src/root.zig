@@ -29,6 +29,7 @@ pub const layout = @import("layout.zig");
 pub const structtree = @import("structtree.zig");
 pub const markdown = @import("markdown.zig");
 pub const outline = @import("outline.zig");
+pub const complexity = @import("complexity.zig");
 
 // Re-exports
 pub const Object = parser.Object;
@@ -38,6 +39,8 @@ pub const Page = pagetree.Page;
 pub const FontEncoding = encoding.FontEncoding;
 pub const TextSpan = layout.TextSpan;
 pub const LayoutResult = layout.LayoutResult;
+pub const PageComplexity = complexity.PageScore;
+pub const RegionComplexity = complexity.RegionScore;
 pub const StructTree = structtree.StructTree;
 pub const StructElement = structtree.StructElement;
 pub const MarkdownOptions = markdown.MarkdownOptions;
@@ -567,6 +570,48 @@ pub const Document = struct {
         const page = self.pages.items[page_num];
         const page_width = page.media_box[2] - page.media_box[0];
         return layout.analyzeLayout(allocator, spans, page_width);
+    }
+
+    /// Score a page before OCR/ML routing. The score is derived only from
+    /// cheap native evidence: text spans, font metadata, image boxes, and
+    /// geometric distribution.
+    pub fn analyzePageComplexity(self: *Document, page_num: usize, allocator: std.mem.Allocator) !complexity.PageScore {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+
+        const page = self.pages.items[page_num];
+        const spans = try self.extractTextWithBounds(page_num, allocator);
+        defer Document.freeTextSpans(allocator, spans);
+
+        const images = try self.getPageImages(page_num, allocator);
+        defer Document.freeImages(allocator, images);
+
+        const image_boxes = try allocator.alloc(complexity.ImageBox, images.len);
+        defer allocator.free(image_boxes);
+        for (images, 0..) |image, i| {
+            image_boxes[i] = .{
+                .bbox = .{
+                    .x0 = image.rect[0],
+                    .y0 = image.rect[1],
+                    .x1 = image.rect[2],
+                    .y1 = image.rect[3],
+                },
+                .pixel_width = image.width,
+                .pixel_height = image.height,
+            };
+        }
+
+        return complexity.scorePage(.{
+            .page_index = @intCast(page_num),
+            .bbox = .{
+                .x0 = page.media_box[0],
+                .y0 = page.media_box[1],
+                .x1 = page.media_box[2],
+                .y1 = page.media_box[3],
+            },
+            .spans = spans,
+            .images = image_boxes,
+            .has_structure_tree = self.hasStructureTree(),
+        });
     }
 
     /// Check if the document has a structure tree (is tagged)
@@ -2079,7 +2124,8 @@ fn extractContentStream(
                     }
                     font_size = operands[1].asNumber();
                     if (mode == .bounds) {
-                        mode.bounds.setFont(font_name, font_size);
+                        const has_to_unicode = if (current_font) |font| font.has_to_unicode else null;
+                        mode.bounds.setFont(font_name, font_size, has_to_unicode);
                     }
                 },
                 'L' => if (in_text and operand_count >= 1) {

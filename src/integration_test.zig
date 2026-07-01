@@ -872,6 +872,38 @@ test "image detection" {
     try std.testing.expectApproxEqRel(@as(f64, 500), images[0].rect[1], 0.01);
 }
 
+test "page complexity sees parser spans, image boxes, and missing ToUnicode" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateImagePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const score = try doc.analyzePageComplexity(0, allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), score.page_index);
+    try std.testing.expect(score.score.span_count > 0);
+    try std.testing.expectEqual(@as(usize, 1), score.score.image_count);
+    try std.testing.expect(score.score.signals.missing_tounicode >= 0.9);
+}
+
+test "page complexity preserves ToUnicode metadata from native extraction" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateSimpleToUnicodePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.default());
+    defer doc.close();
+
+    const score = try doc.analyzePageComplexity(0, allocator);
+
+    try std.testing.expect(score.score.span_count > 0);
+    try std.testing.expect(score.score.signals.missing_tounicode < 0.1);
+}
+
 test "images returns empty for page without images" {
     const allocator = std.testing.allocator;
 
