@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
     // Main library
     const lib = b.addLibrary(.{
         .linkage = .static,
-        .name = "zpdf",
+        .name = "pdf_parser",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/root.zig"),
             .target = target,
@@ -17,10 +17,11 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(lib);
 
-    // Shared library for Python bindings
+    // Shared library for Python/FFI bindings. Exported C symbols keep the
+    // zpdf_* prefix for compatibility during the package rename.
     const shared_lib = b.addLibrary(.{
         .linkage = .dynamic,
-        .name = "zpdf",
+        .name = "pdf_parser",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/capi.zig"),
             .target = target,
@@ -35,7 +36,7 @@ pub fn build(b: *std.Build) void {
 
     // WebAssembly build
     const wasm = b.addExecutable(.{
-        .name = "zpdf",
+        .name = "pdf_parser",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/wapi.zig"),
             .target = b.resolveTargetQuery(.{
@@ -54,7 +55,7 @@ pub fn build(b: *std.Build) void {
 
     // CLI tool
     const exe = b.addExecutable(.{
-        .name = "zpdf",
+        .name = "pdf-parser",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -72,7 +73,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the zpdf CLI");
+    const run_step = b.step("run", "Run the pdf-parser CLI");
     run_step.dependOn(&run_cmd.step);
 
     // Unit tests
@@ -136,6 +137,16 @@ pub fn build(b: *std.Build) void {
 
     const run_encoding_unit_tests = b.addRunArtifact(encoding_unit_tests);
 
+    const runtime_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/runtime.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_runtime_unit_tests = b.addRunArtifact(runtime_unit_tests);
+
     const interpreter_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/interpreter.zig"),
@@ -166,6 +177,19 @@ pub fn build(b: *std.Build) void {
 
     const run_integration_tests = b.addRunArtifact(integration_tests);
 
+    const native_eval_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/native_eval.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_native_eval_tests = b.addRunArtifact(native_eval_tests);
+
+    const native_eval_step = b.step("native-eval", "Run native extraction correctness fixtures");
+    native_eval_step.dependOn(&run_native_eval_tests.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_simd_unit_tests.step);
@@ -173,9 +197,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_unit_tests.step);
     test_step.dependOn(&run_xref_unit_tests.step);
     test_step.dependOn(&run_encoding_unit_tests.step);
+    test_step.dependOn(&run_runtime_unit_tests.step);
     test_step.dependOn(&run_interpreter_unit_tests.step);
     test_step.dependOn(&run_testpdf_unit_tests.step);
     test_step.dependOn(&run_integration_tests.step);
+    test_step.dependOn(&run_native_eval_tests.step);
 
     // Benchmark
     const bench = b.addExecutable(.{

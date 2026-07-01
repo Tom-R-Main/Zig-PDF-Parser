@@ -11,6 +11,7 @@
 //! CID fonts use CIDToGIDMap instead
 
 const std = @import("std");
+const runtime = @import("runtime.zig");
 const parser = @import("parser.zig");
 const decompress = @import("decompress.zig");
 const cff = @import("cff.zig");
@@ -165,6 +166,8 @@ pub const FontEncoding = struct {
     codepoint_map: [256]u21,
     /// ToUnicode CMap ranges (for CID fonts or complex mappings)
     cmap_ranges: []const CMapRange,
+    /// Valid source code spaces from begincodespacerange.
+    cmap_codespaces: []const CMapCodeSpace,
     /// Fast lookup hash map for individual CMap entries (bfchar)
     cmap_hash: std.AutoHashMapUnmanaged(u32, u32),
     /// Multi-character ToUnicode mappings (for ligatures like fi, fl, ffi, ffl)
@@ -197,10 +200,22 @@ pub const FontEncoding = struct {
         is_range: bool, // true = range mapping (bfrange)
     };
 
+    pub const CMapCodeSpace = struct {
+        low: u32,
+        high: u32,
+        byte_count: u8,
+    };
+
+    const CharCode = struct {
+        value: u32,
+        bytes_consumed: u8,
+    };
+
     pub fn init(allocator: std.mem.Allocator) FontEncoding {
         var enc = FontEncoding{
             .codepoint_map = undefined,
             .cmap_ranges = &.{},
+            .cmap_codespaces = &.{},
             .cmap_hash = .{},
             .cmap_multi = .{},
             .is_cid = false,
@@ -222,6 +237,9 @@ pub const FontEncoding = struct {
     pub fn deinit(self: *FontEncoding) void {
         if (self.cmap_ranges.len > 0) {
             self.allocator.free(self.cmap_ranges);
+        }
+        if (self.cmap_codespaces.len > 0) {
+            self.allocator.free(self.cmap_codespaces);
         }
         self.cmap_hash.deinit(self.allocator);
         // Free multi-character mapping strings
@@ -349,12 +367,16 @@ pub const FontEncoding = struct {
         }
     }
 
-    fn readCharCode(self: *const FontEncoding, data: []const u8) ?struct { value: u32, bytes_consumed: u8 } {
+    fn readCharCode(self: *const FontEncoding, data: []const u8) ?CharCode {
         if (data.len == 0) return null;
 
         // For simple fonts, 1 byte
         if (!self.is_cid or self.bytes_per_char == 1) {
             return .{ .value = data[0], .bytes_consumed = 1 };
+        }
+
+        if (self.cmap_codespaces.len > 0) {
+            return self.readCharCodeFromCodeSpaces(data);
         }
 
         // For CID fonts, always read bytes_per_char bytes
@@ -365,6 +387,20 @@ pub const FontEncoding = struct {
 
         // Fall back to 1 byte only if we don't have enough data
         return .{ .value = data[0], .bytes_consumed = 1 };
+    }
+
+    fn readCharCodeFromCodeSpaces(self: *const FontEncoding, data: []const u8) ?CharCode {
+        var byte_count: u8 = 1;
+        while (byte_count <= 4 and byte_count <= data.len) : (byte_count += 1) {
+            const code = readCodeBE(data[0..byte_count]);
+            for (self.cmap_codespaces) |space| {
+                if (space.byte_count == byte_count and code >= space.low and code <= space.high) {
+                    return .{ .value = code, .bytes_consumed = byte_count };
+                }
+            }
+        }
+
+        return null;
     }
 
     fn codeInRanges(self: *const FontEncoding, code: u32) bool {
@@ -421,6 +457,7 @@ pub fn parseFontEncoding(
     resolve_ctx: *const anyopaque,
 ) !FontEncoding {
     var encoding = FontEncoding.init(allocator);
+    var parsed_tounicode = false;
 
     // Detect font type first
     const subtype = font_dict.getName("Subtype");
@@ -466,20 +503,12 @@ pub fn parseFontEncoding(
                             const tu_resolved = resolve_fn(resolve_ctx, tounicode);
                             if (tu_resolved == .stream) {
                                 try parseToUnicodeCMap(allocator, tu_resolved.stream, &encoding);
+                                parsed_tounicode = true;
                             }
                         }
                     }
                 }
             }
-        }
-    }
-
-    // Check for ToUnicode CMap (highest priority for all fonts)
-    if (font_dict.get("ToUnicode")) |tounicode| {
-        const resolved = resolve_fn(resolve_ctx, tounicode);
-        if (resolved == .stream) {
-            try parseToUnicodeCMap(allocator, resolved.stream, &encoding);
-            return encoding;
         }
     }
 
@@ -513,6 +542,18 @@ pub fn parseFontEncoding(
             {
                 encoding.is_cid = true;
                 encoding.bytes_per_char = 2;
+            }
+        }
+    }
+
+    // Check for ToUnicode CMap after the base encoding so explicit mappings
+    // override /Encoding while preserving widths and metrics below.
+    if (!parsed_tounicode) {
+        if (font_dict.get("ToUnicode")) |tounicode| {
+            const resolved = resolve_fn(resolve_ctx, tounicode);
+            if (resolved == .stream) {
+                try parseToUnicodeCMap(allocator, resolved.stream, &encoding);
+                parsed_tounicode = true;
             }
         }
     }
@@ -581,7 +622,7 @@ fn parseFontDescriptor(font_dict: Object.Dict, resolve_fn: *const fn (ctx: *cons
                         stream.dict.get("Filter"),
                         stream.dict.get("DecodeParms"),
                     ) catch null;
-                    
+
                     if (data) |d| {
                         encoding.cff_data = d;
                         if (cff.CffParser.init(encoding.allocator, d)) |parser_inst| {
@@ -872,8 +913,11 @@ pub fn parseToUnicodeCMap(allocator: std.mem.Allocator, stream: Object.Stream, e
 
     var ranges: std.ArrayList(FontEncoding.CMapRange) = .empty;
     errdefer ranges.deinit(allocator);
+    var code_spaces: std.ArrayList(FontEncoding.CMapCodeSpace) = .empty;
+    errdefer code_spaces.deinit(allocator);
 
     var pos: usize = 0;
+    var max_source_bytes: u8 = if (encoding.is_cid) encoding.bytes_per_char else 1;
 
     while (pos < data.len) {
         // Skip whitespace and comments
@@ -898,13 +942,16 @@ pub fn parseToUnicodeCMap(allocator: std.mem.Allocator, stream: Object.Stream, e
             continue;
         }
 
-        // Look for "beginbfchar" or "beginbfrange"
-        if (matchAt(data, pos, "beginbfchar")) {
+        // Look for code spaces and mappings.
+        if (matchAt(data, pos, "begincodespacerange")) {
+            pos += 19;
+            try parseCodeSpaceRange(allocator, data, &pos, &max_source_bytes, &code_spaces);
+        } else if (matchAt(data, pos, "beginbfchar")) {
             pos += 11;
-            try parseBfChar(allocator, data, &pos, &ranges, encoding);
+            try parseBfChar(allocator, data, &pos, &ranges, encoding, &max_source_bytes);
         } else if (matchAt(data, pos, "beginbfrange")) {
             pos += 12;
-            try parseBfRange(allocator, data, &pos, &ranges, encoding);
+            try parseBfRange(allocator, data, &pos, &ranges, encoding, &max_source_bytes);
         } else {
             pos += 1;
         }
@@ -919,12 +966,59 @@ pub fn parseToUnicodeCMap(allocator: std.mem.Allocator, stream: Object.Stream, e
     }.lessThan);
     encoding.cmap_ranges = owned_ranges;
 
-    if (encoding.cmap_ranges.len > 0 or encoding.cmap_hash.count() > 0) {
+    const owned_code_spaces = try code_spaces.toOwnedSlice(allocator);
+    std.mem.sort(FontEncoding.CMapCodeSpace, owned_code_spaces, {}, struct {
+        fn lessThan(_: void, a: FontEncoding.CMapCodeSpace, b: FontEncoding.CMapCodeSpace) bool {
+            if (a.byte_count != b.byte_count) return a.byte_count < b.byte_count;
+            return a.low < b.low;
+        }
+    }.lessThan);
+    encoding.cmap_codespaces = owned_code_spaces;
+
+    if (encoding.is_cid or max_source_bytes > 1) {
         encoding.is_cid = true;
+        encoding.bytes_per_char = @max(encoding.bytes_per_char, max_source_bytes);
     }
 }
 
-fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
+fn parseCodeSpaceRange(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    pos: *usize,
+    max_source_bytes: *u8,
+    code_spaces: *std.ArrayList(FontEncoding.CMapCodeSpace),
+) !void {
+    while (pos.* < data.len) {
+        skipWhitespace(data, pos);
+
+        if (matchAt(data, pos.*, "endcodespacerange")) {
+            pos.* += 17;
+            return;
+        }
+
+        const low = parseHexTokenDetailed(data, pos) orelse {
+            skipToNextEntry(data, pos);
+            continue;
+        };
+        skipWhitespace(data, pos);
+        const high = parseHexTokenDetailed(data, pos) orelse {
+            skipToNextEntry(data, pos);
+            continue;
+        };
+
+        max_source_bytes.* = @max(max_source_bytes.*, low.byte_count);
+        max_source_bytes.* = @max(max_source_bytes.*, high.byte_count);
+        if (low.byte_count == high.byte_count) {
+            try code_spaces.append(allocator, .{
+                .low = low.value,
+                .high = high.value,
+                .byte_count = low.byte_count,
+            });
+        }
+    }
+}
+
+fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding, max_source_bytes: *u8) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -934,10 +1028,11 @@ fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *
         }
 
         // Parse source code: <XXXX>
-        const src = parseHexToken(data, pos) orelse {
+        const src = parseHexTokenDetailed(data, pos) orelse {
             skipToNextEntry(data, pos);
             continue;
         };
+        max_source_bytes.* = @max(max_source_bytes.*, src.byte_count);
 
         skipWhitespace(data, pos);
 
@@ -953,7 +1048,7 @@ fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *
             // Multi-character mapping (ligatures like fi, fl, ffi, ffl)
             // Convert UTF-16BE to UTF-8 and store in cmap_multi
             const utf8_str = utf16beToUtf8(allocator, dst_buf[0..dst_result.byte_count]) catch continue;
-            try encoding.cmap_multi.put(allocator, src, utf8_str);
+            try encoding.cmap_multi.put(allocator, src.value, utf8_str);
         } else {
             // Single character mapping
             var dst: u32 = 0;
@@ -962,17 +1057,17 @@ fn parseBfChar(allocator: std.mem.Allocator, data: []const u8, pos: *usize, _: *
             }
 
             // For simple 1-byte codes, update the direct map
-            if (src <= 255 and dst <= 0x10FFFF) {
-                encoding.codepoint_map[@intCast(src)] = @intCast(dst);
+            if (src.value <= 255 and dst <= 0x10FFFF) {
+                encoding.codepoint_map[@intCast(src.value)] = @intCast(dst);
             }
 
             // Add to hash map for O(1) lookup
-            try encoding.cmap_hash.put(allocator, src, dst);
+            try encoding.cmap_hash.put(allocator, src.value, dst);
         }
     }
 }
 
-fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding) !void {
+fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ranges: *std.ArrayList(FontEncoding.CMapRange), encoding: *FontEncoding, max_source_bytes: *u8) !void {
     while (pos.* < data.len) {
         skipWhitespace(data, pos);
 
@@ -982,16 +1077,18 @@ fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ran
         }
 
         // Parse: <start> <end> <dst_start> or <start> <end> [array]
-        const src_start = parseHexToken(data, pos) orelse {
+        const src_start = parseHexTokenDetailed(data, pos) orelse {
             // Can't parse - skip to next line or next '<'
             skipToNextEntry(data, pos);
             continue;
         };
+        max_source_bytes.* = @max(max_source_bytes.*, src_start.byte_count);
         skipWhitespace(data, pos);
-        const src_end = parseHexToken(data, pos) orelse {
+        const src_end = parseHexTokenDetailed(data, pos) orelse {
             skipToNextEntry(data, pos);
             continue;
         };
+        max_source_bytes.* = @max(max_source_bytes.*, src_end.byte_count);
         skipWhitespace(data, pos);
 
         // Destination can be a hex value or an array
@@ -1001,24 +1098,39 @@ fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ran
                 continue;
             };
             try ranges.append(allocator, .{
-                .src_start = src_start,
-                .src_end = src_end,
+                .src_start = src_start.value,
+                .src_end = src_end.value,
                 .dst_start = dst_start,
                 .is_range = true,
             });
         } else if (pos.* < data.len and data[pos.*] == '[') {
             // Array of mappings - add to hash map for O(1) lookup
             pos.* += 1;
-            var src = src_start;
-            while (src <= src_end and pos.* < data.len) {
+            var src = src_start.value;
+            while (src <= src_end.value and pos.* < data.len) {
                 skipWhitespace(data, pos);
                 if (pos.* < data.len and data[pos.*] == ']') {
                     pos.* += 1;
                     break;
                 }
-                const dst = parseHexToken(data, pos) orelse break;
-                // Add to hash map instead of ranges
-                try encoding.cmap_hash.put(allocator, src, dst);
+                var dst_buf: [16]u8 = undefined;
+                const dst_result = parseHexTokenRaw(data, pos, &dst_buf) orelse break;
+                if (dst_result.byte_count > 2) {
+                    const utf8_str = utf16beToUtf8(allocator, dst_buf[0..dst_result.byte_count]) catch {
+                        src += 1;
+                        continue;
+                    };
+                    try encoding.cmap_multi.put(allocator, src, utf8_str);
+                } else {
+                    var dst: u32 = 0;
+                    for (dst_buf[0..dst_result.byte_count]) |b| {
+                        dst = (dst << 8) | b;
+                    }
+                    if (src <= 255 and dst <= 0x10FFFF) {
+                        encoding.codepoint_map[@intCast(src)] = @intCast(dst);
+                    }
+                    try encoding.cmap_hash.put(allocator, src, dst);
+                }
                 src += 1;
             }
         } else {
@@ -1029,10 +1141,16 @@ fn parseBfRange(allocator: std.mem.Allocator, data: []const u8, pos: *usize, ran
 }
 
 fn parseHexToken(data: []const u8, pos: *usize) ?u32 {
+    const token = parseHexTokenDetailed(data, pos) orelse return null;
+    return token.value;
+}
+
+fn parseHexTokenDetailed(data: []const u8, pos: *usize) ?struct { value: u32, byte_count: u8 } {
     if (pos.* >= data.len or data[pos.*] != '<') return null;
     pos.* += 1;
 
     var value: u32 = 0;
+    var nibble_count: u16 = 0;
 
     while (pos.* < data.len and data[pos.*] != '>') {
         const c = data[pos.*];
@@ -1048,12 +1166,24 @@ fn parseHexToken(data: []const u8, pos: *usize) ?u32 {
             continue;
 
         value = (value << 4) | nibble;
+        nibble_count += 1;
     }
 
     if (pos.* < data.len and data[pos.*] == '>') {
         pos.* += 1;
     }
 
+    return .{
+        .value = value,
+        .byte_count = @intCast(@max(@as(u16, 1), (nibble_count + 1) / 2)),
+    };
+}
+
+fn readCodeBE(data: []const u8) u32 {
+    var value: u32 = 0;
+    for (data) |byte| {
+        value = (value << 8) | byte;
+    }
     return value;
 }
 
@@ -1358,7 +1488,7 @@ test "WinAnsi decode ASCII" {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
 
-    try enc.decode("Hello", output.writer(std.testing.allocator));
+    try enc.decode("Hello", runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("Hello", output.items);
 }
 
@@ -1370,7 +1500,7 @@ test "WinAnsi decode extended" {
     defer output.deinit(std.testing.allocator);
 
     // 0x93 = left double quote, 0x94 = right double quote
-    try enc.decode(&[_]u8{ 0x93, 'H', 'i', 0x94 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x93, 'H', 'i', 0x94 }, runtime.arrayListWriter(&output, std.testing.allocator));
 
     // Should be "Hi" with smart quotes
     try std.testing.expectEqualStrings("\xe2\x80\x9cHi\xe2\x80\x9d", output.items);
@@ -1394,7 +1524,7 @@ test "CID font decode UTF-16BE" {
     defer output.deinit(std.testing.allocator);
 
     // UTF-16BE for "A" (0x0041)
-    try enc.decode(&[_]u8{ 0x00, 0x41 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x00, 0x41 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("A", output.items);
 }
 
@@ -1409,7 +1539,7 @@ test "CID font decode CJK character" {
     defer output.deinit(std.testing.allocator);
 
     // UTF-16BE for Chinese character "中" (U+4E2D)
-    try enc.decode(&[_]u8{ 0x4E, 0x2D }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x4E, 0x2D }, runtime.arrayListWriter(&output, std.testing.allocator));
     // Should output UTF-8 encoding of U+4E2D = 0xE4 0xB8 0xAD
     try std.testing.expectEqualStrings("中", output.items);
 }
@@ -1435,7 +1565,7 @@ test "CID font with CMap ranges" {
     defer output.deinit(std.testing.allocator);
 
     // Character code 0x0002 should map to 'B'
-    try enc.decode(&[_]u8{ 0x00, 0x02 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x00, 0x02 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("B", output.items);
 }
 
@@ -1451,7 +1581,7 @@ test "CID font decode surrogate pairs" {
 
     // UTF-16BE surrogate pair for U+1F600 (😀)
     // High surrogate: 0xD83D, Low surrogate: 0xDE00
-    try enc.decode(&[_]u8{ 0xD8, 0x3D, 0xDE, 0x00 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0xD8, 0x3D, 0xDE, 0x00 }, runtime.arrayListWriter(&output, std.testing.allocator));
     // Should output UTF-8 encoding of U+1F600 = 0xF0 0x9F 0x98 0x80
     try std.testing.expectEqualStrings("😀", output.items);
 }
@@ -1467,7 +1597,7 @@ test "MacRoman encoding" {
     defer output.deinit(std.testing.allocator);
 
     // 0xCA in MacRoman is a non-breaking space
-    try enc.decode(&[_]u8{0xCA}, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{0xCA}, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqual(@as(usize, 2), output.items.len); // UTF-8 NBSP is 2 bytes
 }
 
@@ -1481,7 +1611,7 @@ test "encoding differences array" {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
 
-    try enc.decode(&[_]u8{65}, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{65}, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("B", output.items);
 }
 
@@ -1497,7 +1627,7 @@ test "CID identity mapping" {
     defer output.deinit(std.testing.allocator);
 
     // 0x0041 = 'A' in Unicode
-    try enc.decode(&[_]u8{ 0x00, 0x41 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x00, 0x41 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("A", output.items);
 }
 
@@ -1516,16 +1646,182 @@ test "CMap range mapping" {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
 
-    try enc.decode(&[_]u8{ 0x01, 0x00 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x01, 0x00 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("X", output.items);
 
     output.clearRetainingCapacity();
-    try enc.decode(&[_]u8{ 0x01, 0x01 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x01, 0x01 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("Y", output.items);
 
     output.clearRetainingCapacity();
-    try enc.decode(&[_]u8{ 0x01, 0x02 }, output.writer(std.testing.allocator));
+    try enc.decode(&[_]u8{ 0x01, 0x02 }, runtime.arrayListWriter(&output, std.testing.allocator));
     try std.testing.expectEqualStrings("Z", output.items);
+}
+
+test "ToUnicode simple font preserves widths and stays one-byte" {
+    const cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\1 begincodespacerange
+        \\<00> <FF>
+        \\endcodespacerange
+        \\1 beginbfchar
+        \\<41> <03A9>
+        \\endbfchar
+        \\endcmap
+        \\end
+        \\end
+    ;
+
+    var widths = [_]Object{.{ .integer = 777 }};
+    var entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type1" } },
+        .{ .key = "Encoding", .value = .{ .name = "WinAnsiEncoding" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 65 } },
+        .{ .key = "Widths", .value = .{ .array = &widths } },
+        .{
+            .key = "ToUnicode",
+            .value = .{ .stream = .{
+                .dict = .{ .entries = &.{} },
+                .data = cmap,
+            } },
+        },
+    };
+
+    const dummy_ctx: u8 = 0;
+    var enc = try parseFontEncoding(
+        std.testing.allocator,
+        .{ .entries = &entries },
+        struct {
+            fn resolve(_: *const anyopaque, obj: Object) Object {
+                return obj;
+            }
+        }.resolve,
+        &dummy_ctx,
+    );
+    defer enc.deinit();
+
+    try std.testing.expect(!enc.is_cid);
+    try std.testing.expectEqual(@as(u8, 1), enc.bytes_per_char);
+    try std.testing.expectEqual(@as(f64, 777), enc.widths.getWidth(65));
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(&[_]u8{'A'}, runtime.arrayListWriter(&output, std.testing.allocator));
+    try std.testing.expectEqualStrings("Ω", output.items);
+}
+
+test "ToUnicode two-byte codespace promotes CID decoding" {
+    const cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\1 begincodespacerange
+        \\<0000> <FFFF>
+        \\endcodespacerange
+        \\1 beginbfchar
+        \\<0041> <0042>
+        \\endbfchar
+        \\endcmap
+        \\end
+        \\end
+    ;
+
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    try parseToUnicodeCMap(std.testing.allocator, .{
+        .dict = .{ .entries = &.{} },
+        .data = cmap,
+    }, &enc);
+
+    try std.testing.expect(enc.is_cid);
+    try std.testing.expectEqual(@as(u8, 2), enc.bytes_per_char);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(&[_]u8{ 0x00, 0x41 }, runtime.arrayListWriter(&output, std.testing.allocator));
+    try std.testing.expectEqualStrings("B", output.items);
+}
+
+test "ToUnicode mixed code spaces decode variable-width CID codes" {
+    const cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\2 begincodespacerange
+        \\<00> <7F>
+        \\<8100> <81FF>
+        \\endcodespacerange
+        \\2 beginbfchar
+        \\<41> <0041>
+        \\<8101> <03A9>
+        \\endbfchar
+        \\endcmap
+        \\end
+        \\end
+    ;
+
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    try parseToUnicodeCMap(std.testing.allocator, .{
+        .dict = .{ .entries = &.{} },
+        .data = cmap,
+    }, &enc);
+
+    try std.testing.expect(enc.is_cid);
+    try std.testing.expectEqual(@as(u8, 2), enc.bytes_per_char);
+    try std.testing.expectEqual(@as(usize, 2), enc.cmap_codespaces.len);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(&[_]u8{ 0x41, 0x81, 0x01 }, runtime.arrayListWriter(&output, std.testing.allocator));
+    try std.testing.expectEqualStrings("AΩ", output.items);
+}
+
+test "ToUnicode bfrange arrays map explicit and multi-codepoint destinations" {
+    const cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\1 begincodespacerange
+        \\<0000> <FFFF>
+        \\endcodespacerange
+        \\2 beginbfrange
+        \\<0100> <0102> [<0058> <0059> <005A>]
+        \\<0200> <0200> [<00660069>]
+        \\endbfrange
+        \\endcmap
+        \\end
+        \\end
+    ;
+
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+
+    try parseToUnicodeCMap(std.testing.allocator, .{
+        .dict = .{ .entries = &.{} },
+        .data = cmap,
+    }, &enc);
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    try enc.decode(
+        &[_]u8{ 0x01, 0x00, 0x01, 0x01, 0x01, 0x02, 0x02, 0x00 },
+        runtime.arrayListWriter(&output, std.testing.allocator),
+    );
+    try std.testing.expectEqualStrings("XYZfi", output.items);
 }
 
 test "glyph widths" {

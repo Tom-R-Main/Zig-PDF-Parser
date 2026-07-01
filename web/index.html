@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ZPDF - Fast PDF Text Extraction</title>
+    <title>pdf-parser - Fast PDF Text Extraction</title>
     <style>
         * {
             box-sizing: border-box;
@@ -178,7 +178,7 @@
     </style>
 </head>
 <body>
-    <h1>ZPDF</h1>
+    <h1>pdf-parser</h1>
     <p class="subtitle">Fast PDF text extraction in the browser via WebAssembly</p>
 
     <div class="drop-zone" id="dropZone">
@@ -224,20 +224,20 @@
     </div>
 
     <footer>
-        Powered by <a href="https://github.com/Lulzx/zpdf">ZPDF</a> -
+        Powered by pdf-parser -
         Pure Zig PDF parser compiled to WebAssembly (~90KB)
     </footer>
 
     <script>
-        // ZPDF WebAssembly wrapper
-        class ZPDF {
+        // pdf-parser WebAssembly wrapper
+        class PDFParser {
             constructor() {
                 this.wasm = null;
                 this.memory = null;
             }
 
             async init() {
-                const response = await fetch('zpdf.wasm');
+                const response = await fetch('pdf_parser.wasm');
                 const bytes = await response.arrayBuffer();
 
                 const imports = {
@@ -358,10 +358,10 @@
         let zpdf = null;
 
         async function init() {
-            zpdf = new ZPDF();
+            zpdf = new PDFParser();
             try {
                 await zpdf.init();
-                console.log('ZPDF initialized');
+                console.log('pdf-parser initialized');
             } catch (e) {
                 showError('Failed to load WASM module: ' + e.message);
             }

@@ -4,13 +4,14 @@
 //! These are hand-crafted PDFs that exercise specific features.
 
 const std = @import("std");
+const runtime = @import("runtime.zig");
 
 /// Generate a minimal PDF with plain text
 pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     // Header
     try writer.writeAll("%PDF-1.4\n");
@@ -41,7 +42,7 @@ pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 
     // Build content stream
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(allocator);
-    var cw = content.writer(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
 
     try cw.writeAll("BT\n");
     try cw.writeAll("/F1 12 Tf\n");
@@ -85,7 +86,7 @@ pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
     var offsets: std.ArrayList(u64) = .empty;
     defer offsets.deinit(allocator);
 
@@ -130,7 +131,7 @@ pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []
         // Content stream
         var content: std.ArrayList(u8) = .empty;
         defer content.deinit(allocator);
-        var cw = content.writer(allocator);
+        var cw = runtime.arrayListWriter(&content, allocator);
         try cw.writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
         try cw.print("({s}) Tj\n", .{text});
         try cw.writeAll("ET\n");
@@ -166,7 +167,7 @@ pub fn generateTJPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -199,13 +200,129 @@ pub fn generateTJPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate a PDF that exercises text-object state and line operators.
+pub fn generateTextStatePdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content =
+        "BT\n" ++
+        "/F1 12 Tf\n" ++
+        "14 TL\n" ++
+        "100 700 Td\n" ++
+        "(Line1) Tj\n" ++
+        "T*\n" ++
+        "(Line2) Tj\n" ++
+        "(Line3) '\n" ++
+        "0 0 (Line4) \"\n" ++
+        "ET\n" ++
+        "(Outside) Tj\n";
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}endstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a simple 8-bit font PDF whose ToUnicode CMap remaps 0x41 to U+03A9.
+pub fn generateSimpleToUnicodePdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 12 Tf\n100 700 Td\n<41> Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}endstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>\nendobj\n");
+
+    const tounicode_cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\/CMapName /SimpleToUnicode def
+        \\1 begincodespacerange
+        \\<00> <FF>
+        \\endcodespacerange
+        \\1 beginbfchar
+        \\<41> <03A9>
+        \\endbfchar
+        \\endcmap
+        \\CMapName currentdict /CMap defineresource pop
+        \\end
+        \\end
+    ;
+
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ tounicode_cmap.len, tounicode_cmap });
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 7\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+
+    try writer.writeAll("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with a CID font (Type0 composite font with ToUnicode)
 /// Uses UTF-16BE encoded text and a ToUnicode CMap for mapping
 pub fn generateCIDFontPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -298,7 +415,7 @@ pub fn generateCIDFontPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generatePdfWithoutPageType(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -317,7 +434,7 @@ pub fn generatePdfWithoutPageType(allocator: std.mem.Allocator, text: []const u8
 
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(allocator);
-    var cw = content.writer(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
     try cw.writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
     try cw.print("({s}) Tj\n", .{text});
     try cw.writeAll("ET\n");
@@ -346,7 +463,7 @@ pub fn generatePdfWithoutPageType(allocator: std.mem.Allocator, text: []const u8
 pub fn generateInlineImagePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -393,7 +510,7 @@ pub fn generateInlineImagePdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateSuperscriptPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -487,7 +604,7 @@ pub fn generateIncrementalPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     // ===== ORIGINAL PDF =====
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
@@ -554,7 +671,7 @@ pub fn generateEncryptedPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
 
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -638,7 +755,7 @@ test "generate incremental PDF" {
 pub fn generateMetadataPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -686,7 +803,7 @@ pub fn generateMetadataPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateOutlinePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -756,7 +873,7 @@ pub fn generateOutlinePdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateLinkPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -805,7 +922,7 @@ pub fn generateLinkPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateFormFieldPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -860,7 +977,7 @@ pub fn generateFormFieldPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generatePageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -961,7 +1078,7 @@ test "generate page label PDF" {
 pub fn generateNestedOutlinePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1038,7 +1155,7 @@ pub fn generateNestedOutlinePdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateMultiLinkPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1098,7 +1215,7 @@ pub fn generateMultiLinkPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateAllFormFieldsPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1162,7 +1279,7 @@ pub fn generateAllFormFieldsPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateExtendedPageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1198,7 +1315,7 @@ pub fn generateExtendedPageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
 
         var content: std.ArrayList(u8) = .empty;
         defer content.deinit(allocator);
-        var cw = content.writer(allocator);
+        var cw = runtime.arrayListWriter(&content, allocator);
         try cw.writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
         try cw.print("({s}) Tj\n", .{page_texts[pg]});
         try cw.writeAll("ET\n");
@@ -1236,7 +1353,7 @@ pub fn generateExtendedPageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateImagePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1290,7 +1407,7 @@ pub fn generateImagePdf(allocator: std.mem.Allocator) ![]u8 {
 pub fn generateUtf16BePdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
-    var writer = pdf.writer(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 

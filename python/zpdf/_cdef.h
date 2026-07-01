@@ -21,6 +21,12 @@ typedef struct {
     const char* text;
     size_t text_len;
     double font_size;
+    uint32_t page_index;
+    uint8_t source_kind;
+    float confidence;
+    int32_t block_id;
+    int32_t line_id;
+    int32_t mcid;
 } CTextSpan;
 
 CTextSpan* zpdf_extract_bounds(ZpdfDocument* doc, int page_num, size_t* out_count);

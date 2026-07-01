@@ -1,6 +1,7 @@
-# zpdf (alpha stage - early version)
+# pdf-parser (alpha stage)
 
-A PDF text extraction library written in Zig.
+A Zig PDF text extraction library evolving from a fast native extraction
+kernel into a hybrid, adaptive parser.
 
 ## Features
 
@@ -18,7 +19,7 @@ A PDF text extraction library written in Zig.
 
 Text extraction performance on Apple M4 Pro (reading order):
 
-| Document | Pages | zpdf | MuPDF | Speedup |
+| Document | Pages | pdf-parser | MuPDF | Speedup |
 |----------|------:|-----:|------:|--------:|
 | [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **582ms** | 2,152ms | 3.7x |
 | [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **640ms** | 1,130ms | 1.8x |
@@ -29,7 +30,7 @@ Text extraction performance on Apple M4 Pro (reading order):
 
 ## Requirements
 
-- Zig 0.15.2 or later
+- Zig 0.16.0
 
 ## Building
 
@@ -44,18 +45,16 @@ zig build test         # Run tests
 
 ```zig
 const std = @import("std");
-const zpdf = @import("zpdf");
+const pdf_parser = @import("pdf_parser");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
 
-    const doc = try zpdf.Document.open(allocator, "file.pdf");
+    const doc = try pdf_parser.Document.open(allocator, "file.pdf");
     defer doc.close();
 
     var buf: [4096]u8 = undefined;
-    var bw = std.fs.File.stdout().writer(&buf);
+    var bw = std.Io.File.stdout().writer(init.io, &buf);
     const writer = &bw.interface;
     defer writer.flush() catch {};
 
@@ -68,11 +67,11 @@ pub fn main() !void {
 ### CLI
 
 ```bash
-zpdf extract document.pdf              # Extract all pages (uses structure tree for reading order)
-zpdf extract -p 1-10 document.pdf      # Extract pages 1-10
-zpdf extract -o out.txt document.pdf   # Output to file
-zpdf info document.pdf                 # Show document info
-zpdf bench document.pdf                # Run benchmark
+pdf-parser extract document.pdf              # Extract all pages (uses structure tree for reading order)
+pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
+pdf-parser extract -o out.txt document.pdf   # Output to file
+pdf-parser info document.pdf                 # Show document info
+pdf-parser bench document.pdf                # Run benchmark
 ```
 
 ### Python
@@ -128,13 +127,13 @@ src/
 ├── markdown.zig     # Markdown export
 └── simd.zig         # SIMD-accelerated parsing
 
-python/zpdf/         # Python bindings (cffi)
+python/zpdf/         # Python bindings (cffi, legacy package name)
 examples/            # Usage examples
 ```
 
 ## Reading Order
 
-zpdf extracts text in logical reading order using a three-tier approach:
+pdf-parser extracts text in logical reading order using a three-tier approach:
 
 1. **Structure Tree** (preferred): Uses the PDF's semantic structure for tagged/accessible PDFs (PDF/UA). Correctly handles multi-column layouts, sidebars, tables, and captions.
 
@@ -150,7 +149,7 @@ zpdf extracts text in logical reading order using a three-tier approach:
 
 ## Comparison
 
-| Feature | zpdf | pdfium | MuPDF |
+| Feature | pdf-parser | pdfium | MuPDF |
 |---------|------|--------|-------|
 | **Text Extraction** | | | |
 | Stream order | Yes | Yes | Yes |
@@ -170,7 +169,7 @@ zpdf extracts text in logical reading order using a three-tier approach:
 
 *\*CID fonts: Works when CMap is embedded directly.*
 
-**Use zpdf when:** Batch processing, tagged PDFs (PDF/UA), simple text extraction, Zig integration.
+**Use pdf-parser when:** Batch processing, tagged PDFs (PDF/UA), simple text extraction, Zig integration.
 
 **Use pdfium when:** Browser integration, full PDF support, proven stability.
 
@@ -178,4 +177,6 @@ zpdf extracts text in logical reading order using a three-tier approach:
 
 ## License
 
-CC0 - Public Domain
+MIT for new implementation work. This fork began from `Lulzx/zpdf` at commit
+`5eba7ade759d32b0d425eb905c17106b484dee30`, which was released under CC0-1.0;
+see `NOTICE.md` and `LICENSES/CC0-1.0.txt` for provenance.

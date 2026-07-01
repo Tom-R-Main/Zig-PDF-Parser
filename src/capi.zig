@@ -1,4 +1,5 @@
 const std = @import("std");
+const runtime = @import("runtime.zig");
 const builtin = @import("builtin");
 const zpdf = @import("root.zig");
 
@@ -56,7 +57,8 @@ export fn zpdf_extract_page(handle: ?*ZpdfDocument, page_num: c_int, out_len: *u
         if (page_num < 0) return null;
 
         var buffer: std.ArrayList(u8) = .empty;
-        doc.extractText(@intCast(page_num), buffer.writer(c_allocator)) catch return null;
+        defer buffer.deinit(c_allocator);
+        doc.extractText(@intCast(page_num), runtime.arrayListWriter(&buffer, c_allocator)) catch return null;
 
         const slice = buffer.toOwnedSlice(c_allocator) catch return null;
         out_len.* = slice.len;
@@ -115,6 +117,12 @@ pub const CTextSpan = extern struct {
     text: [*]const u8,
     text_len: usize,
     font_size: f64,
+    page_index: u32,
+    source_kind: u8,
+    confidence: f32,
+    block_id: i32,
+    line_id: i32,
+    mcid: i32,
 };
 
 export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count: *usize) ?[*]CTextSpan {
@@ -151,6 +159,12 @@ export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count
                 .text = text_copy.ptr,
                 .text_len = text_copy.len,
                 .font_size = span.font_size,
+                .page_index = span.page_index,
+                .source_kind = @intFromEnum(span.source),
+                .confidence = span.confidence,
+                .block_id = optionalU32ToC(span.block_id),
+                .line_id = optionalU32ToC(span.line_id),
+                .mcid = span.mcid orelse -1,
             };
             copied = i + 1;
         }
@@ -159,6 +173,10 @@ export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count
         return c_spans.ptr;
     }
     return null;
+}
+
+fn optionalU32ToC(value: ?u32) i32 {
+    return if (value) |v| @intCast(v) else -1;
 }
 
 export fn zpdf_free_bounds(ptr: ?[*]CTextSpan, count: usize) void {

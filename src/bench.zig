@@ -1,25 +1,21 @@
-//! ZPDF Benchmark Suite
+//! pdf-parser Benchmark Suite
 //!
 //! Measures extraction performance against MuPDF baseline.
 //! Run with: zig build bench -- path/to/test.pdf
 
 const std = @import("std");
+const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
 
 const WARMUP_RUNS = 2;
 const BENCH_RUNS = 5;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub const main = runtime.MainWithArgs(mainInner).main;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
+fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len < 2) {
         std.debug.print(
-            \\ZPDF Benchmark Suite
+            \\pdf-parser Benchmark Suite
             \\
             \\Usage: zig build bench -- <pdf_file> [options]
             \\
@@ -41,34 +37,32 @@ pub fn main() !void {
 
     std.debug.print(
         \\╔══════════════════════════════════════════════════════════════╗
-        \\║                    ZPDF Benchmark Suite                      ║
+        \\║                  pdf-parser Benchmark Suite                   ║
         \\╚══════════════════════════════════════════════════════════════╝
         \\
         \\File: {s}
         \\
     , .{pdf_path});
 
-    // Get file size
-    const file = std.fs.cwd().openFile(pdf_path, .{}) catch |err| {
+    // Get file size.
+    const file_size = runtime.fileSizeCwd(pdf_path) catch |err| {
         std.debug.print("Error opening file: {}\n", .{err});
         return;
     };
-    const file_size = (try file.stat()).size;
-    file.close();
 
     std.debug.print("Size: {d:.2} MB\n\n", .{@as(f64, @floatFromInt(file_size)) / (1024 * 1024)});
 
-    // Benchmark ZPDF
-    std.debug.print("── ZPDF Performance ───────────────────────────────────────────\n", .{});
+    // Benchmark pdf-parser.
+    std.debug.print("── pdf-parser Performance ─────────────────────────────────────\n", .{});
 
     var times: [BENCH_RUNS]i128 = undefined;
     var page_count: usize = 0;
 
     for (&times) |*t| {
-        const start = std.time.nanoTimestamp();
+        const start = runtime.nanoTimestamp();
 
         const doc = zpdf.Document.open(allocator, pdf_path) catch |err| {
-            std.debug.print("ZPDF error: {}\n", .{err});
+            std.debug.print("pdf-parser error: {}\n", .{err});
             return;
         };
         page_count = doc.pages.items.len;
@@ -80,7 +74,7 @@ pub fn main() !void {
 
         doc.close();
 
-        const end = std.time.nanoTimestamp();
+        const end = runtime.nanoTimestamp();
         t.* = end - start;
     }
 
@@ -130,14 +124,10 @@ const CharCounter = struct {
     }
 };
 
-fn benchMutool(allocator: std.mem.Allocator, pdf_path: []const u8) !f64 {
-    const start = std.time.nanoTimestamp();
+fn benchMutool(_: std.mem.Allocator, pdf_path: []const u8) !f64 {
+    const start = runtime.nanoTimestamp();
 
-    var child = std.process.Child.init(&.{ "mutool", "draw", "-F", "txt", "-o", "/dev/null", pdf_path }, allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
+    _ = try runtime.runIgnored(&.{ "mutool", "draw", "-F", "txt", "-o", "/dev/null", pdf_path });
 
-    _ = try child.spawnAndWait();
-
-    return @floatFromInt(std.time.nanoTimestamp() - start);
+    return @floatFromInt(runtime.nanoTimestamp() - start);
 }

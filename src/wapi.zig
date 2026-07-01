@@ -4,6 +4,7 @@
 //! Uses memory-based loading since file I/O is not available in WASM.
 
 const std = @import("std");
+const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
 
 // Use WASM page allocator
@@ -86,7 +87,8 @@ export fn zpdf_extract_page(handle: i32, page_num: i32, out_len: *usize) ?[*]u8 
 
     if (documents[idx]) |doc| {
         var buffer: std.ArrayList(u8) = .empty;
-        doc.extractText(@intCast(page_num), buffer.writer(wasm_allocator)) catch return null;
+        defer buffer.deinit(wasm_allocator);
+        doc.extractText(@intCast(page_num), runtime.arrayListWriter(&buffer, wasm_allocator)) catch return null;
 
         // Handle empty buffer - toOwnedSlice returns undefined ptr for empty slice
         if (buffer.items.len == 0) {
@@ -192,6 +194,12 @@ pub const TextSpan = extern struct {
     text_ptr: [*]const u8,
     text_len: usize,
     font_size: f64,
+    page_index: u32,
+    source_kind: u8,
+    confidence: f32,
+    block_id: i32,
+    line_id: i32,
+    mcid: i32,
 };
 
 /// Extract text with bounding boxes from a page
@@ -232,6 +240,12 @@ export fn zpdf_extract_bounds(handle: i32, page_num: i32, out_count: *usize) ?[*
                 .text_ptr = text_copy.ptr,
                 .text_len = text_copy.len,
                 .font_size = span.font_size,
+                .page_index = span.page_index,
+                .source_kind = @intFromEnum(span.source),
+                .confidence = span.confidence,
+                .block_id = optionalU32ToC(span.block_id),
+                .line_id = optionalU32ToC(span.line_id),
+                .mcid = span.mcid orelse -1,
             };
             copied = i + 1;
         }
@@ -240,6 +254,10 @@ export fn zpdf_extract_bounds(handle: i32, page_num: i32, out_count: *usize) ?[*
         return c_spans.ptr;
     }
     return null;
+}
+
+fn optionalU32ToC(value: ?u32) i32 {
+    return if (value) |v| @intCast(v) else -1;
 }
 
 /// Free bounds array

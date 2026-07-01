@@ -1,11 +1,11 @@
-# zpdf
+# pdf-parser Python bindings
 
-High-performance PDF text extraction powered by Zig. ~4x faster than MuPDF on large documents.
+High-performance PDF text extraction powered by Zig.
 
 ## Install
 
 ```bash
-pip install zpdf
+pip install pdf-parser
 ```
 
 ## Usage
@@ -54,4 +54,5 @@ Text extraction on Apple M4 Pro:
 
 ## License
 
-CC0-1.0
+MIT for new implementation work. The inherited native base came from
+`Lulzx/zpdf` under CC0-1.0; see the repository `NOTICE.md`.

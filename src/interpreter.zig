@@ -16,6 +16,7 @@ const parser = @import("parser.zig");
 const encoding_mod = @import("encoding.zig");
 const decompress = @import("decompress.zig");
 const simd = @import("simd.zig");
+const runtime = @import("runtime.zig");
 pub const layout = @import("layout.zig");
 
 pub const TextSpan = layout.TextSpan;
@@ -100,7 +101,7 @@ pub fn ContentInterpreter(comptime Writer: type) type {
                 .writer = writer,
                 .data = data,
                 .resolve_fn = resolve_fn,
-                .state_stack = std.ArrayList(GraphicsState).init(allocator),
+                .state_stack = .empty,
                 .state = .{},
                 .fonts = std.StringHashMap(FontEncoding).init(allocator),
                 .resources = resources,
@@ -110,7 +111,7 @@ pub fn ContentInterpreter(comptime Writer: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.state_stack.deinit();
+            self.state_stack.deinit(self.allocator);
 
             var it = self.fonts.valueIterator();
             while (it.next()) |font| {
@@ -169,10 +170,10 @@ pub fn ContentInterpreter(comptime Writer: type) type {
         fn executeOperator(self: *Self, op: []const u8, operands: []const Operand) !void {
             // Graphics state operators
             if (std.mem.eql(u8, op, "q")) {
-                try self.state_stack.append(self.state);
+                try self.state_stack.append(self.allocator, self.state);
             } else if (std.mem.eql(u8, op, "Q")) {
-                if (self.state_stack.items.len > 0) {
-                    self.state = self.state_stack.pop();
+                if (self.state_stack.pop()) |state| {
+                    self.state = state;
                 }
             } else if (std.mem.eql(u8, op, "cm")) {
                 // Modify CTM - not critical for basic text extraction
@@ -186,23 +187,23 @@ pub fn ContentInterpreter(comptime Writer: type) type {
             }
             // Text state operators
             else if (std.mem.eql(u8, op, "Tc")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     self.state.text.char_spacing = operands[0].asNumber();
                 }
             } else if (std.mem.eql(u8, op, "Tw")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     self.state.text.word_spacing = operands[0].asNumber();
                 }
             } else if (std.mem.eql(u8, op, "Tz")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     self.state.text.horizontal_scale = operands[0].asNumber();
                 }
             } else if (std.mem.eql(u8, op, "TL")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     self.state.text.leading = operands[0].asNumber();
                 }
             } else if (std.mem.eql(u8, op, "Tf")) {
-                if (operands.len >= 2) {
+                if (self.in_text and operands.len >= 2) {
                     self.state.text.font_name = operands[0].asName();
                     self.state.text.font_size = operands[1].asNumber();
                     try self.loadFont(operands[0].asName() orelse "");
@@ -210,26 +211,26 @@ pub fn ContentInterpreter(comptime Writer: type) type {
             } else if (std.mem.eql(u8, op, "Tr")) {
                 // Text rendering mode - not needed for extraction
             } else if (std.mem.eql(u8, op, "Ts")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     self.state.text.rise = operands[0].asNumber();
                 }
             }
             // Text positioning operators
             else if (std.mem.eql(u8, op, "Td")) {
-                if (operands.len >= 2) {
+                if (self.in_text and operands.len >= 2) {
                     const tx = operands[0].asNumber();
                     const ty = operands[1].asNumber();
                     try self.moveText(tx, ty);
                 }
             } else if (std.mem.eql(u8, op, "TD")) {
-                if (operands.len >= 2) {
+                if (self.in_text and operands.len >= 2) {
                     const tx = operands[0].asNumber();
                     const ty = operands[1].asNumber();
                     self.state.text.leading = -ty;
                     try self.moveText(tx, ty);
                 }
             } else if (std.mem.eql(u8, op, "Tm")) {
-                if (operands.len >= 6) {
+                if (self.in_text and operands.len >= 6) {
                     const new_y = operands[5].asNumber();
                     try self.checkLineBreak(new_y);
 
@@ -244,29 +245,29 @@ pub fn ContentInterpreter(comptime Writer: type) type {
                     self.state.text.line_matrix = self.state.text.text_matrix;
                 }
             } else if (std.mem.eql(u8, op, "T*")) {
-                try self.moveText(0, -self.state.text.leading);
+                if (self.in_text) try self.moveToNextLine();
             }
             // Text showing operators
             else if (std.mem.eql(u8, op, "Tj")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     try self.showText(operands[0]);
                 }
             } else if (std.mem.eql(u8, op, "TJ")) {
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
                     try self.showTextArray(operands[0]);
                 }
             } else if (std.mem.eql(u8, op, "'")) {
                 // Move to next line and show text
-                try self.moveText(0, -self.state.text.leading);
-                if (operands.len >= 1) {
+                if (self.in_text and operands.len >= 1) {
+                    try self.moveToNextLine();
                     try self.showText(operands[0]);
                 }
             } else if (std.mem.eql(u8, op, "\"")) {
                 // Set spacing, move to next line, show text
-                if (operands.len >= 3) {
+                if (self.in_text and operands.len >= 3) {
                     self.state.text.word_spacing = operands[0].asNumber();
                     self.state.text.char_spacing = operands[1].asNumber();
-                    try self.moveText(0, -self.state.text.leading);
+                    try self.moveToNextLine();
                     try self.showText(operands[2]);
                 }
             }
@@ -287,6 +288,11 @@ pub fn ContentInterpreter(comptime Writer: type) type {
             self.state.text.line_matrix[4] = new_x;
             self.state.text.line_matrix[5] = new_y;
             self.state.text.text_matrix = self.state.text.line_matrix;
+        }
+
+        fn moveToNextLine(self: *Self) !void {
+            const leading = if (self.state.text.leading != 0) self.state.text.leading else self.state.text.font_size;
+            try self.moveText(0, -leading);
         }
 
         fn checkLineBreak(self: *Self, new_y: f64) !void {
@@ -374,14 +380,16 @@ pub fn ContentInterpreter(comptime Writer: type) type {
             };
 
             if (font_dict) |fd| {
+                const dummy_ctx: u8 = 0;
                 const enc = try encoding_mod.parseFontEncoding(
                     self.allocator,
                     fd,
                     struct {
-                        fn resolve(obj: Object) !Object {
+                        fn resolve(_: *const anyopaque, obj: Object) Object {
                             return obj; // Simplified - would need proper resolution
                         }
                     }.resolve,
+                    &dummy_ctx,
                 );
                 try self.fonts.put(font_name, enc);
             } else {
@@ -400,13 +408,19 @@ pub const SpanCollector = struct {
     current_x: f64 = 0,
     current_y: f64 = 0,
     current_font_size: f64 = 12,
+    current_font_name: ?[]const u8 = null,
+    page_index: u32 = 0,
+    current_block_id: u32 = 0,
+    current_line_id: u32 = 0,
+    current_mcid: ?i32 = null,
     avg_char_width: f64 = 0.5,
 
-    pub fn init(allocator: std.mem.Allocator) SpanCollector {
+    pub fn init(allocator: std.mem.Allocator, page_index: u32) SpanCollector {
         return .{
             .spans = .empty,
             .text_buffer = .empty,
             .allocator = allocator,
+            .page_index = page_index,
         };
     }
 
@@ -421,12 +435,24 @@ pub const SpanCollector = struct {
     }
 
     pub fn setPosition(self: *SpanCollector, x: f64, y: f64) void {
+        if (self.current_y != y and self.spans.items.len > 0) {
+            self.current_line_id += 1;
+        }
         self.current_x = x;
         self.current_y = y;
     }
 
     pub fn setFontSize(self: *SpanCollector, size: f64) void {
         self.current_font_size = size;
+    }
+
+    pub fn setFont(self: *SpanCollector, name: ?[]const u8, size: f64) void {
+        self.current_font_name = name;
+        self.current_font_size = size;
+    }
+
+    pub fn setMcid(self: *SpanCollector, mcid: ?i32) void {
+        self.current_mcid = mcid;
     }
 
     pub fn writeAll(self: *SpanCollector, data: []const u8) !void {
@@ -446,14 +472,22 @@ pub const SpanCollector = struct {
         const width = @as(f64, @floatFromInt(text.len)) * self.current_font_size * self.avg_char_width;
         const height = self.current_font_size * 1.2;
 
-        try self.spans.append(self.allocator, .{
-            .x0 = self.current_x,
-            .y0 = self.current_y,
-            .x1 = self.current_x + width,
-            .y1 = self.current_y + height,
+        try self.spans.append(self.allocator, TextSpan.init(.{
+            .page_index = self.page_index,
+            .bbox = .{
+                .x0 = self.current_x,
+                .y0 = self.current_y,
+                .x1 = self.current_x + width,
+                .y1 = self.current_y + height,
+            },
             .text = text,
-            .font_size = self.current_font_size,
-        });
+            .source = .native_pdf,
+            .confidence = 1.0,
+            .font = .{ .name = self.current_font_name, .size = self.current_font_size },
+            .block_id = self.current_block_id,
+            .line_id = self.current_line_id,
+            .mcid = self.current_mcid,
+        }));
 
         self.current_x += width;
         self.text_buffer.clearRetainingCapacity();
@@ -1038,4 +1072,62 @@ test "lexer text operators" {
         const tok = (try lexer.next()).?;
         try std.testing.expectEqualStrings(expected, tok.operator);
     }
+}
+
+fn resolveNoop(_: ObjRef) Object {
+    return .null;
+}
+
+test "content interpreter ignores text outside text objects" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    const writer = runtime.arrayListWriter(&output, std.testing.allocator);
+    var interp = ContentInterpreter(@TypeOf(writer)).init(
+        arena.allocator(),
+        writer,
+        "",
+        null,
+        resolveNoop,
+    );
+    defer interp.deinit();
+
+    try interp.process("(Outside) Tj BT /F1 12 Tf (Inside) Tj ET (After) Tj");
+    try std.testing.expectEqualStrings("Inside", output.items);
+}
+
+test "content interpreter applies leading and line text operators" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+
+    const writer = runtime.arrayListWriter(&output, std.testing.allocator);
+    var interp = ContentInterpreter(@TypeOf(writer)).init(
+        arena.allocator(),
+        writer,
+        "",
+        null,
+        resolveNoop,
+    );
+    defer interp.deinit();
+
+    const content =
+        "BT " ++
+        "/F1 12 Tf " ++
+        "14 TL " ++
+        "100 700 Td " ++
+        "(Line1) Tj " ++
+        "T* " ++
+        "(Line2) Tj " ++
+        "(Line3) ' " ++
+        "0 0 (Line4) \" " ++
+        "ET";
+
+    try interp.process(content);
+    try std.testing.expectEqualStrings("Line1\nLine2\nLine3\nLine4", output.items);
 }

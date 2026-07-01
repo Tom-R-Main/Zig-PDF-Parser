@@ -11,18 +11,24 @@ __all__ = ["Document", "PageInfo", "TextSpan", "ZpdfError", "InvalidPdfError", "
 
 class TextSpan:
     """A text span with bounding box coordinates."""
-    __slots__ = ("x0", "y0", "x1", "y1", "text", "font_size")
+    __slots__ = ("x0", "y0", "x1", "y1", "text", "font_size", "page_index", "source_kind", "confidence", "block_id", "line_id", "mcid")
 
-    def __init__(self, x0: float, y0: float, x1: float, y1: float, text: str, font_size: float):
+    def __init__(self, x0: float, y0: float, x1: float, y1: float, text: str, font_size: float, page_index: int = 0, source_kind: int = 0, confidence: float = 1.0, block_id: int = -1, line_id: int = -1, mcid: int = -1):
         self.x0 = x0
         self.y0 = y0
         self.x1 = x1
         self.y1 = y1
         self.text = text
         self.font_size = font_size
+        self.page_index = page_index
+        self.source_kind = source_kind
+        self.confidence = confidence
+        self.block_id = block_id
+        self.line_id = line_id
+        self.mcid = mcid
 
     def __repr__(self):
-        return f"TextSpan(x0={self.x0:.1f}, y0={self.y0:.1f}, x1={self.x1:.1f}, y1={self.y1:.1f}, text={self.text!r}, font_size={self.font_size:.1f})"
+        return f"TextSpan(page_index={self.page_index}, x0={self.x0:.1f}, y0={self.y0:.1f}, x1={self.x1:.1f}, y1={self.y1:.1f}, text={self.text!r}, font_size={self.font_size:.1f}, confidence={self.confidence:.2f})"
 
     @property
     def width(self) -> float:
@@ -204,6 +210,12 @@ class Document:
                     y1=span.y1,
                     text=text,
                     font_size=span.font_size,
+                    page_index=span.page_index,
+                    source_kind=span.source_kind,
+                    confidence=span.confidence,
+                    block_id=span.block_id,
+                    line_id=span.line_id,
+                    mcid=span.mcid,
                 ))
             return spans
         finally:

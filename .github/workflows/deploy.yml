@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p deploy
           cp web/index.html deploy/
-          cp zig-out/bin/zpdf.wasm deploy/
+          cp zig-out/bin/pdf_parser.wasm deploy/
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

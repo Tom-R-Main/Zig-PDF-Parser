@@ -1,6 +1,6 @@
-//! ZPDF - Zero-copy PDF Parser
+//! pdf-parser - Zero-copy PDF Parser
 //!
-//! High-performance PDF text extraction library designed to beat MuPDF.
+//! High-performance native extraction kernel for an adaptive PDF parser.
 //!
 //! Key design principles:
 //! 1. Memory-mapped, zero-copy where possible
@@ -10,6 +10,7 @@
 //! 5. Explicit error budgets - caller controls tolerance
 
 const std = @import("std");
+const runtime = @import("runtime.zig");
 const builtin = @import("builtin");
 const native_os = builtin.os.tag;
 
@@ -148,31 +149,15 @@ pub const Document = struct {
             @compileError("File I/O is not available on WASM. Use openFromMemory instead.");
         }
 
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-
-        const stat = try file.stat();
-        const size = stat.size;
-
         if (comptime is_windows) {
-            // Windows: read file into allocated memory (no mmap support)
-            const data = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), size);
-            errdefer allocator.free(data);
-            const bytes_read = try file.readAll(data);
-            if (bytes_read != size) {
-                return error.UnexpectedEof;
-            }
+            const data = try runtime.readFileAllocAlignedCwd(
+                allocator,
+                path,
+                .fromByteUnits(std.heap.page_size_min),
+            );
             return openFromMemoryOwnedAlloc(allocator, data, config);
         } else {
-            // POSIX: memory map the file
-            const data = try std.posix.mmap(
-                null,
-                size,
-                std.posix.PROT.READ,
-                .{ .TYPE = .PRIVATE },
-                file.handle,
-                0,
-            );
+            const data = try runtime.mmapFileReadOnlyCwd(allocator, path);
             return openFromMemoryOwned(allocator, data, config);
         }
     }
@@ -562,7 +547,7 @@ pub const Document = struct {
         // Lazy-load fonts for this page (needed for proper text decoding)
         self.ensurePageFonts(page_num);
 
-        var collector = interpreter.SpanCollector.init(allocator);
+        var collector = interpreter.SpanCollector.init(allocator, @intCast(page_num));
         errdefer collector.deinit();
 
         {
@@ -778,7 +763,7 @@ pub const Document = struct {
         const content = pagetree.getPageContents(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache) catch return output.toOwnedSlice(allocator);
 
         self.ensurePageFonts(page_num);
-        try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, output.writer(allocator));
+        try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, runtime.arrayListWriter(&output, allocator));
         return output.toOwnedSlice(allocator);
     }
 
@@ -863,7 +848,7 @@ pub const Document = struct {
 
                 if (content.len == 0) continue;
                 self.ensurePageFonts(page_num);
-                try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, result.writer(allocator));
+                try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, runtime.arrayListWriter(&result, allocator));
             }
         }
 
@@ -1117,7 +1102,7 @@ pub const Document = struct {
             if (s.len > 0) switch (s[0]) {
                 'D' => {
                     // Decimal
-                    buf.writer(allocator).print("{}", .{page_number}) catch return null;
+                    runtime.arrayListWriter(&buf, allocator).print("{}", .{page_number}) catch return null;
                 },
                 'r' => {
                     // Lowercase roman
@@ -1136,7 +1121,7 @@ pub const Document = struct {
                     formatAlpha(&buf, allocator, page_number, true) catch return null;
                 },
                 else => {
-                    buf.writer(allocator).print("{}", .{page_number}) catch return null;
+                    runtime.arrayListWriter(&buf, allocator).print("{}", .{page_number}) catch return null;
                 },
             };
         }
@@ -1144,7 +1129,7 @@ pub const Document = struct {
         if (buf.items.len == 0) {
             // No style, just return prefix or page number
             if (prefix == null) {
-                buf.writer(allocator).print("{}", .{page_idx + 1}) catch return null;
+                runtime.arrayListWriter(&buf, allocator).print("{}", .{page_idx + 1}) catch return null;
             }
         }
 
@@ -1153,7 +1138,7 @@ pub const Document = struct {
 
     fn formatRoman(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, number: usize, upper: bool) !void {
         if (number == 0 or number > 3999) {
-            try buf.writer(allocator).print("{}", .{number});
+            try runtime.arrayListWriter(buf, allocator).print("{}", .{number});
             return;
         }
         const values = [_]struct { v: u16, s_upper: []const u8, s_lower: []const u8 }{
@@ -1182,7 +1167,7 @@ pub const Document = struct {
 
     fn formatAlpha(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, number: usize, upper: bool) !void {
         if (number == 0) {
-            try buf.writer(allocator).print("{}", .{number});
+            try runtime.arrayListWriter(buf, allocator).print("{}", .{number});
             return;
         }
         // a=1, b=2, ..., z=26, aa=27, ab=28, ...
@@ -1992,7 +1977,11 @@ fn extractContentStream(
     var prev_y: f64 = 0;
     var current_x: f64 = 0;
     var current_y: f64 = 0;
+    var line_start_x: f64 = 0;
+    var line_start_y: f64 = 0;
     var font_size: f64 = 12;
+    var text_leading: f64 = 0;
+    var in_text = false;
     // Track the font size of the last shown text for newline threshold.
     // Superscripts/subscripts switch to a smaller Tf *before* their Tm, so
     // using raw font_size would make the threshold too small and produce
@@ -2014,10 +2003,33 @@ fn extractContentStream(
         const op = token.operator;
         if (op.len > 0) switch (op[0]) {
             'B' => switch (mode) {
-                .stream => if (op.len == 2 and op[1] == 'T') {},
-                .bounds => {},
+                .stream => if (op.len == 2 and op[1] == 'T') {
+                    in_text = true;
+                    prev_x = 0;
+                    prev_y = 0;
+                    current_x = 0;
+                    current_y = 0;
+                    line_start_x = 0;
+                    line_start_y = 0;
+                },
+                .bounds => |collector| {
+                    if (op.len == 2 and op[1] == 'T') {
+                        in_text = true;
+                        current_x = 0;
+                        current_y = 0;
+                        line_start_x = 0;
+                        line_start_y = 0;
+                        collector.setPosition(current_x, current_y);
+                    } else if (std.mem.eql(u8, op, "BDC")) {
+                        collector.setMcid(extractMcidFromOperands(operands[0..operand_count], if (operand_count >= 2) 1 else 0));
+                    } else if (std.mem.eql(u8, op, "BMC")) {
+                        collector.setMcid(null);
+                    }
+                },
                 .structured => |extractor| {
-                    if (std.mem.eql(u8, op, "BDC")) {
+                    if (op.len == 2 and op[1] == 'T') {
+                        in_text = true;
+                    } else if (std.mem.eql(u8, op, "BDC")) {
                         if (operand_count >= 2) {
                             const tag = operands[0].asName() orelse "Unknown";
                             const mcid = extractMcidFromOperands(operands[0..operand_count], 1);
@@ -2032,10 +2044,21 @@ fn extractContentStream(
                 },
             },
             'E' => switch (mode) {
-                .stream => if (op.len == 2 and op[1] == 'T') {},
-                .bounds => {},
+                .stream => {
+                    if (op.len == 2 and op[1] == 'T') in_text = false;
+                },
+                .bounds => |collector| {
+                    if (op.len == 2 and op[1] == 'T') {
+                        try collector.flush();
+                        in_text = false;
+                    } else if (std.mem.eql(u8, op, "EMC")) {
+                        collector.setMcid(null);
+                    }
+                },
                 .structured => |extractor| {
-                    if (std.mem.eql(u8, op, "EMC")) {
+                    if (op.len == 2 and op[1] == 'T') {
+                        in_text = false;
+                    } else if (std.mem.eql(u8, op, "EMC")) {
                         extractor.endMarkedContent();
                     }
                 },
@@ -2050,19 +2073,30 @@ fn extractContentStream(
             },
             'T' => if (op.len == 2) switch (op[1]) {
                 'f' => if (operand_count >= 2) {
+                    const font_name = if (operands[0] == .name) operands[0].name else null;
                     if (operands[0] == .name) {
                         current_font = lookupFont(font_cache, &key_buf, page_num, operands[0].name);
                     }
-                    font_size = operands[1].number;
+                    font_size = operands[1].asNumber();
                     if (mode == .bounds) {
-                        mode.bounds.setFontSize(font_size);
+                        mode.bounds.setFont(font_name, font_size);
                     }
                 },
+                'L' => if (in_text and operand_count >= 1) {
+                    text_leading = operands[0].asNumber();
+                },
                 'd', 'D' => if (operand_count >= 2) {
+                    if (!in_text) {
+                        operand_count = 0;
+                        continue;
+                    }
+                    const tx = operands[0].asNumber();
+                    const ty = operands[1].asNumber();
+                    if (op[1] == 'D') text_leading = -ty;
                     switch (mode) {
                         .stream => {
                             const wmode = if (current_font) |f| f.wmode else 0;
-                            const displacement = if (wmode == 1) operands[0].number else operands[1].number;
+                            const displacement = if (wmode == 1) tx else ty;
                             // Use max(font_size, last_text_font_size) so that a small
                             // superscript font doesn't shrink the line-break threshold
                             // below the displacement used for super/subscript positioning.
@@ -2070,11 +2104,17 @@ fn extractContentStream(
                             if (@abs(displacement) > ref_size * 0.7 and prev_y != 0) {
                                 try writer.writeByte('\n');
                             }
-                            prev_y = operands[1].number;
+                            current_x = line_start_x + tx;
+                            current_y = line_start_y + ty;
+                            line_start_x = current_x;
+                            line_start_y = current_y;
+                            prev_y = current_y;
                         },
                         .bounds => |collector| {
-                            current_x += operands[0].number;
-                            current_y += operands[1].number;
+                            current_x = line_start_x + tx;
+                            current_y = line_start_y + ty;
+                            line_start_x = current_x;
+                            line_start_y = current_y;
                             try collector.flush();
                             collector.setPosition(current_x, current_y);
                         },
@@ -2082,21 +2122,33 @@ fn extractContentStream(
                     }
                 },
                 'm' => if (operand_count >= 6) {
+                    if (!in_text) {
+                        operand_count = 0;
+                        continue;
+                    }
+                    const tx = operands[4].asNumber();
+                    const ty = operands[5].asNumber();
                     switch (mode) {
                         .stream => {
                             const wmode = if (current_font) |f| f.wmode else 0;
-                            const new_pos = if (wmode == 1) operands[4].number else operands[5].number;
+                            const new_pos = if (wmode == 1) tx else ty;
                             const prev_pos = if (wmode == 1) prev_x else prev_y;
                             const ref_size = @max(font_size, last_text_font_size);
                             if (@abs(new_pos - prev_pos) > ref_size * 0.7 and prev_pos != 0) {
                                 try writer.writeByte('\n');
                             }
-                            prev_x = operands[4].number;
-                            prev_y = operands[5].number;
+                            current_x = tx;
+                            current_y = ty;
+                            line_start_x = tx;
+                            line_start_y = ty;
+                            prev_x = tx;
+                            prev_y = ty;
                         },
                         .bounds => |collector| {
-                            current_x = operands[4].number;
-                            current_y = operands[5].number;
+                            current_x = tx;
+                            current_y = ty;
+                            line_start_x = tx;
+                            line_start_y = ty;
                             try collector.flush();
                             collector.setPosition(current_x, current_y);
                         },
@@ -2104,11 +2156,22 @@ fn extractContentStream(
                     }
                 },
                 '*' => switch (mode) {
-                    .stream => try writer.writeByte('\n'),
-                    .bounds => |collector| try collector.flush(),
+                    .stream => if (in_text) try writer.writeByte('\n'),
+                    .bounds => |collector| if (in_text) {
+                        try collector.flush();
+                        const leading = if (text_leading != 0) text_leading else font_size;
+                        current_x = line_start_x;
+                        current_y = line_start_y - leading;
+                        line_start_y = current_y;
+                        collector.setPosition(current_x, current_y);
+                    },
                     .structured => {},
                 },
                 'j' => if (operand_count >= 1) {
+                    if (!in_text) {
+                        operand_count = 0;
+                        continue;
+                    }
                     switch (mode) {
                         .stream => {
                             try writeTextWithFont(operands[0], current_font, writer);
@@ -2123,6 +2186,10 @@ fn extractContentStream(
                     }
                 },
                 'J' => if (operand_count >= 1) {
+                    if (!in_text) {
+                        operand_count = 0;
+                        continue;
+                    }
                     switch (mode) {
                         .stream => {
                             try writeTJArrayWithFont(operands[0], current_font, writer);
@@ -2139,6 +2206,10 @@ fn extractContentStream(
                 else => {},
             },
             '\'' => if (operand_count >= 1) {
+                if (!in_text) {
+                    operand_count = 0;
+                    continue;
+                }
                 switch (mode) {
                     .stream => {
                         try writer.writeByte('\n');
@@ -2147,6 +2218,11 @@ fn extractContentStream(
                     },
                     .bounds => |collector| {
                         try collector.flush();
+                        const leading = if (text_leading != 0) text_leading else font_size;
+                        current_x = line_start_x;
+                        current_y = line_start_y - leading;
+                        line_start_y = current_y;
+                        collector.setPosition(current_x, current_y);
                         try writeTextWithFont(operands[0], current_font, collector);
                     },
                     .structured => |extractor| {
@@ -2157,6 +2233,10 @@ fn extractContentStream(
                 }
             },
             '"' => if (operand_count >= 3) {
+                if (!in_text) {
+                    operand_count = 0;
+                    continue;
+                }
                 switch (mode) {
                     .stream => {
                         try writer.writeByte('\n');
@@ -2165,6 +2245,11 @@ fn extractContentStream(
                     },
                     .bounds => |collector| {
                         try collector.flush();
+                        const leading = if (text_leading != 0) text_leading else font_size;
+                        current_x = line_start_x;
+                        current_y = line_start_y - leading;
+                        line_start_y = current_y;
+                        collector.setPosition(current_x, current_y);
                         try writeTextWithFont(operands[2], current_font, collector);
                     },
                     .structured => |extractor| {
@@ -2477,7 +2562,7 @@ pub fn extractTextFromFile(allocator: std.mem.Allocator, path: []const u8) ![]u8
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
-    try doc.extractAllText(output.writer(allocator));
+    try doc.extractAllText(runtime.arrayListWriter(&output, allocator));
 
     return output.toOwnedSlice(allocator);
 }
@@ -2490,7 +2575,7 @@ pub fn extractTextFromMemory(allocator: std.mem.Allocator, data: []const u8) ![]
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
 
-    try doc.extractAllText(output.writer(allocator));
+    try doc.extractAllText(runtime.arrayListWriter(&output, allocator));
 
     return output.toOwnedSlice(allocator);
 }

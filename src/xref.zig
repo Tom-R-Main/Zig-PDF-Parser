@@ -55,7 +55,9 @@ pub const XRefTable = struct {
 
 pub const XRefParseError = error{
     StartXrefNotFound,
+    InvalidStartXrefValue,
     InvalidXrefOffset,
+    XrefSectionNotFound,
     InvalidXrefTable,
     InvalidXrefStream,
     InvalidTrailer,
@@ -67,9 +69,29 @@ pub const XRefParseError = error{
 /// hash_allocator: used for XRefTable.entries HashMap
 /// parse_allocator: used for parsing objects (can be arena)
 pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8) XRefParseError!XRefTable {
-    // Find startxref from end of file
-    const startxref_offset = findStartXref(data) orelse return XRefParseError.StartXrefNotFound;
+    // Prefer startxref, but recover by scanning for a traditional xref table
+    // when the pointer is missing, corrupt, or points into unrelated bytes.
+    const startxref_offset = readStartXref(data) catch |err| {
+        const recovered = findRecoverableXrefOffset(data) orelse return err;
+        return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered);
+    };
 
+    return parseXRefFromOffset(hash_allocator, parse_allocator, data, startxref_offset) catch |err| switch (err) {
+        XRefParseError.InvalidXrefOffset,
+        XRefParseError.XrefSectionNotFound,
+        XRefParseError.InvalidXrefTable,
+        XRefParseError.InvalidXrefStream,
+        XRefParseError.InvalidTrailer,
+        => {
+            const recovered = findRecoverableXrefOffset(data) orelse return err;
+            if (recovered == startxref_offset) return err;
+            return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered);
+        },
+        else => return err,
+    };
+}
+
+fn parseXRefFromOffset(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8, startxref_offset: u64) XRefParseError!XRefTable {
     var xref = XRefTable.init(hash_allocator);
     errdefer xref.deinit();
 
@@ -88,22 +110,77 @@ pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.All
                 xref.trailer = trailer;
             }
             current_offset = getTrailerPrev(trailer);
-        } else {
+        } else if (looksLikeIndirectObject(xref_start)) {
             // XRef stream (starts with object definition like "10 0 obj")
             const trailer = try parseXrefStream(parse_allocator, data, offset, &xref);
             if (xref.trailer.entries.len == 0) {
                 xref.trailer = trailer;
             }
             current_offset = getTrailerPrev(trailer);
+        } else {
+            return XRefParseError.XrefSectionNotFound;
         }
     }
 
     return xref;
 }
 
+fn findRecoverableXrefOffset(data: []const u8) ?u64 {
+    var search_end = data.len;
+
+    while (search_end > 0) {
+        const pos = std.mem.lastIndexOf(u8, data[0..search_end], "xref") orelse return null;
+        search_end = pos;
+
+        if (pos >= 5 and std.mem.eql(u8, data[pos - 5 .. pos], "start")) {
+            continue;
+        }
+
+        if (looksLikeTraditionalXrefCandidate(data, pos)) return @intCast(pos);
+    }
+
+    return null;
+}
+
+fn looksLikeTraditionalXrefCandidate(data: []const u8, pos: usize) bool {
+    const before_ok = pos == 0 or data[pos - 1] == '\n' or data[pos - 1] == '\r';
+    const after = pos + 4;
+    if (!before_ok or after > data.len or (after < data.len and !isWhitespace(data[after]))) {
+        return false;
+    }
+
+    var scan = after;
+    while (scan < data.len and isWhitespace(data[scan])) scan += 1;
+    return scan < data.len and data[scan] >= '0' and data[scan] <= '9';
+}
+
+fn readStartXref(data: []const u8) XRefParseError!u64 {
+    const marker = findStartXrefMarker(data) orelse return XRefParseError.StartXrefNotFound;
+    var pos = marker + 9; // len("startxref")
+
+    while (pos < data.len and isWhitespace(data[pos])) {
+        pos += 1;
+    }
+
+    const start = pos;
+    var offset: u64 = 0;
+    while (pos < data.len and data[pos] >= '0' and data[pos] <= '9') {
+        offset = std.math.mul(u64, offset, 10) catch return XRefParseError.InvalidStartXrefValue;
+        offset = std.math.add(u64, offset, data[pos] - '0') catch return XRefParseError.InvalidStartXrefValue;
+        pos += 1;
+    }
+
+    if (pos == start) return XRefParseError.InvalidStartXrefValue;
+    return offset;
+}
+
 /// Find "startxref" near end of file and parse the offset
 /// For incremental updates, we need the LAST startxref (the most recent one)
 fn findStartXref(data: []const u8) ?u64 {
+    return readStartXref(data) catch null;
+}
+
+fn findStartXrefMarker(data: []const u8) ?usize {
     // PDF spec says startxref should be in last 1024 bytes
     const search_start = if (data.len > 1024) data.len - 1024 else 0;
     const search_region = data[search_start..];
@@ -122,21 +199,24 @@ fn findStartXref(data: []const u8) ?u64 {
     }
 
     const startxref_pos = last_pos orelse return null;
-    var pos = startxref_pos + 9; // len("startxref")
+    return search_start + startxref_pos;
+}
 
-    // Skip whitespace
-    while (pos < search_region.len and isWhitespace(search_region[pos])) {
-        pos += 1;
+fn looksLikeIndirectObject(data: []const u8) bool {
+    var pos: usize = 0;
+    if (!scanUnsigned(data, &pos)) return false;
+    while (pos < data.len and isWhitespace(data[pos])) pos += 1;
+    if (!scanUnsigned(data, &pos)) return false;
+    while (pos < data.len and isWhitespace(data[pos])) pos += 1;
+    return pos + 3 <= data.len and std.mem.eql(u8, data[pos..][0..3], "obj");
+}
+
+fn scanUnsigned(data: []const u8, pos: *usize) bool {
+    const start = pos.*;
+    while (pos.* < data.len and data[pos.*] >= '0' and data[pos.*] <= '9') {
+        pos.* += 1;
     }
-
-    // Parse offset
-    var offset: u64 = 0;
-    while (pos < search_region.len and search_region[pos] >= '0' and search_region[pos] <= '9') {
-        offset = offset * 10 + (search_region[pos] - '0');
-        pos += 1;
-    }
-
-    return offset;
+    return pos.* > start;
 }
 
 /// Parse traditional xref table format
@@ -460,4 +540,135 @@ test "find startxref" {
     const data = "lots of content here\nstartxref\n12345\n%%EOF";
     const offset = findStartXref(data);
     try std.testing.expectEqual(@as(u64, 12345), offset.?);
+}
+
+test "parse xref rejects non-numeric startxref deterministically" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\startxref
+        \\not-a-number
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        XRefParseError.InvalidStartXrefValue,
+        parseXRef(std.testing.allocator, arena.allocator(), pdf_data),
+    );
+}
+
+test "parse xref reports offset that is not an xref section when unrecoverable" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\not an xref section
+        \\startxref
+        \\9
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        XRefParseError.XrefSectionNotFound,
+        parseXRef(std.testing.allocator, arena.allocator(), pdf_data),
+    );
+}
+
+test "parse xref recovers when startxref points at unrelated bytes" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\1 0 obj
+        \\<< /Type /Catalog >>
+        \\endobj
+        \\xref
+        \\0 2
+        \\0000000000 65535 f
+        \\0000000009 00000 n
+        \\trailer
+        \\<< /Size 2 /Root 1 0 R >>
+        \\startxref
+        \\9
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var recovered = try parseXRef(std.testing.allocator, arena.allocator(), pdf_data);
+    defer recovered.deinit();
+
+    try std.testing.expect(recovered.entries.contains(1));
+    try std.testing.expectEqual(@as(i64, 2), recovered.trailer.getInt("Size").?);
+}
+
+test "parse xref recovers when startxref is absent" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\1 0 obj
+        \\<< /Type /Catalog >>
+        \\endobj
+        \\xref
+        \\0 2
+        \\0000000000 65535 f
+        \\0000000009 00000 n
+        \\trailer
+        \\<< /Size 2 /Root 1 0 R >>
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var recovered = try parseXRef(std.testing.allocator, arena.allocator(), pdf_data);
+    defer recovered.deinit();
+
+    try std.testing.expect(recovered.entries.contains(1));
+    try std.testing.expectEqual(@as(i64, 2), recovered.trailer.getInt("Size").?);
+}
+
+test "parse xref rejects malformed trailer deterministically" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\xref
+        \\0 1
+        \\0000000000 65535 f
+        \\trailer
+        \\[ /not-a-dict ]
+        \\startxref
+        \\9
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        XRefParseError.InvalidTrailer,
+        parseXRef(std.testing.allocator, arena.allocator(), pdf_data),
+    );
+}
+
+test "parse xref reports invalid Prev offset deterministically" {
+    const pdf_data =
+        \\%PDF-1.4
+        \\xref
+        \\0 1
+        \\0000000000 65535 f
+        \\trailer
+        \\<< /Size 1 /Prev 9999 >>
+        \\startxref
+        \\9
+        \\%%EOF
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectError(
+        XRefParseError.InvalidXrefOffset,
+        parseXRef(std.testing.allocator, arena.allocator(), pdf_data),
+    );
 }

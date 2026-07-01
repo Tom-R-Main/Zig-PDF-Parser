@@ -1,13 +1,77 @@
 const std = @import("std");
 
+pub const SourceKind = enum(u8) {
+    native_pdf,
+    embedded_ocr,
+    fresh_ocr,
+    table_model,
+    formula_model,
+    manual,
+};
+
+pub const BBox = struct {
+    x0: f64 = 0,
+    y0: f64 = 0,
+    x1: f64 = 0,
+    y1: f64 = 0,
+};
+
+pub const FontMetadata = struct {
+    name: ?[]const u8 = null,
+    size: f64 = 0,
+    encoding: ?[]const u8 = null,
+    has_to_unicode: ?bool = null,
+};
+
 pub const TextSpan = struct {
+    page_index: u32 = 0,
+    bbox: BBox = .{},
     x0: f64,
     y0: f64,
     x1: f64,
     y1: f64,
     text: []const u8,
+    source: SourceKind = .native_pdf,
+    confidence: f32 = 1.0,
+    font: FontMetadata = .{},
     font_size: f64,
     page: u32 = 0,
+    block_id: ?u32 = null,
+    line_id: ?u32 = null,
+    mcid: ?i32 = null,
+
+    pub fn init(args: struct {
+        page_index: u32 = 0,
+        bbox: BBox,
+        text: []const u8,
+        source: SourceKind = .native_pdf,
+        confidence: f32 = 1.0,
+        font: FontMetadata = .{},
+        block_id: ?u32 = null,
+        line_id: ?u32 = null,
+        mcid: ?i32 = null,
+    }) TextSpan {
+        var font = args.font;
+        const font_size = if (font.size != 0) font.size else args.bbox.y1 - args.bbox.y0;
+        font.size = font_size;
+        return .{
+            .page_index = args.page_index,
+            .bbox = args.bbox,
+            .x0 = args.bbox.x0,
+            .y0 = args.bbox.y0,
+            .x1 = args.bbox.x1,
+            .y1 = args.bbox.y1,
+            .text = args.text,
+            .source = args.source,
+            .confidence = args.confidence,
+            .font = font,
+            .font_size = font_size,
+            .page = args.page_index,
+            .block_id = args.block_id,
+            .line_id = args.line_id,
+            .mcid = args.mcid,
+        };
+    }
 };
 
 pub const TextWord = struct {
@@ -503,14 +567,17 @@ fn mergeSpanBounds(spans: []const TextSpan) TextSpan {
         y1 = @max(y1, s.y1);
     }
 
-    return TextSpan{
-        .x0 = x0,
-        .y0 = y0,
-        .x1 = x1,
-        .y1 = y1,
+    return TextSpan.init(.{
+        .page_index = spans[0].page_index,
+        .bbox = .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 },
         .text = spans[0].text,
-        .font_size = spans[0].font_size,
-    };
+        .source = spans[0].source,
+        .confidence = spans[0].confidence,
+        .font = spans[0].font,
+        .block_id = spans[0].block_id,
+        .line_id = spans[0].line_id,
+        .mcid = spans[0].mcid,
+    });
 }
 
 fn mergeBounds(lines: []const TextLine) TextSpan {
@@ -526,12 +593,40 @@ fn mergeBounds(lines: []const TextLine) TextSpan {
         y1 = @max(y1, l.bounds.y1);
     }
 
-    return TextSpan{
-        .x0 = x0,
-        .y0 = y0,
-        .x1 = x1,
-        .y1 = y1,
+    return TextSpan.init(.{
+        .page_index = lines[0].bounds.page_index,
+        .bbox = .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 },
         .text = "",
-        .font_size = lines[0].bounds.font_size,
-    };
+        .source = lines[0].bounds.source,
+        .confidence = lines[0].bounds.confidence,
+        .font = lines[0].bounds.font,
+        .block_id = lines[0].bounds.block_id,
+        .line_id = lines[0].bounds.line_id,
+        .mcid = lines[0].bounds.mcid,
+    });
+}
+
+test "TextSpan carries provenance and semantic identity" {
+    const span = TextSpan.init(.{
+        .page_index = 3,
+        .bbox = .{ .x0 = 10, .y0 = 20, .x1 = 30, .y1 = 42 },
+        .text = "alpha",
+        .source = .native_pdf,
+        .confidence = 0.98,
+        .font = .{ .name = "F1", .size = 12, .encoding = "WinAnsiEncoding", .has_to_unicode = true },
+        .block_id = 7,
+        .line_id = 9,
+        .mcid = 11,
+    });
+
+    try std.testing.expectEqual(@as(u32, 3), span.page_index);
+    try std.testing.expectEqual(@as(u32, 3), span.page);
+    try std.testing.expectEqual(@as(f64, 10), span.bbox.x0);
+    try std.testing.expectEqual(@as(f64, 30), span.x1);
+    try std.testing.expectEqual(SourceKind.native_pdf, span.source);
+    try std.testing.expectEqual(@as(f32, 0.98), span.confidence);
+    try std.testing.expectEqualStrings("F1", span.font.name.?);
+    try std.testing.expectEqual(@as(u32, 7), span.block_id.?);
+    try std.testing.expectEqual(@as(u32, 9), span.line_id.?);
+    try std.testing.expectEqual(@as(i32, 11), span.mcid.?);
 }

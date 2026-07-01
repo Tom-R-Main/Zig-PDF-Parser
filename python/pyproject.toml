@@ -3,14 +3,14 @@ requires = ["setuptools>=61.0", "cffi>=1.15", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zpdf"
+name = "pdf-parser"
 version = "0.1.0"
 description = "High-performance PDF text extraction powered by Zig"
 readme = "README.md"
-license = "CC0-1.0"
+license = "MIT"
 requires-python = ">=3.8"
 dependencies = ["cffi>=1.15"]
-authors = [{name = "Lulzx"}]
+authors = [{name = "Thomas Main"}]
 keywords = ["pdf", "text-extraction", "parser", "zig"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -26,9 +26,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Lulzx/zpdf"
-Repository = "https://github.com/Lulzx/zpdf"
-Issues = "https://github.com/Lulzx/zpdf/issues"
+Homepage = "https://github.com/thomasmain/pdf-parser"
+Repository = "https://github.com/thomasmain/pdf-parser"
+Issues = "https://github.com/thomasmain/pdf-parser/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
