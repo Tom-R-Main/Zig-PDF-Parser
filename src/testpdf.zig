@@ -1581,6 +1581,113 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+const PositionedText = struct {
+    text: []const u8,
+    x: u32,
+    y: u32,
+};
+
+/// Generate a born-digital two-column page with header and footer furniture.
+pub fn generateTwoColumnPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Chapter 1", .x = 72, .y = 760 },
+        .{ .text = "Left column first line", .x = 72, .y = 720 },
+        .{ .text = "Left column second line", .x = 72, .y = 700 },
+        .{ .text = "Left column third line", .x = 72, .y = 680 },
+        .{ .text = "Right column first line", .x = 330, .y = 720 },
+        .{ .text = "Right column second line", .x = 330, .y = 700 },
+        .{ .text = "Right column third line", .x = 330, .y = 680 },
+        .{ .text = "42", .x = 300, .y = 60 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
+}
+
+/// Generate a table-like page with repeated aligned numeric columns.
+pub fn generateTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Table 1.", .x = 72, .y = 740 },
+        .{ .text = "Year", .x = 80, .y = 720 },
+        .{ .text = "Revenue", .x = 200, .y = 720 },
+        .{ .text = "Margin", .x = 320, .y = 720 },
+        .{ .text = "2019", .x = 80, .y = 700 },
+        .{ .text = "100", .x = 200, .y = 700 },
+        .{ .text = "20", .x = 320, .y = 700 },
+        .{ .text = "2020", .x = 80, .y = 680 },
+        .{ .text = "125", .x = 200, .y = 680 },
+        .{ .text = "23", .x = 320, .y = 680 },
+        .{ .text = "2021", .x = 80, .y = 660 },
+        .{ .text = "140", .x = 200, .y = 660 },
+        .{ .text = "25", .x = 320, .y = 660 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
+}
+
+/// Generate a formula-like page with compact math-heavy notation.
+pub fn generateFormulaPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Formula 1.", .x = 72, .y = 740 },
+        .{ .text = "E=mc^2++++////^^^^____", .x = 120, .y = 710 },
+        .{ .text = "alpha+beta/gamma====", .x = 120, .y = 690 },
+        .{ .text = "sum(x_i^2)>=delta++++", .x = 120, .y = 670 },
+        .{ .text = "normal paragraph text", .x = 72, .y = 620 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
+}
+
+fn generatePositionedTextPdf(allocator: std.mem.Allocator, cells: []const PositionedText) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
+    try cw.writeAll("BT\n/F1 12 Tf\n");
+    for (cells) |cell| {
+        try cw.print("1 0 0 1 {} {} Tm\n({s}) Tj\n", .{
+            cell.x,
+            cell.y,
+            cell.text,
+        });
+    }
+    try cw.writeAll("ET\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a page with aligned numeric columns and formula-heavy notation.
 pub fn generateTableFormulaPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;

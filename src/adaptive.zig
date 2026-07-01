@@ -102,6 +102,7 @@ pub const PageRoute = struct {
 pub const LayoutBlockSummary = struct {
     page_index: u32,
     block_index: u32,
+    column_index: u32,
     bbox: BBox,
     kind: BlockKind,
     confidence: f32,
@@ -133,6 +134,23 @@ pub const RegionRoute = struct {
     }) RegionRoute {
         const table = if (args.specialist) |analysis| analysis.table else null;
         const formula = if (args.specialist) |analysis| analysis.formula else null;
+        var route = args.score.route;
+        var mask = reasonMask(args.score, args.specialist);
+        if (args.block_kind) |kind| {
+            switch (kind) {
+                .table_candidate => {
+                    route.needs_table_model = true;
+                    route.max_signal = @max(route.max_signal, if (table) |score| score.confidence else 0.72);
+                    mask |= reasonBit(.table_route_stub);
+                },
+                .formula_candidate => {
+                    route.needs_formula_model = true;
+                    route.max_signal = @max(route.max_signal, if (formula) |score| score.confidence else 0.76);
+                    mask |= reasonBit(.formula_route_stub);
+                },
+                else => {},
+            }
+        }
         return .{
             .page_index = args.score.page_index,
             .region_index = args.region_index,
@@ -145,8 +163,8 @@ pub const RegionRoute = struct {
             .signals = args.score.signals,
             .table = table,
             .formula = formula,
-            .route = args.score.route,
-            .reason_mask = reasonMask(args.score, args.specialist),
+            .route = route,
+            .reason_mask = mask,
         };
     }
 };
@@ -168,7 +186,10 @@ pub const Result = struct {
     }
 
     pub fn render(self: *const Result, allocator: std.mem.Allocator, format: OutputFormat) ![]u8 {
-        return renderOutput(allocator, &self.reconciled, format);
+        return switch (format) {
+            .debug_svg => renderDebugSvg(allocator, self),
+            else => renderOutput(allocator, &self.reconciled, format),
+        };
     }
 };
 
@@ -424,6 +445,7 @@ pub fn layoutBlockSummary(page_index: u32, block_index: u32, block: layout.Layou
     return .{
         .page_index = page_index,
         .block_index = block_index,
+        .column_index = block.column_index,
         .bbox = block.bounds.bbox,
         .kind = block.kind,
         .confidence = block.confidence,
@@ -503,6 +525,90 @@ pub fn renderOutput(
     };
 }
 
+pub fn renderDebugSvg(allocator: std.mem.Allocator, result: *const Result) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const box = debugDocumentBox(result);
+    try writer.print(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{d:.2} {d:.2} {d:.2} {d:.2}\" data-debug-svg=\"adaptive\">\n",
+        .{ box.x0, box.y0, @max(1, width(box)), @max(1, height(box)) },
+    );
+    try writer.writeAll("<style>");
+    try writer.writeAll(".page{fill:#fff;stroke:#111827;stroke-width:1.2}.native-span{fill:#2563eb;fill-opacity:.18;stroke:#2563eb;stroke-width:.55}.layout-block{fill:none;stroke-width:1.3;stroke-dasharray:5 3}.layout-col-0{stroke:#16a34a}.layout-col-1{stroke:#7c3aed}.layout-col-n{stroke:#0891b2}.table-candidate{fill:#f59e0b;fill-opacity:.16;stroke:#b45309;stroke-width:2}.formula-candidate{fill:#ec4899;fill-opacity:.16;stroke:#be185d;stroke-width:2}.header-footer{fill:#64748b;fill-opacity:.12;stroke:#475569;stroke-width:1.5}.ocr-needed{fill:#ef4444;fill-opacity:.10;stroke:#dc2626;stroke-width:2.2;stroke-dasharray:8 4}.low-confidence{fill:#f97316;fill-opacity:.10;stroke:#ea580c;stroke-width:1.7;stroke-dasharray:3 3}.label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:8px;paint-order:stroke;stroke:white;stroke-width:2px;stroke-linejoin:round}.legend{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9px}");
+    try writer.writeAll("</style>\n");
+    try writer.writeAll("<rect class=\"page\" width=\"100%\" height=\"100%\"/>\n");
+    try writer.writeAll("<g class=\"legend\"><text x=\"8\" y=\"14\">debug-svg: native spans, layout blocks, table/formula candidates, headers/footers, OCR/low confidence regions</text></g>\n");
+
+    try writer.writeAll("<g id=\"native-spans\">\n");
+    for (result.reconciled.spans) |span| {
+        try writer.print(
+            "<rect class=\"native-span\" data-page=\"{d}\" data-source=\"{s}\" x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\"><title>",
+            .{ span.span.page_index, sourceName(span.chosen_source), span.span.bbox.x0, span.span.bbox.y0, width(span.span.bbox), height(span.span.bbox) },
+        );
+        try writeXmlEscaped(writer, span.span.text);
+        try writer.writeAll("</title></rect>\n");
+    }
+    try writer.writeAll("</g>\n");
+
+    try writer.writeAll("<g id=\"layout-blocks\">\n");
+    for (result.layout_blocks) |block| {
+        const class = if (block.kind == .header or block.kind == .footer)
+            "layout-block header-footer"
+        else if (block.column_index == 0)
+            "layout-block layout-col-0"
+        else if (block.column_index == 1)
+            "layout-block layout-col-1"
+        else
+            "layout-block layout-col-n";
+        try writer.print(
+            "<rect class=\"{s}\" data-layer=\"layout-block\" data-page=\"{d}\" data-block=\"{d}\" data-column=\"{d}\" data-kind=\"{s}\" data-removed=\"{}\" data-confidence=\"{d:.3}\" x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\"/>\n",
+            .{
+                class,
+                block.page_index,
+                block.block_index,
+                block.column_index,
+                blockKindName(block.kind),
+                block.removed,
+                block.confidence,
+                block.bbox.x0,
+                block.bbox.y0,
+                width(block.bbox),
+                height(block.bbox),
+            },
+        );
+        try writer.print(
+            "<text class=\"label\" data-layer=\"layout-label\" x=\"{d:.2}\" y=\"{d:.2}\" fill=\"{s}\">block {d} col {d} {s}</text>\n",
+            .{ block.bbox.x0, block.bbox.y0 - 3, columnColor(block.column_index), block.block_index, block.column_index, blockKindName(block.kind) },
+        );
+    }
+    try writer.writeAll("</g>\n");
+
+    try writer.writeAll("<g id=\"route-regions\">\n");
+    for (result.page_routes) |route| {
+        if (!route.route.needs_ocr and routeConfidence(route.route) >= 0.45) continue;
+        const class = if (route.route.needs_ocr) "ocr-needed" else "low-confidence";
+        try writeRouteRect(writer, class, "page", route.page_index, null, route.bbox, route.route, route.reason_mask);
+    }
+    for (result.region_routes) |route| {
+        if (isTableCandidate(route)) {
+            try writeRouteRect(writer, "table-candidate", "table", route.page_index, route.region_index, route.bbox, route.route, route.reason_mask);
+        }
+        if (isFormulaCandidate(route)) {
+            try writeRouteRect(writer, "formula-candidate", "formula", route.page_index, route.region_index, route.bbox, route.route, route.reason_mask);
+        }
+        if (route.route.needs_ocr or routeConfidence(route.route) < 0.45) {
+            const class = if (route.route.needs_ocr) "ocr-needed" else "low-confidence";
+            try writeRouteRect(writer, class, "region", route.page_index, route.region_index, route.bbox, route.route, route.reason_mask);
+        }
+    }
+    try writer.writeAll("</g>\n");
+
+    try writer.writeAll("</svg>\n");
+    return output.toOwnedSlice(allocator);
+}
+
 fn renderText(allocator: std.mem.Allocator, doc: *const ReconciledDocument) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
@@ -523,6 +629,180 @@ fn renderText(allocator: std.mem.Allocator, doc: *const ReconciledDocument) ![]u
     }
 
     return output.toOwnedSlice(allocator);
+}
+
+fn writeRouteRect(
+    writer: anytype,
+    class: []const u8,
+    layer: []const u8,
+    page_index: u32,
+    region_index: ?u32,
+    bbox: BBox,
+    route: RouteDecision,
+    reason_mask: RouteReasonMask,
+) !void {
+    try writer.print(
+        "<rect class=\"{s}\" data-layer=\"{s}\" data-page=\"{d}\" ",
+        .{ class, layer, page_index },
+    );
+    if (region_index) |index| try writer.print("data-region=\"{d}\" ", .{index});
+    try writer.print(
+        "data-route=\"{s}\" data-confidence=\"{d:.3}\" data-reasons=\"",
+        .{ routeName(route), routeConfidence(route) },
+    );
+    try writeReasonCsv(writer, reason_mask);
+    try writer.print(
+        "\" x=\"{d:.2}\" y=\"{d:.2}\" width=\"{d:.2}\" height=\"{d:.2}\"/>\n",
+        .{ bbox.x0, bbox.y0, width(bbox), height(bbox) },
+    );
+}
+
+fn debugDocumentBox(result: *const Result) BBox {
+    var maybe_box: ?BBox = null;
+    for (result.page_routes) |route| maybe_box = unionMaybeBox(maybe_box, route.bbox);
+    for (result.layout_blocks) |block| maybe_box = unionMaybeBox(maybe_box, block.bbox);
+    for (result.region_routes) |route| maybe_box = unionMaybeBox(maybe_box, route.bbox);
+    for (result.reconciled.spans) |span| maybe_box = unionMaybeBox(maybe_box, span.span.bbox);
+    return maybe_box orelse .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 };
+}
+
+fn unionMaybeBox(existing: ?BBox, next: BBox) BBox {
+    if (width(next) <= 0 and height(next) <= 0) return existing orelse next;
+    if (existing) |box| {
+        return .{
+            .x0 = @min(box.x0, next.x0),
+            .y0 = @min(box.y0, next.y0),
+            .x1 = @max(box.x1, next.x1),
+            .y1 = @max(box.y1, next.y1),
+        };
+    }
+    return next;
+}
+
+fn isTableCandidate(route: RegionRoute) bool {
+    return route.route.needs_table_model or
+        hasReason(route.reason_mask, .table_alignment) or
+        hasReason(route.reason_mask, .table_route_stub) or
+        route.block_kind == .table_candidate or
+        (route.table != null and route.table.?.needsSpecialist());
+}
+
+fn isFormulaCandidate(route: RegionRoute) bool {
+    return route.route.needs_formula_model or
+        hasReason(route.reason_mask, .formula_density) or
+        hasReason(route.reason_mask, .formula_route_stub) or
+        route.block_kind == .formula_candidate or
+        (route.formula != null and route.formula.?.needsSpecialist());
+}
+
+fn routeName(route: RouteDecision) []const u8 {
+    if (route.native_fast_path) return "use_native";
+    if (route.needs_ocr) return "queue_ocr";
+    if (route.needs_table_model and route.needs_formula_model) return "candidate_table_formula";
+    if (route.needs_table_model) return "candidate_table";
+    if (route.needs_formula_model) return "candidate_formula";
+    if (route.needs_layout_model) return "candidate_layout";
+    return "review";
+}
+
+fn routeConfidence(route: RouteDecision) f32 {
+    const signal = @max(0.0, @min(1.0, route.max_signal));
+    if (route.native_fast_path) return 1.0 - signal;
+    return signal;
+}
+
+fn writeReasonCsv(writer: anytype, mask: RouteReasonMask) !void {
+    const reasons = [_]RouteReason{
+        .native_fast_path,
+        .sparse_text,
+        .image_dominance,
+        .bad_unicode,
+        .missing_tounicode,
+        .hidden_ocr,
+        .low_reading_order_confidence,
+        .table_alignment,
+        .formula_density,
+        .ocr_route_stub,
+        .layout_route_stub,
+        .table_route_stub,
+        .formula_route_stub,
+    };
+    var first = true;
+    for (reasons) |reason| {
+        if (!hasReason(mask, reason)) continue;
+        if (!first) try writer.writeByte(',');
+        try writer.writeAll(reasonName(reason));
+        first = false;
+    }
+}
+
+fn reasonName(reason: RouteReason) []const u8 {
+    return switch (reason) {
+        .native_fast_path => "native_fast_path",
+        .sparse_text => "sparse_text",
+        .image_dominance => "image_dominant",
+        .bad_unicode => "bad_unicode",
+        .missing_tounicode => "missing_tounicode",
+        .hidden_ocr => "hidden_ocr",
+        .low_reading_order_confidence => "low_reading_order_confidence",
+        .table_alignment => "table_alignment",
+        .formula_density => "formula_density",
+        .ocr_route_stub => "ocr_route_stub",
+        .layout_route_stub => "layout_route_stub",
+        .table_route_stub => "table_route_stub",
+        .formula_route_stub => "formula_route_stub",
+    };
+}
+
+fn blockKindName(kind: BlockKind) []const u8 {
+    return switch (kind) {
+        .paragraph => "paragraph",
+        .heading => "heading",
+        .list_item => "list_item",
+        .header => "header",
+        .footer => "footer",
+        .caption => "caption",
+        .table_candidate => "table_candidate",
+        .formula_candidate => "formula_candidate",
+        .figure_candidate => "figure_candidate",
+    };
+}
+
+fn sourceName(source: layout.SourceKind) []const u8 {
+    return switch (source) {
+        .native_pdf => "native_pdf",
+        .embedded_ocr => "embedded_ocr",
+        .fresh_ocr => "fresh_ocr",
+        .table_model => "table_model",
+        .formula_model => "formula_model",
+        .manual => "manual",
+    };
+}
+
+fn columnColor(column_index: u32) []const u8 {
+    return switch (column_index) {
+        0 => "#16a34a",
+        1 => "#7c3aed",
+        else => "#0891b2",
+    };
+}
+
+fn width(box: BBox) f64 {
+    return @max(0, box.x1 - box.x0);
+}
+
+fn height(box: BBox) f64 {
+    return @max(0, box.y1 - box.y0);
+}
+
+fn writeXmlEscaped(writer: anytype, text: []const u8) !void {
+    for (text) |byte| switch (byte) {
+        '&' => try writer.writeAll("&amp;"),
+        '<' => try writer.writeAll("&lt;"),
+        '>' => try writer.writeAll("&gt;"),
+        '"' => try writer.writeAll("&quot;"),
+        else => try writer.writeByte(byte),
+    };
 }
 
 fn freeTextSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
@@ -576,4 +856,44 @@ test "route traces emit OCR stub when route needs OCR" {
     try std.testing.expectEqual(@as(usize, 2), traces.items.len);
     try std.testing.expectEqual(TraceStage.route_decision, traces.items[0].stage);
     try std.testing.expectEqual(TraceStage.ocr_route_stub, traces.items[1].stage);
+}
+
+test "debug svg marks low-confidence review regions" {
+    var spans = [_]reconcile.ReconciledSpan{};
+    var blocks = [_]reconcile.ReconciledBlock{};
+    var chunks = [_]reconcile.RagChunk{};
+    const doc = ReconciledDocument{
+        .allocator = std.testing.allocator,
+        .spans = &spans,
+        .blocks = &blocks,
+        .chunks = &chunks,
+    };
+    var layout_blocks = [_]LayoutBlockSummary{};
+    var page_routes = [_]PageRoute{
+        .{
+            .page_index = 0,
+            .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+            .span_count = 1,
+            .image_count = 0,
+            .char_count = 8,
+            .signals = .{},
+            .route = .{ .native_fast_path = false, .max_signal = 0.25 },
+            .reason_mask = reasonBit(.low_reading_order_confidence),
+        },
+    };
+    var region_routes = [_]RegionRoute{};
+    var trace_records = [_]TraceRecord{};
+    const result = Result{
+        .allocator = std.testing.allocator,
+        .reconciled = doc,
+        .layout_blocks = &layout_blocks,
+        .page_routes = &page_routes,
+        .region_routes = &region_routes,
+        .trace_records = &trace_records,
+    };
+
+    const svg = try renderDebugSvg(std.testing.allocator, &result);
+    defer std.testing.allocator.free(svg);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "class=\"low-confidence\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, svg, "low_reading_order_confidence") != null);
 }

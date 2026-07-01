@@ -1057,6 +1057,103 @@ test "inspect complexity reports table and formula candidate routes" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\"formula_density\"") != null);
 }
 
+test "adaptive debug svg shows two columns and block boundaries" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateTwoColumnPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const output = try renderFixtureDebugSvg(allocator, pdf_data, "two-column");
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-debug-svg=\"adaptive\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "id=\"native-spans\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "id=\"layout-blocks\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-layer=\"layout-block\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-column=\"0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-column=\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-kind=\"header\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-kind=\"footer\"") != null);
+}
+
+test "adaptive debug svg shows table candidates" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const output = try renderFixtureDebugSvg(allocator, pdf_data, "table");
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "class=\"table-candidate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-layer=\"table\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-route=\"candidate_table\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "table_route_stub") != null);
+}
+
+test "adaptive debug svg shows formula candidates" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateFormulaPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const output = try renderFixtureDebugSvg(allocator, pdf_data, "formula");
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "class=\"formula-candidate\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-layer=\"formula\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "formula_density") != null);
+}
+
+test "adaptive debug svg shows OCR-needed regions" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const output = try renderFixtureDebugSvg(allocator, pdf_data, "image");
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "class=\"ocr-needed\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "data-route=\"queue_ocr\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "image_dominant") != null);
+}
+
+fn renderFixtureDebugSvg(allocator: std.mem.Allocator, pdf_data: []const u8, name: []const u8) ![]u8 {
+    var input_buf: [128]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-debug-svg-{s}-{x}.pdf", .{ name, std.testing.random_seed });
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var output_buf: [128]u8 = undefined;
+    const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-debug-svg-{s}-{x}.svg", .{ name, std.testing.random_seed });
+    runtime.deleteFileCwd(output_path);
+    defer runtime.deleteFileCwd(output_path);
+
+    try runExtract(allocator, &.{ "--adaptive", "--format", "debug-svg", "-o", output_path, input_path });
+    return runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+}
+
 fn writeJsonEscapedString(writer: anytype, text: []const u8) !void {
     for (text) |c| {
         switch (c) {
