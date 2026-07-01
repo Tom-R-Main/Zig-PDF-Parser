@@ -14,6 +14,8 @@ kernel into a hybrid, adaptive parser.
 - Structure tree extraction for tagged PDFs (PDF/UA)
 - Geometric (Y→X) reading order for non-tagged PDFs
 - Markdown export for structured PDFs
+- Adaptive extraction orchestration with native/layout/complexity/reconciler stages
+- JSON inspection and trace output for page and region routing decisions
 
 ## Benchmark
 
@@ -70,9 +72,20 @@ pub fn main(init: std.process.Init) !void {
 pdf-parser extract document.pdf              # Extract all pages (uses structure tree for reading order)
 pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
 pdf-parser extract -o out.txt document.pdf   # Output to file
+pdf-parser extract --adaptive -f json doc.pdf
+pdf-parser extract --adaptive --trace doc.pdf
+pdf-parser inspect complexity doc.pdf --format json
 pdf-parser info document.pdf                 # Show document info
 pdf-parser bench document.pdf                # Run benchmark
 ```
+
+Adaptive extraction keeps fast native extraction on the default path while
+recording when a page or region should be routed elsewhere. Current route names
+include `use_native`, `queue_ocr`, `candidate_layout`, `candidate_table`,
+`candidate_formula`, and `candidate_table_formula`. The trace JSON reports page
+index, region index, span count, route, confidence, signal scores, and reasons
+such as `image_dominant`, `missing_tounicode`, `table_alignment`,
+`formula_density`, and `low_reading_order_confidence`.
 
 ### Python
 
@@ -125,6 +138,11 @@ src/
 ├── structtree.zig   # Structure tree parser (PDF/UA)
 ├── layout.zig       # Text layout and bounding boxes
 ├── markdown.zig     # Markdown export
+├── complexity.zig   # Cheap page/region routing signals
+├── adaptive.zig     # Adaptive extraction orchestration and trace records
+├── reconcile.zig    # Provenance-preserving span/block/chunk outputs
+├── specialists.zig  # Table/formula heuristics and adapter stubs
+├── ocr.zig          # OCR routing adapter interface
 └── simd.zig         # SIMD-accelerated parsing
 
 python/zpdf/         # Python bindings (cffi, legacy package name)

@@ -370,6 +370,88 @@ pub fn generateSimpleToUnicodePdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate a dense born-digital page with an ASCII ToUnicode CMap.
+pub fn generateCleanNativePdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
+    try cw.writeAll("BT\n/F1 12 Tf\n");
+    const lines = [_][]const u8{
+        "Clean born digital text has enough native glyph coverage for extraction.",
+        "The page is deliberately dense so sparse text does not dominate routing.",
+        "Unicode metadata is present through a ToUnicode map for the font.",
+        "Normal top to bottom ordering keeps reading order confidence high.",
+        "This fixture should remain on the native fast path without OCR.",
+        "Additional words add page coverage and realistic paragraph length.",
+        "Adaptive routing should report use native for this document page.",
+    };
+    for (lines, 0..) |line, index| {
+        try cw.print("1 0 0 1 72 {} Tm\n({s}) Tj\n", .{ 720 - index * 20, line });
+    }
+    try cw.writeAll("ET\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>\nendobj\n");
+
+    const tounicode_cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\/CMapName /AsciiToUnicode def
+        \\1 begincodespacerange
+        \\<00> <FF>
+        \\endcodespacerange
+        \\1 beginbfrange
+        \\<20> <7E> <0020>
+        \\endbfrange
+        \\endcmap
+        \\CMapName currentdict /CMap defineresource pop
+        \\end
+        \\end
+    ;
+
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ tounicode_cmap.len, tounicode_cmap });
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 7\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+
+    try writer.writeAll("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with a CID font (Type0 composite font with ToUnicode)
 /// Uses UTF-16BE encoded text and a ToUnicode CMap for mapping
 pub fn generateCIDFontPdf(allocator: std.mem.Allocator) ![]u8 {
@@ -1452,6 +1534,112 @@ pub fn generateImagePdf(allocator: std.mem.Allocator) ![]u8 {
     try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
 
     try writer.writeAll("trailer\n<< /Size 8 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a PDF whose only page content is one page-dominant XObject image.
+pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "612 0 0 792 0 0 cm\n/Im1 Do\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1800 /Height 2400 ");
+    try writer.writeAll("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\n");
+    try writer.writeAll("stream\n\xFF\nendstream\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a page with aligned numeric columns and formula-heavy notation.
+pub fn generateTableFormulaPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
+    try cw.writeAll("BT\n/F1 12 Tf\n");
+    const cells = [_]struct { text: []const u8, x: u32, y: u32 }{
+        .{ .text = "2019", .x = 80, .y = 720 },
+        .{ .text = "100", .x = 200, .y = 720 },
+        .{ .text = "2020", .x = 80, .y = 700 },
+        .{ .text = "125", .x = 200, .y = 700 },
+        .{ .text = "2021", .x = 80, .y = 680 },
+        .{ .text = "140", .x = 200, .y = 680 },
+        .{ .text = "2022", .x = 80, .y = 660 },
+        .{ .text = "155", .x = 200, .y = 660 },
+        .{ .text = "E=mc^2++++////^^^^____", .x = 320, .y = 720 },
+        .{ .text = "alpha+beta/gamma====", .x = 320, .y = 700 },
+        .{ .text = "sum(x_i^2)>=delta++++", .x = 320, .y = 680 },
+    };
+    for (cells) |cell| {
+        try cw.print("1 0 0 1 {} {} Tm\n({s}) Tj\n", .{ cell.x, cell.y, cell.text });
+    }
+    try cw.writeAll("ET\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
     try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
 
     return pdf.toOwnedSlice(allocator);

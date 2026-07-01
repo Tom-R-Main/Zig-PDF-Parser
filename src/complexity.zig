@@ -147,6 +147,7 @@ const RegionStats = struct {
     y_inversions: usize = 0,
     x_regressions: usize = 0,
     repeated_x_spans: usize = 0,
+    aligned_x_bucket_count: usize = 0,
     numeric_chars: usize = 0,
     math_chars: usize = 0,
     superscript_like_spans: usize = 0,
@@ -162,6 +163,7 @@ const RegionStats = struct {
     fn collect(self: *RegionStats) void {
         self.collectSpans();
         self.collectImages();
+        self.aligned_x_bucket_count = countAlignedXBuckets(self.input.spans, self.region);
     }
 
     fn collectSpans(self: *RegionStats) void {
@@ -285,9 +287,11 @@ fn scoreTableAlignment(stats: *const RegionStats) f32 {
         @as(f64, @floatFromInt(stats.numeric_chars)) / @as(f64, @floatFromInt(stats.char_count))
     else
         0.0;
+    if (stats.aligned_x_bucket_count < 2 and numeric_ratio < 0.20) return 0;
     const alignment_score = clamp01((repeated_ratio - 0.25) / 0.55);
     const numeric_score = clamp01((numeric_ratio - 0.20) / 0.45);
-    return f32Clamp(@max(alignment_score, (alignment_score * 0.7) + (numeric_score * 0.3)));
+    const column_score = clamp01(@as(f64, @floatFromInt(stats.aligned_x_bucket_count)) / 2.0);
+    return f32Clamp(@max(alignment_score * column_score, (alignment_score * 0.7) + (numeric_score * 0.3)));
 }
 
 fn scoreFormulaDensity(stats: *const RegionStats) f32 {
@@ -308,6 +312,36 @@ fn repeatedXContribution(spans: []const TextSpan, region: BBox, text_span: TextS
         if (xBucket(other.x0) == bucket) aligned += 1;
     }
     return if (aligned >= 3) 1 else 0;
+}
+
+fn countAlignedXBuckets(spans: []const TextSpan, region: BBox) usize {
+    var buckets: [128]struct { bucket: i64, count: usize } = undefined;
+    var bucket_count: usize = 0;
+
+    for (spans) |text_span| {
+        if (!intersects(region, text_span.bbox)) continue;
+        const bucket = xBucket(text_span.x0);
+
+        var found = false;
+        for (buckets[0..bucket_count]) |*entry| {
+            if (entry.bucket == bucket) {
+                entry.count += 1;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found and bucket_count < buckets.len) {
+            buckets[bucket_count] = .{ .bucket = bucket, .count = 1 };
+            bucket_count += 1;
+        }
+    }
+
+    var aligned: usize = 0;
+    for (buckets[0..bucket_count]) |entry| {
+        if (entry.count >= 3) aligned += 1;
+    }
+    return aligned;
 }
 
 fn xBucket(x: f64) i64 {

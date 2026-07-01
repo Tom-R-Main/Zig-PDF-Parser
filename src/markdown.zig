@@ -154,7 +154,7 @@ pub const MarkdownRenderer = struct {
 
         // Convert to semantic elements
         const elements = try self.spansToElements(layout_result.spans);
-        defer self.allocator.free(elements);
+        defer self.freeElements(elements);
 
         // Render elements to Markdown
         return self.renderElements(elements);
@@ -167,7 +167,7 @@ pub const MarkdownRenderer = struct {
         self.analyzeFontSizes(layout_result.spans);
 
         const elements = try self.spansToElements(layout_result.spans);
-        defer self.allocator.free(elements);
+        defer self.freeElements(elements);
 
         return self.renderElements(elements);
     }
@@ -210,7 +210,12 @@ pub const MarkdownRenderer = struct {
     /// Convert spans to semantic elements
     fn spansToElements(self: *MarkdownRenderer, spans: []const TextSpan) ![]TextElement {
         var elements: std.ArrayList(TextElement) = .empty;
-        errdefer elements.deinit(self.allocator);
+        errdefer {
+            for (elements.items) |element| {
+                if (element.text.len > 0) self.allocator.free(@constCast(element.text));
+            }
+            elements.deinit(self.allocator);
+        }
 
         if (spans.len == 0) return elements.toOwnedSlice(self.allocator);
 
@@ -331,6 +336,13 @@ pub const MarkdownRenderer = struct {
         }
 
         return elements.toOwnedSlice(self.allocator);
+    }
+
+    fn freeElements(self: *MarkdownRenderer, elements: []const TextElement) void {
+        for (elements) |element| {
+            if (element.text.len > 0) self.allocator.free(@constCast(element.text));
+        }
+        self.allocator.free(elements);
     }
 
     /// Render elements to Markdown text

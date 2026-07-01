@@ -223,6 +223,7 @@ fn regionSpans(input: RegionInput) []const TextSpan {
 
 fn scoreRepeatedXPositions(region: BBox, spans: []const TextSpan) f32 {
     if (spans.len < 4) return 0;
+    if (countAlignedXBuckets(region, spans) < 2) return 0;
 
     var repeated_count: usize = 0;
     for (spans, 0..) |span, span_index| {
@@ -238,6 +239,36 @@ fn scoreRepeatedXPositions(region: BBox, spans: []const TextSpan) f32 {
     }
 
     return ratioScore(repeated_count, spans.len, 0.30, 0.72);
+}
+
+fn countAlignedXBuckets(region: BBox, spans: []const TextSpan) usize {
+    var buckets: [128]struct { bucket: i64, count: usize } = undefined;
+    var bucket_count: usize = 0;
+
+    for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
+        const bucket = xBucket(span.x0);
+
+        var found = false;
+        for (buckets[0..bucket_count]) |*entry| {
+            if (entry.bucket == bucket) {
+                entry.count += 1;
+                found = true;
+                break;
+            }
+        }
+
+        if (!found and bucket_count < buckets.len) {
+            buckets[bucket_count] = .{ .bucket = bucket, .count = 1 };
+            bucket_count += 1;
+        }
+    }
+
+    var aligned: usize = 0;
+    for (buckets[0..bucket_count]) |entry| {
+        if (entry.count >= 3) aligned += 1;
+    }
+    return aligned;
 }
 
 fn scoreRulingLines(input: RegionInput) f32 {
