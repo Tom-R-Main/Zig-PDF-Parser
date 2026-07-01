@@ -72,6 +72,10 @@ pub fn createFileCwd(path: []const u8) !File {
     return std.Io.Dir.cwd().createFile(currentIo(), path, .{});
 }
 
+pub fn createDirPathCwd(path: []const u8) !void {
+    _ = try std.Io.Dir.cwd().createDirPathStatus(currentIo(), path, .default_dir);
+}
+
 pub fn closeFile(file: File) void {
     file.close(currentIo());
 }

@@ -152,17 +152,15 @@ pub const MarkdownRenderer = struct {
         var layout_result = try layout.analyzeLayout(self.allocator, spans, page_width);
         defer layout_result.deinit();
 
-        // Convert to semantic elements
-        const elements = try self.spansToElements(layout_result.spans);
-        defer self.freeElements(elements);
-
-        // Render elements to Markdown
-        return self.renderElements(elements);
+        return self.renderFromLayout(&layout_result);
     }
 
     /// Render from pre-analyzed layout
     pub fn renderFromLayout(self: *MarkdownRenderer, layout_result: *const LayoutResult) ![]u8 {
         if (layout_result.spans.len == 0) return try self.allocator.alloc(u8, 0);
+        if (self.options.detect_tables and layout_result.tables.len > 0) {
+            return self.renderLayoutBlocks(layout_result);
+        }
 
         self.analyzeFontSizes(layout_result.spans);
 
@@ -170,6 +168,46 @@ pub const MarkdownRenderer = struct {
         defer self.freeElements(elements);
 
         return self.renderElements(elements);
+    }
+
+    fn renderLayoutBlocks(self: *MarkdownRenderer, layout_result: *const LayoutResult) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(self.allocator);
+
+        var emitted = false;
+        for (layout_result.blocks, 0..) |block, block_index| {
+            if (block.removed or block.lines.len == 0) continue;
+            if (emitted and output.items.len > 0 and output.items[output.items.len - 1] != '\n') {
+                try output.append(self.allocator, '\n');
+            }
+            if (emitted) try output.append(self.allocator, '\n');
+
+            if (block.kind == .table_candidate) {
+                if (layout_result.tableForBlock(block_index)) |table| {
+                    try layout.appendTableMarkdown(self.allocator, &output, table);
+                    emitted = true;
+                    continue;
+                }
+                if (layout_result.blockCoveredByTable(block_index)) continue;
+            }
+
+            switch (block.kind) {
+                .heading => try output.appendSlice(self.allocator, "## "),
+                .list_item => try output.appendSlice(self.allocator, "- "),
+                else => {},
+            }
+
+            for (block.lines, 0..) |line, line_index| {
+                if (line_index > 0) {
+                    try output.append(self.allocator, if (block.kind == .paragraph) ' ' else '\n');
+                }
+                try appendLineText(self.allocator, &output, line);
+            }
+            try output.append(self.allocator, '\n');
+            emitted = true;
+        }
+
+        return output.toOwnedSlice(self.allocator);
     }
 
     /// Analyze font sizes to determine body text size (most common)
@@ -343,6 +381,17 @@ pub const MarkdownRenderer = struct {
             if (element.text.len > 0) self.allocator.free(@constCast(element.text));
         }
         self.allocator.free(elements);
+    }
+
+    fn appendLineText(allocator: std.mem.Allocator, output: *std.ArrayList(u8), line: layout.TextLine) !void {
+        var wrote = false;
+        for (line.words, 0..) |word, word_index| {
+            if (word_index > 0 and wrote) try output.append(allocator, ' ');
+            for (word.spans) |span| {
+                try output.appendSlice(allocator, span.text);
+                wrote = true;
+            }
+        }
     }
 
     /// Render elements to Markdown text

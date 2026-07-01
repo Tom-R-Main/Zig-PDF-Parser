@@ -1,0 +1,71 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 653 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 720 Tm
+(Clean born digital text has enough native glyph coverage for extraction.) Tj
+1 0 0 1 72 700 Tm
+(The page is deliberately dense so sparse text does not dominate routing.) Tj
+1 0 0 1 72 680 Tm
+(Unicode metadata is present through a ToUnicode map for the font.) Tj
+1 0 0 1 72 660 Tm
+(Normal top to bottom ordering keeps reading order confidence high.) Tj
+1 0 0 1 72 640 Tm
+(This fixture should remain on the native fast path without OCR.) Tj
+1 0 0 1 72 620 Tm
+(Additional words add page coverage and realistic paragraph length.) Tj
+1 0 0 1 72 600 Tm
+(Adaptive routing should report use native for this document page.) Tj
+ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding /ToUnicode 6 0 R >>
+endobj
+6 0 obj
+<< /Length 261 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CMapType 2 def
+/CMapName /AsciiToUnicode def
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+1 beginbfrange
+<20> <7E> <0020>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000951 00000 n 
+0000001065 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+1377
+%%EOF

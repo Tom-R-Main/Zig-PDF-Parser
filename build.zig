@@ -224,6 +224,18 @@ pub fn build(b: *std.Build) void {
     const native_eval_step = b.step("native-eval", "Run native extraction correctness fixtures");
     native_eval_step.dependOn(&run_native_eval_tests.step);
 
+    const eval_corpus_exe = b.addExecutable(.{
+        .name = "pdf-parser-eval-corpus",
+        .root_module = parserModule(b, "src/eval_corpus_writer.zig", target, optimize, ocr_build),
+    });
+    const eval_corpus_cmd = b.addRunArtifact(eval_corpus_exe);
+    if (b.args) |args| {
+        eval_corpus_cmd.addArgs(args);
+    }
+
+    const eval_corpus_step = b.step("eval-corpus", "Generate tiny evaluation corpus fixtures");
+    eval_corpus_step.dependOn(&eval_corpus_cmd.step);
+
     const eval_exe = b.addExecutable(.{
         .name = "pdf-parser-eval",
         .root_module = parserModule(b, "src/eval_runner.zig", target, optimize, ocr_build),

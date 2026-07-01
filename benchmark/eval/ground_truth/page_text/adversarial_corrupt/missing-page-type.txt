@@ -1,0 +1,1 @@
+Adversarial page tree omits the page type but should still extract text.

@@ -1,0 +1,5 @@
+Table 1.
+Year Revenue Margin
+2019 100 20
+2020 125 23
+2021 140 25

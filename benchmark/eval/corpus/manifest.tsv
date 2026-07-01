@@ -1,0 +1,8 @@
+# category	doc_id	pdf_path	truth_text_path
+clean_born_digital	clean-native	benchmark/eval/corpus/clean_born_digital/clean-native.pdf	benchmark/eval/ground_truth/page_text/clean_born_digital/clean-native.txt
+academic_two_column	two-column	benchmark/eval/corpus/academic_two_column/two-column.pdf	benchmark/eval/ground_truth/page_text/academic_two_column/two-column.txt
+scientific_math	math-notation	benchmark/eval/corpus/scientific_math/math-notation.pdf	benchmark/eval/ground_truth/page_text/scientific_math/math-notation.txt
+scanned_typewritten	image-only-page	benchmark/eval/corpus/scanned_typewritten/image-only-page.pdf	benchmark/eval/ground_truth/page_text/scanned_typewritten/image-only-page.txt
+financial_tables	aligned-financials	benchmark/eval/corpus/financial_tables/aligned-financials.pdf	benchmark/eval/ground_truth/page_text/financial_tables/aligned-financials.txt
+forms	acroform-fields	benchmark/eval/corpus/forms/acroform-fields.pdf	benchmark/eval/ground_truth/page_text/forms/acroform-fields.txt
+adversarial_corrupt	missing-page-type	benchmark/eval/corpus/adversarial_corrupt/missing-page-type.pdf	benchmark/eval/ground_truth/page_text/adversarial_corrupt/missing-page-type.txt

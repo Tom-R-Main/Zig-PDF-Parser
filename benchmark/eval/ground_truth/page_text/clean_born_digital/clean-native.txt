@@ -1,0 +1,7 @@
+Clean born digital text has enough native glyph coverage for extraction.
+The page is deliberately dense so sparse text does not dominate routing.
+Unicode metadata is present through a ToUnicode map for the font.
+Normal top to bottom ordering keeps reading order confidence high.
+This fixture should remain on the native fast path without OCR.
+Additional words add page coverage and realistic paragraph length.
+Adaptive routing should report use native for this document page.

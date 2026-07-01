@@ -12,6 +12,7 @@ pub const main = runtime.MainWithArgs(mainInner).main;
 
 const Options = struct {
     pdf_path: ?[]const u8 = null,
+    manifest_path: ?[]const u8 = null,
     truth_text_path: ?[]const u8 = null,
     output_path: ?[]const u8 = null,
     doc_id: ?[]const u8 = null,
@@ -37,11 +38,81 @@ fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
 
-    const pdf_path = options.pdf_path orelse {
+    if (options.manifest_path) |manifest_path| {
+        const jsonl = try runManifest(allocator, options, manifest_path);
+        defer allocator.free(jsonl);
+        try writeOutput(options.output_path, jsonl);
+        return;
+    }
+
+    if (options.pdf_path == null) {
         try printUsage();
         return;
-    };
+    }
 
+    const jsonl = try evaluateOneToJsonl(allocator, options);
+    defer allocator.free(jsonl);
+    try writeOutput(options.output_path, jsonl);
+}
+
+const ManifestEntry = struct {
+    category: eval.CorpusCategory,
+    doc_id: []const u8,
+    pdf_path: []const u8,
+    truth_text_path: []const u8,
+};
+
+fn runManifest(
+    allocator: std.mem.Allocator,
+    base_options: Options,
+    manifest_path: []const u8,
+) ![]u8 {
+    const manifest = try runtime.readFileAllocAlignedCwd(allocator, manifest_path, .fromByteUnits(1));
+    defer allocator.free(manifest);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var line_it = std.mem.splitScalar(u8, manifest, '\n');
+    while (line_it.next()) |raw_line| {
+        const entry = try parseManifestLine(raw_line) orelse continue;
+        var options = base_options;
+        options.pdf_path = entry.pdf_path;
+        options.truth_text_path = entry.truth_text_path;
+        options.doc_id = entry.doc_id;
+        options.category = entry.category;
+        options.output_path = null;
+        options.manifest_path = null;
+
+        const jsonl = try evaluateOneToJsonl(allocator, options);
+        defer allocator.free(jsonl);
+        try out.appendSlice(allocator, jsonl);
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn parseManifestLine(raw_line: []const u8) !?ManifestEntry {
+    const line = std.mem.trim(u8, raw_line, " \t\r\n");
+    if (line.len == 0 or line[0] == '#') return null;
+
+    var fields = std.mem.splitScalar(u8, line, '\t');
+    const category_text = fields.next() orelse return error.MalformedManifest;
+    const doc_id = fields.next() orelse return error.MalformedManifest;
+    const pdf_path = fields.next() orelse return error.MalformedManifest;
+    const truth_text_path = fields.next() orelse return error.MalformedManifest;
+    if (fields.next() != null) return error.MalformedManifest;
+
+    return .{
+        .category = eval.CorpusCategory.parse(category_text) orelse return error.UnknownCategory,
+        .doc_id = doc_id,
+        .pdf_path = pdf_path,
+        .truth_text_path = truth_text_path,
+    };
+}
+
+fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
+    const pdf_path = options.pdf_path orelse return error.MissingInput;
     var truth_text: ?[]align(1) u8 = null;
     defer if (truth_text) |text| allocator.free(text);
     if (options.truth_text_path) |path| {
@@ -97,10 +168,11 @@ fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
         },
     };
 
-    const jsonl = try eval.resultToJsonl(allocator, result);
-    defer allocator.free(jsonl);
+    return eval.resultToJsonl(allocator, result);
+}
 
-    if (options.output_path) |path| {
+fn writeOutput(output_path: ?[]const u8, jsonl: []const u8) !void {
+    if (output_path) |path| {
         const file = try runtime.createFileCwd(path);
         defer runtime.closeFile(file);
         try runtime.writeAllFile(file, jsonl);
@@ -116,6 +188,10 @@ fn parseArgs(args: []const []const u8) !Options {
         const arg = args[index];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             return error.HelpRequested;
+        } else if (std.mem.eql(u8, arg, "--manifest")) {
+            index += 1;
+            if (index >= args.len) return error.MissingArgument;
+            options.manifest_path = args[index];
         } else if (std.mem.eql(u8, arg, "--truth-text")) {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
@@ -208,8 +284,10 @@ fn printUsage() !void {
         \\
         \\Usage:
         \\  zig build eval -- <input.pdf> [options]
+        \\  zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
         \\
         \\Options:
+        \\  --manifest FILE         TSV corpus manifest: category, doc_id, pdf, truth
         \\  --truth-text FILE       Plain-text ground truth for CER/WER/token metrics
         \\  --category NAME         Corpus category, e.g. clean_born_digital
         \\  --doc-id ID             Stable document id for JSONL output
@@ -272,4 +350,26 @@ test "eval runner parses category and options" {
     try std.testing.expectApproxEqAbs(@as(f64, 0.9), options.formula_bleu.?, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), options.formula_cdm.?, 0.0001);
     try std.testing.expectEqual(@as(u32, 1), options.ocr_pages);
+}
+
+test "eval runner parses manifest option" {
+    const options = try parseArgs(&.{
+        "--manifest",
+        "benchmark/eval/corpus/manifest.tsv",
+        "--parser",
+        "candidate",
+    });
+    try std.testing.expectEqualStrings("benchmark/eval/corpus/manifest.tsv", options.manifest_path.?);
+    try std.testing.expectEqualStrings("candidate", options.parser);
+}
+
+test "eval runner parses manifest rows" {
+    const entry = (try parseManifestLine(
+        "scientific_math\tmath-notation\tcorpus/scientific_math/math-notation.pdf\ttruth/math-notation.txt\r",
+    )).?;
+    try std.testing.expectEqual(eval.CorpusCategory.scientific_math, entry.category);
+    try std.testing.expectEqualStrings("math-notation", entry.doc_id);
+    try std.testing.expectEqualStrings("corpus/scientific_math/math-notation.pdf", entry.pdf_path);
+    try std.testing.expectEqualStrings("truth/math-notation.txt", entry.truth_text_path);
+    try std.testing.expect((try parseManifestLine("# comment")) == null);
 }

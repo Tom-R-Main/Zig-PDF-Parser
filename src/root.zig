@@ -802,6 +802,10 @@ pub const Document = struct {
             }
         }
 
+        if (try self.extractTextTableAware(page_num, allocator)) |table_text| {
+            return table_text;
+        }
+
         // For untagged content, prefer stream-order extraction first.
         // This generally tracks MuPDF text extraction more closely on large
         // technical PDFs, while keeping geometric extraction as a fallback.
@@ -815,6 +819,30 @@ pub const Document = struct {
 
         allocator.free(stream_text);
         return self.extractTextGeometric(page_num, allocator);
+    }
+
+    fn extractTextTableAware(self: *Document, page_num: usize, allocator: std.mem.Allocator) !?[]u8 {
+        const page = self.pages.items[page_num];
+        const page_width = page.media_box[2] - page.media_box[0];
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+
+        const spans = self.extractTextWithBounds(page_num, scratch_allocator) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return null;
+        };
+        if (spans.len == 0) return null;
+
+        var page_layout = layout.analyzeLayout(scratch_allocator, spans, page_width) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return null;
+        };
+        defer page_layout.deinit();
+
+        if (page_layout.tables.len == 0) return null;
+        const table_text = try page_layout.getReconstructedText(allocator);
+        return table_text;
     }
 
     /// Extract text using geometric sorting (fallback when no structure tree)
@@ -868,15 +896,10 @@ pub const Document = struct {
         // Parse and cache structure tree once for the full document.
         self.ensureReadingOrder();
 
-        // For untagged documents (no structure entries), use stream-order
-        // extraction for full-document accuracy mode. This aligns better with
-        // MuPDF-style extraction and avoids extra per-page fallback overhead.
-        const has_structure_entries = if (self.cached_reading_order) |cache| cache.count() > 0 else false;
-        if (!has_structure_entries) {
-            return self.extractAllTextFast(allocator);
-        }
-
         // Pre-load all fonts for smaller docs to reduce per-page overhead.
+        // Untagged pages still flow through per-page structured extraction so
+        // table-like pages can opt into layout reconstruction before falling
+        // back to stream order.
         if (num_pages <= 100) {
             for (0..num_pages) |i| {
                 self.ensurePageFonts(i);
@@ -983,6 +1006,19 @@ pub const Document = struct {
         // Render to Markdown
         var renderer = markdown.MarkdownRenderer.init(allocator, options);
         return renderer.render(spans, page_width);
+    }
+
+    pub fn writePageTablesJson(self: *Document, page_num: usize, allocator: std.mem.Allocator, writer: anytype) !void {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+
+        const page = self.pages.items[page_num];
+        const page_width = page.media_box[2] - page.media_box[0];
+        const spans = try self.extractTextWithBounds(page_num, allocator);
+        defer Document.freeTextSpans(allocator, spans);
+
+        var page_layout = try layout.analyzeLayout(allocator, spans, page_width);
+        defer page_layout.deinit();
+        try page_layout.writeTablesJson(writer);
     }
 
     /// Extract text from all pages as Markdown

@@ -2,6 +2,9 @@
 .zig-cache/
 zig-out/
 
+# Local Python benchmark environment
+.venv/
+
 # Editor files
 *.swp
 *~

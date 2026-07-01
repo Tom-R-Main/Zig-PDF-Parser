@@ -3,12 +3,24 @@
 `pdf-parser` treats evaluation as a first-class build target:
 
 ```sh
-zig build eval -- corpus/clean_born_digital/example.pdf \
-  --truth-text ground_truth/page_text/example.txt \
+zig build eval-corpus
+
+zig build eval -- benchmark/eval/corpus/clean_born_digital/clean-native.pdf \
+  --truth-text benchmark/eval/ground_truth/page_text/clean_born_digital/clean-native.txt \
   --category clean_born_digital \
-  --doc-id example \
-  --output outputs/pdf-parser/example.jsonl
+  --doc-id clean-native
 ```
+
+The tiny checked-in corpus is manifest-driven:
+
+```sh
+zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
+```
+
+That command emits one JSONL record for each current fixture category:
+clean born-digital text, academic two-column layout, scientific math notation,
+scanned/typewritten image-only input, financial tables, forms, and adversarial
+page-tree recovery.
 
 The runner emits one JSONL record per document with text, layout-adjacent,
 table/formula, latency, RSS, and provenance counters. Missing specialist ground
@@ -75,3 +87,35 @@ come online.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.
+
+## Comparator Baselines
+
+Use the lightweight comparator for a side-by-side view over the manifest:
+
+```sh
+python3 benchmark/eval/compare.py
+```
+
+It reports CER, WER, token F1, latency, and RSS for `pdf-parser`, PyMuPDF,
+`pypdfium2`, `pdfplumber`, and a named Tesseract lane. Python baselines are
+optional by default; unavailable libraries are shown as skipped so first-party
+eval stays runnable on a clean machine. To require all installed-library
+baselines and write JSONL:
+
+```sh
+python3 benchmark/eval/compare.py \
+  --require-baselines \
+  --jsonl \
+  --output benchmark/eval/outputs/comparison/tiny-corpus.jsonl
+```
+
+Install optional baselines in your own environment when you want strict
+side-by-side numbers:
+
+```sh
+python3 -m pip install pymupdf pypdfium2 pdfplumber
+```
+
+The Tesseract row is intentionally staged as a placeholder until the OCR
+pipeline lands; keep it in the table so OCR regressions have a stable future
+slot.

@@ -416,6 +416,11 @@ fn doExtract(doc: *zpdf.Document, pages: []const usize, output_format: OutputFor
                     } else |_| {}
                     try writer.writeAll("]");
 
+                    try writer.writeAll(",\n      \"tables\": ");
+                    doc.writePageTablesJson(page_num, allocator, writer) catch {
+                        try writer.writeAll("[]");
+                    };
+
                     try writer.writeAll("\n    }");
                 } else if (idx + 1 < pages.len) {
                     try writer.writeAll(text);
@@ -1097,6 +1102,58 @@ test "adaptive debug svg shows table candidates" {
     try std.testing.expect(std.mem.indexOf(u8, output, "data-layer=\"table\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "data-route=\"candidate_table\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "table_route_stub") != null);
+}
+
+test "extract CLI reconstructs financial table cells across text json and markdown" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-table-cli-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var text_buf: [96]u8 = undefined;
+    const text_path = try std.fmt.bufPrint(&text_buf, "pdf-parser-table-cli-{x}.txt", .{std.testing.random_seed});
+    runtime.deleteFileCwd(text_path);
+    defer runtime.deleteFileCwd(text_path);
+    try runExtract(allocator, &.{ "-o", text_path, input_path });
+    const text_output = try runtime.readFileAllocAlignedCwd(allocator, text_path, .fromByteUnits(1));
+    defer allocator.free(text_output);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "Year Revenue Margin") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "2019 100 20") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "YearRevenueMargin") == null);
+
+    var json_buf: [96]u8 = undefined;
+    const json_path = try std.fmt.bufPrint(&json_buf, "pdf-parser-table-cli-{x}.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(json_path);
+    defer runtime.deleteFileCwd(json_path);
+    try runExtract(allocator, &.{ "--format", "json", "-o", json_path, input_path });
+    const json_output = try runtime.readFileAllocAlignedCwd(allocator, json_path, .fromByteUnits(1));
+    defer allocator.free(json_output);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"tables\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"text\":\"Revenue\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"text\":\"140\"") != null);
+
+    var markdown_buf: [96]u8 = undefined;
+    const markdown_path = try std.fmt.bufPrint(&markdown_buf, "pdf-parser-table-cli-{x}.md", .{std.testing.random_seed});
+    runtime.deleteFileCwd(markdown_path);
+    defer runtime.deleteFileCwd(markdown_path);
+    try runExtract(allocator, &.{ "--format", "markdown", "-o", markdown_path, input_path });
+    const markdown_output = try runtime.readFileAllocAlignedCwd(allocator, markdown_path, .fromByteUnits(1));
+    defer allocator.free(markdown_output);
+    try std.testing.expect(std.mem.indexOf(u8, markdown_output, "| Year | Revenue | Margin |") != null);
+    try std.testing.expect(std.mem.indexOf(u8, markdown_output, "| 2021 | 140 | 25 |") != null);
 }
 
 test "adaptive debug svg shows formula candidates" {
