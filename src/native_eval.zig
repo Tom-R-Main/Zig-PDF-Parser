@@ -4,6 +4,7 @@
 //! is easy to regress while the real evaluation corpus is still being built.
 
 const std = @import("std");
+const eval = @import("eval.zig");
 const runtime = @import("runtime.zig");
 const pdf = @import("root.zig");
 const testpdf = @import("testpdf.zig");
@@ -129,4 +130,41 @@ test "native eval bounds carry provenance and line movement" {
         }
     }
     try std.testing.expect(saw_later_line);
+}
+
+test "native eval fixtures produce first-class metric records" {
+    const allocator = std.testing.allocator;
+    const fixture: Fixture = .{
+        .name = "metric-record",
+        .generate = struct {
+            fn generate(alloc: std.mem.Allocator) ![]u8 {
+                return testpdf.generateMinimalPdf(alloc, "Metric Record");
+            }
+        }.generate,
+        .required = &.{"Metric Record"},
+    };
+
+    const output = try extractFixture(allocator, fixture);
+    defer allocator.free(output);
+
+    const metrics = try eval.evaluateText(allocator, .{
+        .prediction = output,
+        .ground_truth = "Metric Record",
+    });
+    const samples = [_]i128{1_000_000};
+    const latency = try eval.latencyFromSamples(allocator, 1, &samples, 12.5);
+    const jsonl = try eval.resultToJsonl(allocator, .{
+        .doc_id = fixture.name,
+        .category = .clean_born_digital,
+        .pages = 1,
+        .text = metrics,
+        .latency = latency,
+        .counters = .{ .native_pages = 1 },
+    });
+    defer allocator.free(jsonl);
+
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"doc_id\":\"metric-record\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"cer\":0.000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"median_ms_per_page\":1.000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"native_text_ratio\":1.000000") != null);
 }

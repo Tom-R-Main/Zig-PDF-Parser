@@ -81,6 +81,60 @@ pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate a PDF with a stroked rectangle that should be detected as rulings.
+pub fn generateRulingLinesPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n");
+    try writer.writeAll("%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n");
+    try writer.writeAll("<< /Type /Catalog /Pages 2 0 R >>\n");
+    try writer.writeAll("endobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n");
+    try writer.writeAll("<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n");
+    try writer.writeAll("endobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n");
+    try writer.writeAll("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << >> >>\n");
+    try writer.writeAll("endobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    var cw = runtime.arrayListWriter(&content, allocator);
+    try cw.writeAll("1 w\n");
+    try cw.writeAll("100 600 200 80 re\n");
+    try cw.writeAll("S\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n");
+    try writer.writeAll("0 5\n");
+    try writer.print("{d:0>10} 65535 f \n", .{@as(u64, 0)});
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+
+    try writer.writeAll("trailer\n");
+    try writer.writeAll("<< /Size 5 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n", .{xref_offset});
+    try writer.writeAll("%%EOF\n");
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with multiple pages
 pub fn generateMultiPagePdf(allocator: std.mem.Allocator, pages_text: []const []const u8) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;

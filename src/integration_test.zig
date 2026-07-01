@@ -872,6 +872,32 @@ test "image detection" {
     try std.testing.expectApproxEqRel(@as(f64, 500), images[0].rect[1], 0.01);
 }
 
+test "ruling line detection from stroked rectangle" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateRulingLinesPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.strict());
+    defer doc.close();
+
+    const lines = try doc.getPageRulingLines(0, allocator);
+    defer zpdf.Document.freeRulingLines(allocator, lines);
+
+    var horizontal_count: usize = 0;
+    var vertical_count: usize = 0;
+    for (lines) |line| {
+        switch (line.orientation) {
+            .horizontal => horizontal_count += 1,
+            .vertical => vertical_count += 1,
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 4), lines.len);
+    try std.testing.expectEqual(@as(usize, 2), horizontal_count);
+    try std.testing.expectEqual(@as(usize, 2), vertical_count);
+}
+
 test "page complexity sees parser spans, image boxes, and missing ToUnicode" {
     const allocator = std.testing.allocator;
 

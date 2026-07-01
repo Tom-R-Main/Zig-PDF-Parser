@@ -138,6 +138,30 @@ pub fn build(b: *std.Build) void {
 
     const run_complexity_unit_tests = b.addRunArtifact(complexity_unit_tests);
 
+    const specialists_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/specialists.zig", target, optimize, ocr_build),
+    });
+
+    const run_specialists_unit_tests = b.addRunArtifact(specialists_unit_tests);
+
+    const reconcile_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/reconcile.zig", target, optimize, ocr_build),
+    });
+
+    const run_reconcile_unit_tests = b.addRunArtifact(reconcile_unit_tests);
+
+    const eval_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/eval.zig", target, optimize, ocr_build),
+    });
+
+    const run_eval_unit_tests = b.addRunArtifact(eval_unit_tests);
+
+    const eval_runner_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/eval_runner.zig", target, optimize, ocr_build),
+    });
+
+    const run_eval_runner_unit_tests = b.addRunArtifact(eval_runner_unit_tests);
+
     const ocr_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/ocr.zig", target, optimize, ocr_build),
     });
@@ -188,6 +212,21 @@ pub fn build(b: *std.Build) void {
     const native_eval_step = b.step("native-eval", "Run native extraction correctness fixtures");
     native_eval_step.dependOn(&run_native_eval_tests.step);
 
+    const eval_exe = b.addExecutable(.{
+        .name = "pdf-parser-eval",
+        .root_module = parserModule(b, "src/eval_runner.zig", target, optimize, ocr_build),
+    });
+    b.installArtifact(eval_exe);
+
+    const eval_cmd = b.addRunArtifact(eval_exe);
+    eval_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        eval_cmd.addArgs(args);
+    }
+
+    const eval_step = b.step("eval", "Run per-document evaluation and emit JSONL");
+    eval_step.dependOn(&eval_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_simd_unit_tests.step);
@@ -198,6 +237,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_runtime_unit_tests.step);
     test_step.dependOn(&run_layout_unit_tests.step);
     test_step.dependOn(&run_complexity_unit_tests.step);
+    test_step.dependOn(&run_specialists_unit_tests.step);
+    test_step.dependOn(&run_reconcile_unit_tests.step);
+    test_step.dependOn(&run_eval_unit_tests.step);
+    test_step.dependOn(&run_eval_runner_unit_tests.step);
     test_step.dependOn(&run_ocr_unit_tests.step);
     test_step.dependOn(&run_interpreter_unit_tests.step);
     test_step.dependOn(&run_testpdf_unit_tests.step);

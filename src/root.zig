@@ -31,6 +31,9 @@ pub const markdown = @import("markdown.zig");
 pub const outline = @import("outline.zig");
 pub const complexity = @import("complexity.zig");
 pub const ocr = @import("ocr.zig");
+pub const specialists = @import("specialists.zig");
+pub const reconcile = @import("reconcile.zig");
+pub const eval = @import("eval.zig");
 
 // Re-exports
 pub const Object = parser.Object;
@@ -47,6 +50,23 @@ pub const LayoutCandidate = layout.LayoutCandidate;
 pub const LayoutResult = layout.LayoutResult;
 pub const PageComplexity = complexity.PageScore;
 pub const RegionComplexity = complexity.RegionScore;
+pub const RulingLine = specialists.RulingLine;
+pub const RulingOrientation = specialists.RulingOrientation;
+pub const TableScore = specialists.TableScore;
+pub const FormulaScore = specialists.FormulaScore;
+pub const TableSpecialistKind = specialists.TableSpecialistKind;
+pub const FormulaSpecialistKind = specialists.FormulaSpecialistKind;
+pub const SpecialistConfig = specialists.SpecialistConfig;
+pub const SpecialistOutput = specialists.SpecialistOutput;
+pub const SpanLayer = reconcile.SpanLayer;
+pub const ReconcileOptions = reconcile.ReconcileOptions;
+pub const ReconciledDocument = reconcile.ReconciledDocument;
+pub const ReconciledSpan = reconcile.ReconciledSpan;
+pub const ReconciledBlock = reconcile.ReconciledBlock;
+pub const RagChunk = reconcile.RagChunk;
+pub const CorpusCategory = eval.CorpusCategory;
+pub const TextMetrics = eval.TextMetrics;
+pub const DocumentResult = eval.DocumentResult;
 pub const OcrConfig = ocr.OcrConfig;
 pub const OcrInput = ocr.OcrInput;
 pub const OcrBackend = ocr.Backend;
@@ -1631,6 +1651,182 @@ pub const Document = struct {
 
     pub fn freeImages(allocator: std.mem.Allocator, images: []ImageInfo) void {
         allocator.free(images);
+    }
+
+    /// Detect stroked horizontal/vertical ruling lines on a page.
+    /// Caller must free the returned slice.
+    pub fn getPageRulingLines(self: *Document, page_idx: usize, allocator: std.mem.Allocator) ![]specialists.RulingLine {
+        if (page_idx >= self.pages.items.len) return error.PageNotFound;
+
+        const arena = self.parsing_arena.allocator();
+        const page = self.pages.items[page_idx];
+
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+
+        const content = pagetree.getPageContents(
+            arena,
+            scratch_allocator,
+            self.data,
+            &self.xref_table,
+            page,
+            &self.object_cache,
+        ) catch return allocator.alloc(specialists.RulingLine, 0);
+
+        if (content.len == 0) return allocator.alloc(specialists.RulingLine, 0);
+
+        var out: std.ArrayList(specialists.RulingLine) = .empty;
+        errdefer out.deinit(allocator);
+        var pending: std.ArrayList(specialists.RulingLine) = .empty;
+        defer pending.deinit(allocator);
+
+        var lexer = interpreter.ContentLexer.init(scratch_allocator, content);
+        var operands: [128]interpreter.Operand = undefined;
+        var operand_count: usize = 0;
+
+        var ctm: [6]f64 = .{ 1, 0, 0, 1, 0, 0 };
+        var ctm_stack: [32][6]f64 = undefined;
+        var ctm_stack_count: usize = 0;
+        var stroke_width: f64 = 1;
+        var current_point: ?[2]f64 = null;
+
+        while (try lexer.next()) |token| {
+            if (pushOperand(&operands, &operand_count, token)) continue;
+
+            const op = token.operator;
+            if (std.mem.eql(u8, op, "q")) {
+                if (ctm_stack_count < ctm_stack.len) {
+                    ctm_stack[ctm_stack_count] = ctm;
+                    ctm_stack_count += 1;
+                }
+            } else if (std.mem.eql(u8, op, "Q")) {
+                if (ctm_stack_count > 0) {
+                    ctm_stack_count -= 1;
+                    ctm = ctm_stack[ctm_stack_count];
+                }
+            } else if (std.mem.eql(u8, op, "cm") and operand_count >= 6) {
+                const new: [6]f64 = .{
+                    operands[0].number, operands[1].number,
+                    operands[2].number, operands[3].number,
+                    operands[4].number, operands[5].number,
+                };
+                ctm = multiplyMatrix(new, ctm);
+            } else if (std.mem.eql(u8, op, "w") and operand_count >= 1 and operands[0] == .number) {
+                stroke_width = operands[0].number;
+            } else if (std.mem.eql(u8, op, "m") and operand_count >= 2) {
+                current_point = transformPoint(ctm, .{ operands[0].asNumber(), operands[1].asNumber() });
+            } else if (std.mem.eql(u8, op, "l") and operand_count >= 2) {
+                const next_point = transformPoint(ctm, .{ operands[0].asNumber(), operands[1].asNumber() });
+                if (current_point) |start| {
+                    try appendAxisAlignedRuling(allocator, &pending, start, next_point, stroke_width);
+                }
+                current_point = next_point;
+            } else if (std.mem.eql(u8, op, "re") and operand_count >= 4) {
+                try appendRectRulings(allocator, &pending, ctm, .{
+                    operands[0].asNumber(),
+                    operands[1].asNumber(),
+                    operands[2].asNumber(),
+                    operands[3].asNumber(),
+                }, stroke_width);
+            } else if (isStrokeOperator(op)) {
+                try out.appendSlice(allocator, pending.items);
+                pending.clearRetainingCapacity();
+                current_point = null;
+            } else if (isPathDiscardOperator(op)) {
+                pending.clearRetainingCapacity();
+                current_point = null;
+            }
+
+            operand_count = 0;
+        }
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn freeRulingLines(allocator: std.mem.Allocator, lines: []specialists.RulingLine) void {
+        allocator.free(lines);
+    }
+
+    fn transformPoint(matrix: [6]f64, point: [2]f64) [2]f64 {
+        return .{
+            point[0] * matrix[0] + point[1] * matrix[2] + matrix[4],
+            point[0] * matrix[1] + point[1] * matrix[3] + matrix[5],
+        };
+    }
+
+    fn appendRectRulings(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(specialists.RulingLine),
+        matrix: [6]f64,
+        rect: [4]f64,
+        stroke_width: f64,
+    ) !void {
+        const x = rect[0];
+        const y = rect[1];
+        const w = rect[2];
+        const h = rect[3];
+        const p0 = transformPoint(matrix, .{ x, y });
+        const p1 = transformPoint(matrix, .{ x + w, y });
+        const p2 = transformPoint(matrix, .{ x + w, y + h });
+        const p3 = transformPoint(matrix, .{ x, y + h });
+        try appendAxisAlignedRuling(allocator, out, p0, p1, stroke_width);
+        try appendAxisAlignedRuling(allocator, out, p1, p2, stroke_width);
+        try appendAxisAlignedRuling(allocator, out, p2, p3, stroke_width);
+        try appendAxisAlignedRuling(allocator, out, p3, p0, stroke_width);
+    }
+
+    fn appendAxisAlignedRuling(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayList(specialists.RulingLine),
+        start: [2]f64,
+        end: [2]f64,
+        stroke_width: f64,
+    ) !void {
+        const dx = @abs(end[0] - start[0]);
+        const dy = @abs(end[1] - start[1]);
+        const epsilon = @max(0.5, stroke_width * 1.5);
+        if (dx < epsilon and dy < epsilon) return;
+
+        if (dy <= epsilon) {
+            const half = @max(0.25, stroke_width / 2.0);
+            try out.append(allocator, .{
+                .bbox = .{
+                    .x0 = @min(start[0], end[0]),
+                    .y0 = start[1] - half,
+                    .x1 = @max(start[0], end[0]),
+                    .y1 = start[1] + half,
+                },
+                .orientation = .horizontal,
+                .stroke_width = stroke_width,
+            });
+        } else if (dx <= epsilon) {
+            const half = @max(0.25, stroke_width / 2.0);
+            try out.append(allocator, .{
+                .bbox = .{
+                    .x0 = start[0] - half,
+                    .y0 = @min(start[1], end[1]),
+                    .x1 = start[0] + half,
+                    .y1 = @max(start[1], end[1]),
+                },
+                .orientation = .vertical,
+                .stroke_width = stroke_width,
+            });
+        }
+    }
+
+    fn isStrokeOperator(op: []const u8) bool {
+        return std.mem.eql(u8, op, "S") or
+            std.mem.eql(u8, op, "s") or
+            std.mem.eql(u8, op, "B") or
+            std.mem.eql(u8, op, "B*");
+    }
+
+    fn isPathDiscardOperator(op: []const u8) bool {
+        return std.mem.eql(u8, op, "n") or
+            std.mem.eql(u8, op, "f") or
+            std.mem.eql(u8, op, "F") or
+            std.mem.eql(u8, op, "f*");
     }
 
     // =========================================================================
