@@ -150,6 +150,12 @@ pub fn build(b: *std.Build) void {
 
     const run_reconcile_unit_tests = b.addRunArtifact(reconcile_unit_tests);
 
+    const adaptive_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/adaptive.zig", target, optimize, ocr_build),
+    });
+
+    const run_adaptive_unit_tests = b.addRunArtifact(adaptive_unit_tests);
+
     const eval_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/eval.zig", target, optimize, ocr_build),
     });
@@ -239,6 +245,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_complexity_unit_tests.step);
     test_step.dependOn(&run_specialists_unit_tests.step);
     test_step.dependOn(&run_reconcile_unit_tests.step);
+    test_step.dependOn(&run_adaptive_unit_tests.step);
     test_step.dependOn(&run_eval_unit_tests.step);
     test_step.dependOn(&run_eval_runner_unit_tests.step);
     test_step.dependOn(&run_ocr_unit_tests.step);

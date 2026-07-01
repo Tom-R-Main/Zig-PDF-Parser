@@ -38,6 +38,32 @@ test "extract text from minimal PDF" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "Test123") != null);
 }
 
+test "adaptive extraction returns native spans routes traces and chunks" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "Adaptive Test");
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    try std.testing.expect(result.reconciled.spans.len > 0);
+    try std.testing.expect(result.reconciled.blocks.len > 0);
+    try std.testing.expect(result.reconciled.chunks.len > 0);
+    try std.testing.expect(result.layout_blocks.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), result.page_routes.len);
+    try std.testing.expect(result.region_routes.len > 0);
+    try std.testing.expect(result.trace_records.len > 0);
+    try std.testing.expectEqual(zpdf.adaptive.TraceStage.native_spans, result.trace_records[0].stage);
+
+    const markdown = try result.render(allocator, .markdown);
+    defer allocator.free(markdown);
+    try std.testing.expect(std.mem.indexOf(u8, markdown, "Adaptive Test") != null);
+}
+
 test "parse multi-page PDF" {
     const allocator = std.testing.allocator;
 

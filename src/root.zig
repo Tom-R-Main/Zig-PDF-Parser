@@ -33,6 +33,7 @@ pub const complexity = @import("complexity.zig");
 pub const ocr = @import("ocr.zig");
 pub const specialists = @import("specialists.zig");
 pub const reconcile = @import("reconcile.zig");
+pub const adaptive = @import("adaptive.zig");
 pub const eval = @import("eval.zig");
 
 // Re-exports
@@ -64,6 +65,13 @@ pub const ReconciledDocument = reconcile.ReconciledDocument;
 pub const ReconciledSpan = reconcile.ReconciledSpan;
 pub const ReconciledBlock = reconcile.ReconciledBlock;
 pub const RagChunk = reconcile.RagChunk;
+pub const AdaptiveOptions = adaptive.ExtractOptions;
+pub const AdaptiveResult = adaptive.Result;
+pub const AdaptivePageRoute = adaptive.PageRoute;
+pub const AdaptiveRegionRoute = adaptive.RegionRoute;
+pub const AdaptiveTraceRecord = adaptive.TraceRecord;
+pub const AdaptiveLayoutBlock = adaptive.LayoutBlockSummary;
+pub const AdaptiveOutputFormat = adaptive.OutputFormat;
 pub const CorpusCategory = eval.CorpusCategory;
 pub const TextMetrics = eval.TextMetrics;
 pub const DocumentResult = eval.DocumentResult;
@@ -600,6 +608,16 @@ pub const Document = struct {
         const page = self.pages.items[page_num];
         const page_width = page.media_box[2] - page.media_box[0];
         return layout.analyzeLayout(allocator, spans, page_width);
+    }
+
+    /// Run the Sprint 2 adaptive native pipeline:
+    /// native spans -> layout blocks -> complexity routes -> trace stubs -> reconciler.
+    pub fn extractAdaptive(
+        self: *Document,
+        allocator: std.mem.Allocator,
+        options: adaptive.ExtractOptions,
+    ) !adaptive.Result {
+        return adaptive.extractDocument(allocator, self, options);
     }
 
     /// Score a page before OCR/ML routing. The score is derived only from
