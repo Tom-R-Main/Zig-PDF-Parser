@@ -438,7 +438,7 @@ fn extractPageReadingOrder(doc: *zpdf.Document, page_num: usize, allocator: std.
     var layout_result = try zpdf.layout.analyzeLayout(allocator, spans, page_width);
     defer layout_result.deinit();
 
-    return layout_result.getTextInOrder(allocator);
+    return layout_result.getReconstructedText(allocator);
 }
 
 /// Extract text from all pages in reading order (parallel)
@@ -480,7 +480,7 @@ fn extractAllTextReadingOrderParallel(doc: *zpdf.Document, allocator: std.mem.Al
                 var layout_result = zpdf.layout.analyzeLayout(c.alloc, spans, page_width) catch continue;
                 defer layout_result.deinit();
 
-                const text = layout_result.getTextInOrder(c.alloc) catch continue;
+                const text = layout_result.getReconstructedText(c.alloc) catch continue;
                 c.results[page_idx] = text;
             }
         }
