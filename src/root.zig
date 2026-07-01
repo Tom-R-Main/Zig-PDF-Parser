@@ -30,6 +30,7 @@ pub const structtree = @import("structtree.zig");
 pub const markdown = @import("markdown.zig");
 pub const outline = @import("outline.zig");
 pub const complexity = @import("complexity.zig");
+pub const ocr = @import("ocr.zig");
 
 // Re-exports
 pub const Object = parser.Object;
@@ -46,6 +47,10 @@ pub const LayoutCandidate = layout.LayoutCandidate;
 pub const LayoutResult = layout.LayoutResult;
 pub const PageComplexity = complexity.PageScore;
 pub const RegionComplexity = complexity.RegionScore;
+pub const OcrConfig = ocr.OcrConfig;
+pub const OcrInput = ocr.OcrInput;
+pub const OcrBackend = ocr.Backend;
+pub const OcrPageSegMode = ocr.PageSegMode;
 pub const StructTree = structtree.StructTree;
 pub const StructElement = structtree.StructElement;
 pub const MarkdownOptions = markdown.MarkdownOptions;

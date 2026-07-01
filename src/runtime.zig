@@ -155,6 +155,26 @@ pub fn runIgnored(argv: []const []const u8) !u8 {
     };
 }
 
+pub fn runCapture(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    options: struct {
+        stdout_limit: usize = 16 * 1024 * 1024,
+        stderr_limit: usize = 1024 * 1024,
+        timeout_ms: u32 = 10_000,
+    },
+) !std.process.RunResult {
+    return std.process.run(allocator, currentIo(), .{
+        .argv = argv,
+        .stdout_limit = .limited(options.stdout_limit),
+        .stderr_limit = .limited(options.stderr_limit),
+        .timeout = .{ .duration = .{
+            .clock = .awake,
+            .raw = .fromMilliseconds(@intCast(options.timeout_ms)),
+        } },
+    });
+}
+
 test "runtime ArrayList writer" {
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(std.testing.allocator);
@@ -172,7 +192,11 @@ test "runtime cwd file helpers" {
     defer threaded.deinit();
     setIo(threaded.io());
 
-    const path = "zpdf-runtime-test.tmp";
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "zpdf-runtime-test-{x}-{x}.tmp", .{
+        std.testing.random_seed,
+        nanoTimestamp(),
+    });
     deleteFileCwd(path);
     defer deleteFileCwd(path);
 
