@@ -1,12 +1,12 @@
 # Versioned Output Schema
 
-The adaptive JSON and artifact JSONL outputs are the public document
-intelligence contract. Internal Zig structs may change; consumers should depend
-on the records documented here.
+The adaptive JSON, artifact JSONL, and streaming JSONL outputs are the public
+document intelligence contract. Internal Zig structs may change; consumers
+should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.1.0`
+Current schema version: `0.2.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -24,7 +24,9 @@ Every public JSON object includes:
 
 JSON output is a `document_manifest` object with arrays of typed records.
 `artifact-jsonl` emits one typed record per line and always starts with the
-`document_manifest` record.
+`document_manifest` record. `stream-jsonl` also emits one typed record per line,
+but records are produced page by page so host applications can persist partial
+artifacts and enqueue embeddings before the document finishes.
 
 ## Records
 
@@ -74,12 +76,58 @@ Reference to debug artifacts such as debug SVG overlays, route trace JSON,
 hOCR, and ALTO outputs. Each record includes kind, media type, output format,
 URI when materialized, page/region scope, and producing stage.
 
+### Streaming lifecycle records
+
+`stream-jsonl` adds lifecycle records with the same schema/version header:
+
+- `page_started`: page index, page bbox, event index, sequence scope, and
+  running status.
+- `page_finished`: page index, page bbox, per-page artifact counts, route
+  counts, warnings, and completed status.
+- `document_finished`: final artifact counts, route totals, elapsed time, and
+  completed status.
+
+Streamed artifact records keep their batch shapes and add `event_type`,
+`event_index`, and `sequence_scope`. Page-scoped records already carry
+`page_index`.
+
+Streaming order is deterministic:
+
+```text
+document_manifest
+page_started
+route_trace*
+span*
+block*
+table*
+rag_chunk*
+page_finished
+debug_asset*
+document_finished
+```
+
+The page block repeats for each requested page.
+
+## Siftable Artifact Mapping
+
+`stream-jsonl` is designed to map cleanly onto Siftable-style
+`processing_runs` and `stage_artifacts`:
+
+- `document_manifest` -> `manifest`
+- `page_started`, `page_finished`, `document_finished` -> `status`
+- `span`, `block`, `table` -> `extracted_text_ref`
+- `route_trace` -> `metadata` or `ocr_ref`
+- `rag_chunk` -> `chunk_index_ref`
+- `debug_asset` -> `external_ref`
+
 ## CLI
 
 ```bash
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
+pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 ```
 
 `jsonl` remains a compatibility format for reconciled span JSONL. Use
-`artifact-jsonl` for the full versioned stream.
+`artifact-jsonl` for the full batch versioned stream, and `stream-jsonl` when
+the caller wants page-level progress and early chunks.

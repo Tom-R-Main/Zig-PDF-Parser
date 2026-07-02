@@ -60,7 +60,7 @@ fn printUsage() !void {
         \\Extract options:
         \\  -o FILE         Output to file (default: stdout)
         \\  -p PAGES        Page range (e.g., "1-10" or "1,3,5")
-        \\  -f, --format    Output format: text, markdown, json, jsonl, artifact-jsonl, rag-jsonl, hocr, alto, or debug-svg
+        \\  -f, --format    Output format: text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg
         \\  -m, --markdown  Shortcut for --format markdown
         \\  --adaptive      Use adaptive routing and reconciled outputs
         \\  --trace         Emit adaptive route trace JSON
@@ -78,6 +78,7 @@ fn printUsage() !void {
         \\  pdf-parser extract -f md -o out.md doc.pdf   # Markdown to file
         \\  pdf-parser extract --adaptive -f rag-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
+        \\  pdf-parser extract --adaptive -f stream-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f debug-svg doc.pdf
         \\  pdf-parser extract doc.pdf --adaptive --trace
         \\  pdf-parser inspect complexity doc.pdf --format json
@@ -99,6 +100,7 @@ const OutputFormat = enum {
     jsonl, // JSON Lines with reconciled spans
     rag_jsonl, // JSON Lines with RAG chunks
     artifact_jsonl, // Versioned JSON Lines artifact stream
+    stream_jsonl, // Versioned page-by-page JSON Lines artifact stream
     markdown, // Markdown with headings, lists, etc.
     hocr, // hOCR-like HTML coordinates
     alto, // ALTO-like XML coordinates
@@ -138,7 +140,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i < args.len) {
                 output_format = parseOutputFormat(args[i]) orelse {
-                    std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
+                    std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
                     return;
                 };
             }
@@ -438,7 +440,7 @@ fn doExtract(doc: *zpdf.Document, pages: []const usize, output_format: OutputFor
                     try writer.writeAll(text);
                 }
             },
-            .jsonl, .rag_jsonl, .artifact_jsonl, .hocr, .alto, .debug_svg => unreachable,
+            .jsonl, .rag_jsonl, .artifact_jsonl, .stream_jsonl, .hocr, .alto, .debug_svg => unreachable,
         }
     }
 
@@ -460,15 +462,6 @@ fn doAdaptiveExtract(
         return;
     };
 
-    var result = doc.extractAdaptive(allocator, .{
-        .page_start = window.start,
-        .page_end = window.end,
-    }) catch |err| {
-        std.debug.print("Error during adaptive extraction: {}\n", .{err});
-        return;
-    };
-    defer result.deinit();
-
     const input_sha256 = zpdf.schema.sha256Hex(allocator, doc.data) catch |err| {
         std.debug.print("Error hashing input: {}\n", .{err});
         return;
@@ -482,6 +475,49 @@ fn doAdaptiveExtract(
         .page_count = doc.pageCount(),
         .encrypted = doc.isEncrypted(),
     };
+
+    if (!trace and output_format == .stream_jsonl) {
+        var write_buf: [4096]u8 = undefined;
+        if (output_handle) |h| {
+            var file_writer = runtime.fileWriter(h, &write_buf);
+            const writer = &file_writer.interface;
+            defer writer.flush() catch {};
+            _ = doc.extractAdaptiveStreaming(allocator, writer, .{
+                .adaptive_options = .{
+                    .page_start = window.start,
+                    .page_end = window.end,
+                },
+                .schema_options = schema_options,
+            }) catch |err| {
+                std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
+                return;
+            };
+        } else {
+            var stdout_writer = runtime.stdoutWriter(&write_buf);
+            const writer = &stdout_writer.interface;
+            defer writer.flush() catch {};
+            _ = doc.extractAdaptiveStreaming(allocator, writer, .{
+                .adaptive_options = .{
+                    .page_start = window.start,
+                    .page_end = window.end,
+                },
+                .schema_options = schema_options,
+            }) catch |err| {
+                std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
+                return;
+            };
+        }
+        return;
+    }
+
+    var result = doc.extractAdaptive(allocator, .{
+        .page_start = window.start,
+        .page_end = window.end,
+    }) catch |err| {
+        std.debug.print("Error during adaptive extraction: {}\n", .{err});
+        return;
+    };
+    defer result.deinit();
 
     const rendered = if (trace)
         zpdf.schema.renderTraceJson(allocator, &result, schema_options.document_id) catch |err| {
@@ -623,6 +659,7 @@ fn parseOutputFormat(fmt: []const u8) ?OutputFormat {
     if (std.mem.eql(u8, fmt, "jsonl")) return .jsonl;
     if (std.mem.eql(u8, fmt, "rag-jsonl") or std.mem.eql(u8, fmt, "rag_jsonl")) return .rag_jsonl;
     if (std.mem.eql(u8, fmt, "artifact-jsonl") or std.mem.eql(u8, fmt, "artifact_jsonl")) return .artifact_jsonl;
+    if (std.mem.eql(u8, fmt, "stream-jsonl") or std.mem.eql(u8, fmt, "stream_jsonl")) return .stream_jsonl;
     if (std.mem.eql(u8, fmt, "markdown") or std.mem.eql(u8, fmt, "md")) return .markdown;
     if (std.mem.eql(u8, fmt, "hocr")) return .hocr;
     if (std.mem.eql(u8, fmt, "alto")) return .alto;
@@ -637,6 +674,7 @@ fn outputFormatName(output_format: OutputFormat) []const u8 {
         .jsonl => "jsonl",
         .rag_jsonl => "rag-jsonl",
         .artifact_jsonl => "artifact-jsonl",
+        .stream_jsonl => "stream-jsonl",
         .markdown => "markdown",
         .hocr => "hocr",
         .alto => "alto",
@@ -647,7 +685,7 @@ fn outputFormatName(output_format: OutputFormat) []const u8 {
 fn isLegacyOutputFormat(output_format: OutputFormat) bool {
     return switch (output_format) {
         .text, .json, .markdown => true,
-        .jsonl, .rag_jsonl, .artifact_jsonl, .hocr, .alto, .debug_svg => false,
+        .jsonl, .rag_jsonl, .artifact_jsonl, .stream_jsonl, .hocr, .alto, .debug_svg => false,
     };
 }
 
@@ -658,6 +696,7 @@ fn toAdaptiveOutputFormat(output_format: OutputFormat) zpdf.AdaptiveOutputFormat
         .jsonl => .jsonl,
         .rag_jsonl => .rag_jsonl,
         .artifact_jsonl => .artifact_jsonl,
+        .stream_jsonl => .artifact_jsonl,
         .markdown => .markdown,
         .hocr => .hocr,
         .alto => .alto,
@@ -695,6 +734,8 @@ test "parse adaptive output formats" {
     try std.testing.expectEqual(OutputFormat.rag_jsonl, parseOutputFormat("rag_jsonl").?);
     try std.testing.expectEqual(OutputFormat.artifact_jsonl, parseOutputFormat("artifact-jsonl").?);
     try std.testing.expectEqual(OutputFormat.artifact_jsonl, parseOutputFormat("artifact_jsonl").?);
+    try std.testing.expectEqual(OutputFormat.stream_jsonl, parseOutputFormat("stream-jsonl").?);
+    try std.testing.expectEqual(OutputFormat.stream_jsonl, parseOutputFormat("stream_jsonl").?);
     try std.testing.expectEqual(OutputFormat.hocr, parseOutputFormat("hocr").?);
     try std.testing.expectEqual(OutputFormat.alto, parseOutputFormat("alto").?);
     try std.testing.expectEqual(OutputFormat.debug_svg, parseOutputFormat("debug-svg").?);
@@ -730,6 +771,7 @@ test "extract adaptive CLI supports reconciler formats" {
         .{ .format = "json", .needle = "\"spans\"" },
         .{ .format = "jsonl", .needle = "\"text\":\"CLI Adaptive\"" },
         .{ .format = "artifact-jsonl", .needle = "\"record_type\":\"document_manifest\"" },
+        .{ .format = "stream-jsonl", .needle = "\"record_type\":\"document_finished\"" },
         .{ .format = "rag-jsonl", .needle = "\"source_id\":" },
         .{ .format = "hocr", .needle = "ocr_page" },
         .{ .format = "alto", .needle = "<alto>" },

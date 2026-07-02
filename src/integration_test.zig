@@ -8,6 +8,37 @@ const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
 const testpdf = @import("testpdf.zig");
 
+fn expectIndexBefore(haystack: []const u8, before: []const u8, after: []const u8) !void {
+    const before_index = std.mem.indexOf(u8, haystack, before) orelse return error.MissingBeforeNeedle;
+    const after_index = std.mem.indexOf(u8, haystack, after) orelse return error.MissingAfterNeedle;
+    try std.testing.expect(before_index < after_index);
+}
+
+fn countNeedle(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var offset: usize = 0;
+    while (std.mem.indexOf(u8, haystack[offset..], needle)) |index| {
+        count += 1;
+        offset += index + needle.len;
+    }
+    return count;
+}
+
+fn expectJsonlLinesParse(allocator: std.mem.Allocator, jsonl: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, jsonl, '\n');
+    var parsed_count: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("schema_name") != null);
+        try std.testing.expect(parsed.value.object.get("schema_version") != null);
+        try std.testing.expect(parsed.value.object.get("record_type") != null);
+        parsed_count += 1;
+    }
+    try std.testing.expect(parsed_count > 0);
+}
+
 test "parse minimal PDF" {
     const allocator = std.testing.allocator;
 
@@ -232,11 +263,11 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.1.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.2.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.2.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -265,9 +296,131 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     const manifest = try std.json.parseFromSlice(std.json.Value, allocator, jsonl[0..first_newline], .{});
     defer manifest.deinit();
     try std.testing.expectEqualStrings("document_manifest", manifest.value.object.get("record_type").?.string);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.2.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
+}
+
+test "streaming adaptive jsonl emits manifest page artifacts and document finish in order" {
+    const allocator = std.testing.allocator;
+
+    const pages = &[_][]const u8{ "Stream Page One", "Stream Page Two" };
+    const pdf_data = try testpdf.generateMultiPagePdf(allocator, pages);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{
+        .schema_options = .{
+            .document_id = "stream-native",
+            .page_count = doc.pageCount(),
+            .encrypted = doc.isEncrypted(),
+        },
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), summary.page_count);
+    try std.testing.expect(summary.event_count > 0);
+    try std.testing.expect(std.mem.startsWith(u8, output.items, "{\"schema_name\":\"document_manifest\""));
+    try expectIndexBefore(output.items, "\"event_type\":\"document_manifest\"", "\"event_type\":\"page_started\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"page_started\"", "\"record_type\":\"span\"");
+    try expectIndexBefore(output.items, "\"record_type\":\"span\"", "\"event_type\":\"page_finished\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"page_finished\"", "\"event_type\":\"document_finished\"");
+    try expectJsonlLinesParse(allocator, output.items);
+}
+
+test "streaming adaptive jsonl emits financial table before page finish" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-table" } });
+    try std.testing.expect(summary.artifact_counts.tables > 0);
+    try expectIndexBefore(output.items, "\"record_type\":\"table\"", "\"event_type\":\"page_finished\"");
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"colspan\":3") != null);
+    try expectJsonlLinesParse(allocator, output.items);
+}
+
+test "streaming adaptive jsonl exposes mixed native scan OCR route traces" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMixedNativeScanPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    _ = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-mixed-scan" } });
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event_type\":\"route_trace\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"route\":\"queue_ocr\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"image_dominant\"") != null);
+    try expectJsonlLinesParse(allocator, output.items);
+}
+
+test "streaming adaptive jsonl emits chunks before document finish" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateCleanNativePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-chunks" } });
+    try std.testing.expect(summary.artifact_counts.rag_chunks > 0);
+    try expectIndexBefore(output.items, "\"record_type\":\"rag_chunk\"", "\"event_type\":\"document_finished\"");
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"source_block_ids\"") != null);
+}
+
+test "streaming adaptive jsonl processes multipage document without batch result" {
+    const allocator = std.testing.allocator;
+
+    const pages = &[_][]const u8{
+        "Large stream page 01",
+        "Large stream page 02",
+        "Large stream page 03",
+        "Large stream page 04",
+        "Large stream page 05",
+        "Large stream page 06",
+        "Large stream page 07",
+        "Large stream page 08",
+    };
+    const pdf_data = try testpdf.generateMultiPagePdf(allocator, pages);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-large" } });
+    try std.testing.expectEqual(pages.len, summary.page_count);
+    try std.testing.expectEqual(pages.len, countNeedle(output.items, "\"event_type\":\"page_started\""));
+    try std.testing.expectEqual(pages.len, countNeedle(output.items, "\"event_type\":\"page_finished\""));
+    try std.testing.expect(summary.artifact_counts.spans >= pages.len);
+    try expectJsonlLinesParse(allocator, output.items);
 }
 
 test "versioned schema exposes financial table cell span metadata" {

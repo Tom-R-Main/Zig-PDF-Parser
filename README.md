@@ -108,6 +108,7 @@ pdf-parser extract -o out.txt document.pdf   # Output to file
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f jsonl doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
+pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
 pdf-parser extract --adaptive -f hocr doc.pdf
 pdf-parser extract --adaptive -f alto doc.pdf
@@ -129,9 +130,19 @@ such as `image_dominant`, `missing_tounicode`, `table_alignment`,
 Adaptive `json` emits the versioned public schema: a `document_manifest` plus
 typed `span`, `block`, `table`, `form_field`, `route_trace`, `rag_chunk`, and
 `debug_asset` records. `artifact-jsonl` emits the same contract as a
-manifest-first JSONL stream for host applications and ingestion pipelines.
+manifest-first batch JSONL stream for host applications and ingestion
+pipelines. `stream-jsonl` emits page-by-page lifecycle events and artifacts as
+soon as each page is processed: `document_manifest`, `page_started`, page
+artifacts, `page_finished`, optional debug assets, then `document_finished`.
 `jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
 The schema is documented in [docs/output-schema.md](docs/output-schema.md).
+
+For Siftable-style ingestion, `stream-jsonl` maps naturally to durable
+processing records: `document_manifest` as a manifest artifact,
+`page_started`/`page_finished`/`document_finished` as status artifacts,
+`span`/`block`/`table` as extracted text artifacts, `route_trace` as metadata
+or OCR diagnostics, and `rag_chunk` as chunk-index artifacts that can be queued
+for embeddings before the full document finishes.
 
 Table records include page-aware cell geometry plus `rowspan`, `colspan`,
 `role`, confidence, and source span ids when available. OCR remains local and
@@ -192,6 +203,7 @@ src/
 ├── markdown.zig     # Markdown export
 ├── complexity.zig   # Cheap page/region routing signals
 ├── adaptive.zig     # Adaptive extraction orchestration and trace records
+├── stream.zig       # Page-by-page adaptive JSONL artifact streaming
 ├── reconcile.zig    # Provenance-preserving span/block/chunk outputs
 ├── specialists.zig  # Table/formula heuristics and adapter stubs
 ├── ocr.zig          # OCR routing adapter and Tesseract subprocess/C-FFI hooks

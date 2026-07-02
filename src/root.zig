@@ -35,6 +35,7 @@ pub const specialists = @import("specialists.zig");
 pub const reconcile = @import("reconcile.zig");
 pub const adaptive = @import("adaptive.zig");
 pub const schema = @import("schema.zig");
+pub const stream = @import("stream.zig");
 pub const eval = @import("eval.zig");
 
 // Re-exports
@@ -73,6 +74,9 @@ pub const AdaptiveRegionRoute = adaptive.RegionRoute;
 pub const AdaptiveTraceRecord = adaptive.TraceRecord;
 pub const AdaptiveLayoutBlock = adaptive.LayoutBlockSummary;
 pub const AdaptiveOutputFormat = adaptive.OutputFormat;
+pub const StreamingOptions = stream.StreamingOptions;
+pub const StreamingSummary = stream.StreamingSummary;
+pub const StreamingEventType = stream.StreamingEventType;
 pub const CorpusCategory = eval.CorpusCategory;
 pub const TextMetrics = eval.TextMetrics;
 pub const DocumentResult = eval.DocumentResult;
@@ -635,6 +639,16 @@ pub const Document = struct {
         options: adaptive.ExtractOptions,
     ) !adaptive.Result {
         return adaptive.extractDocument(allocator, self, options);
+    }
+
+    /// Stream adaptive JSONL artifacts one page at a time.
+    pub fn extractAdaptiveStreaming(
+        self: *Document,
+        allocator: std.mem.Allocator,
+        writer: anytype,
+        options: stream.StreamingOptions,
+    ) !stream.StreamingSummary {
+        return stream.extractAdaptiveStreaming(allocator, self, writer, options);
     }
 
     /// Score a page before OCR/ML routing. The score is derived only from
