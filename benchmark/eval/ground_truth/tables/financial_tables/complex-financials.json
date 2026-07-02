@@ -1,0 +1,24 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Account" },
+        { "text": "Revenue" },
+        { "text": "Expense" },
+        { "text": "Net" }
+      ],
+      [
+        { "text": "Total revenue" },
+        { "text": "1,200" },
+        { "text": "(950)" },
+        { "text": "250" }
+      ],
+      [
+        { "text": "Services* * excludes setup fees" },
+        { "text": "-300" },
+        { "text": "(450)" },
+        { "text": "(750)" }
+      ]
+    ]
+  }
+]

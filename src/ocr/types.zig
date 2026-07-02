@@ -29,6 +29,7 @@ pub const PageSegMode = enum(u8) {
 pub const OcrConfig = struct {
     backend: Backend = .tesseract_cli,
     executable: []const u8 = "tesseract",
+    rasterizer_executable: []const u8 = "pdftoppm",
     lang: []const u8 = "eng",
     psm: PageSegMode = .single_block,
     dpi: u32 = 300,

@@ -1,6 +1,7 @@
 # Benchmark results
 results/
 *.txt
+!eval/ground_truth/**/*.txt
 
 # Test corpora (download separately)
 verapdf/

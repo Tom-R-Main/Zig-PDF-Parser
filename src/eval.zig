@@ -251,8 +251,12 @@ pub fn writeJsonlResult(writer: anytype, result: DocumentResult) !void {
     try writeOptionalFloat(writer, result.table.teds);
     try writer.writeAll(",\"grits\":");
     try writeOptionalFloat(writer, result.table.grits);
+    try writer.writeAll(",\"table_cell_accuracy\":");
+    try writeOptionalFloat(writer, result.table.cell_accuracy);
     try writer.writeAll(",\"formula_bleu\":");
     try writeOptionalFloat(writer, result.formula.bleu);
+    try writer.writeAll(",\"formula_edit_distance\":");
+    try writeOptionalFloat(writer, result.formula.edit_distance);
     try writer.writeAll(",\"formula_cdm\":");
     try writeOptionalFloat(writer, result.formula.cdm);
     try writer.writeAll(",\"median_ms_per_page\":");
@@ -582,5 +586,6 @@ test "result jsonl exposes all north-star metrics" {
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"token_f1\":0.980000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_order_score\":0.880000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"teds\":null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"formula_edit_distance\":null") != null);
     try std.testing.expect(std.mem.endsWith(u8, jsonl, "\n"));
 }

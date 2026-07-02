@@ -147,6 +147,10 @@ pub const Document = struct {
     /// Whether data was allocated (Windows) vs mmap'd (POSIX)
     data_is_allocated: bool = false,
 
+    /// Original filesystem path when opened from a file. Subprocess OCR
+    /// rasterizers need a path; memory-opened documents leave this null.
+    source_path: ?[]const u8 = null,
+
     /// Cross-reference table
     xref_table: XRefTable,
 
@@ -196,10 +200,16 @@ pub const Document = struct {
                 path,
                 .fromByteUnits(std.heap.page_size_min),
             );
-            return openFromMemoryOwnedAlloc(allocator, data, config);
+            const doc = try openFromMemoryOwnedAlloc(allocator, data, config);
+            errdefer doc.close();
+            doc.source_path = try allocator.dupe(u8, path);
+            return doc;
         } else {
             const data = try runtime.mmapFileReadOnlyCwd(allocator, path);
-            return openFromMemoryOwned(allocator, data, config);
+            const doc = try openFromMemoryOwned(allocator, data, config);
+            errdefer doc.close();
+            doc.source_path = try allocator.dupe(u8, path);
+            return doc;
         }
     }
 
@@ -216,6 +226,7 @@ pub const Document = struct {
             .data = data,
             .owns_data = true,
             .data_is_allocated = false,
+            .source_path = null,
             .xref_table = XRefTable.init(allocator),
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
@@ -240,6 +251,7 @@ pub const Document = struct {
             .data = data,
             .owns_data = true,
             .data_is_allocated = true,
+            .source_path = null,
             .xref_table = XRefTable.init(allocator),
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
@@ -265,6 +277,7 @@ pub const Document = struct {
             .data = data,
             .owns_data = false,
             .data_is_allocated = false,
+            .source_path = null,
             .xref_table = XRefTable.init(allocator),
             .pages = .empty,
             .object_cache = std.AutoHashMap(u32, Object).init(allocator),
@@ -470,6 +483,7 @@ pub const Document = struct {
         self.pages.deinit(self.allocator);
         self.font_cache.deinit();
         self.font_obj_cache.deinit();
+        if (self.source_path) |path| self.allocator.free(path);
 
         self.allocator.destroy(self);
     }
@@ -753,9 +767,11 @@ pub const Document = struct {
             &self.xref_table,
             page,
             &self.object_cache,
-        ) catch return allocator.alloc(u8, 0);
+        ) catch return self.withPageFormFields(page_num, allocator, try allocator.alloc(u8, 0));
 
-        if (content.len == 0) return allocator.alloc(u8, 0);
+        if (content.len == 0) {
+            return self.withPageFormFields(page_num, allocator, try allocator.alloc(u8, 0));
+        }
 
         // Lazy-load fonts for this page
         self.ensurePageFonts(page_num);
@@ -790,20 +806,23 @@ pub const Document = struct {
 
                 if (result.items.len > 0) {
                     const structured = try result.toOwnedSlice(allocator);
-                    const stream_text = self.extractTextStreamOrder(page_num, allocator) catch return structured;
+                    const stream_text = self.extractTextStreamOrder(page_num, allocator) catch
+                        return self.withPageFormFields(page_num, allocator, structured);
                     defer allocator.free(stream_text);
                     // If structured covers ≥60% of stream content, trust the structure tree order
-                    if (structured.len >= stream_text.len * 6 / 10) return structured;
+                    if (structured.len >= stream_text.len * 6 / 10) {
+                        return self.withPageFormFields(page_num, allocator, structured);
+                    }
                     // Otherwise fall back to stream order (more complete for partially-tagged PDFs)
                     allocator.free(structured);
-                    return try allocator.dupe(u8, stream_text);
+                    return self.withPageFormFields(page_num, allocator, try allocator.dupe(u8, stream_text));
                 }
                 result.deinit(allocator);
             }
         }
 
         if (try self.extractTextTableAware(page_num, allocator)) |table_text| {
-            return table_text;
+            return self.withPageFormFields(page_num, allocator, table_text);
         }
 
         // For untagged content, prefer stream-order extraction first.
@@ -814,11 +833,58 @@ pub const Document = struct {
             return self.extractTextGeometric(page_num, allocator);
         };
         if (stream_text.len > 0) {
-            return stream_text;
+            return self.withPageFormFields(page_num, allocator, stream_text);
         }
 
         allocator.free(stream_text);
-        return self.extractTextGeometric(page_num, allocator);
+        return self.withPageFormFields(page_num, allocator, try self.extractTextGeometric(page_num, allocator));
+    }
+
+    /// Render value-bearing AcroForm fields as stable "name value" text lines.
+    /// This mirrors how form-aware extractors expose widgets separately while
+    /// still making field values visible to plain-text/RAG consumers.
+    pub fn extractFormFieldText(self: *Document, allocator: std.mem.Allocator) ![]u8 {
+        const fields = try self.getFormFields(allocator);
+        defer Document.freeFormFields(allocator, fields);
+
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        var writer = runtime.arrayListWriter(&output, allocator);
+
+        for (fields) |field| {
+            const value = field.value orelse continue;
+            if (field.name.len == 0 or value.len == 0) continue;
+            try writer.print("{s} {s}\n", .{ field.name, value });
+        }
+
+        if (output.items.len > 0) {
+            output.items.len -= 1;
+        }
+
+        return output.toOwnedSlice(allocator);
+    }
+
+    fn withPageFormFields(self: *Document, page_num: usize, allocator: std.mem.Allocator, page_text: []u8) ![]u8 {
+        errdefer allocator.free(page_text);
+
+        // The current AcroForm reader is document-scoped. Append once to avoid
+        // duplicating global field values across multi-page extraction.
+        if (page_num != 0) return page_text;
+
+        const form_text = try self.extractFormFieldText(allocator);
+        defer allocator.free(form_text);
+        if (form_text.len == 0) return page_text;
+
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        try output.ensureTotalCapacity(allocator, page_text.len + form_text.len + 1);
+        try output.appendSlice(allocator, page_text);
+        if (page_text.len > 0) {
+            try output.append(allocator, '\n');
+        }
+        try output.appendSlice(allocator, form_text);
+        allocator.free(page_text);
+        return output.toOwnedSlice(allocator);
     }
 
     fn extractTextTableAware(self: *Document, page_num: usize, allocator: std.mem.Allocator) !?[]u8 {
@@ -966,6 +1032,13 @@ pub const Document = struct {
                 self.ensurePageFonts(page_num);
                 try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, runtime.arrayListWriter(&result, allocator));
             }
+        }
+
+        const form_text = try self.extractFormFieldText(allocator);
+        defer allocator.free(form_text);
+        if (form_text.len > 0) {
+            if (result.items.len > 0) try result.append(allocator, '\n');
+            try result.appendSlice(allocator, form_text);
         }
 
         return result.toOwnedSlice(allocator);
@@ -1564,6 +1637,90 @@ pub const Document = struct {
             if (p.ref.eql(page_ref)) return idx;
         }
         return null;
+    }
+
+    /// Rasterize a page to a temporary PNG for an OCR engine.
+    /// Returns null for memory-opened documents because subprocess rasterizers
+    /// need a filesystem PDF path. Caller owns `image_path` and should delete it.
+    pub fn rasterizePageForOcr(self: *Document, allocator: std.mem.Allocator, page_idx: usize, config: ocr.OcrConfig) !?ocr.OcrInput {
+        if (page_idx >= self.pages.items.len) return error.PageNotFound;
+        const source_path = self.source_path orelse return null;
+
+        const page_number = try std.fmt.allocPrint(allocator, "{}", .{page_idx + 1});
+        defer allocator.free(page_number);
+
+        const dpi_arg = try std.fmt.allocPrint(allocator, "{}", .{config.dpi});
+        defer allocator.free(dpi_arg);
+
+        const prefix = try std.fmt.allocPrint(allocator, ".pdf-parser-ocr-{x}-{x}", .{
+            page_idx,
+            runtime.nanoTimestamp(),
+        });
+        defer allocator.free(prefix);
+
+        const image_path = try std.fmt.allocPrint(allocator, "{s}.png", .{prefix});
+        errdefer allocator.free(image_path);
+        errdefer runtime.deleteFileCwd(image_path);
+
+        const argv = [_][]const u8{
+            config.rasterizer_executable,
+            "-q",
+            "-png",
+            "-singlefile",
+            "-r",
+            dpi_arg,
+            "-f",
+            page_number,
+            "-l",
+            page_number,
+            source_path,
+            prefix,
+        };
+
+        const result = runtime.runCapture(allocator, &argv, .{
+            .stdout_limit = 64 * 1024,
+            .stderr_limit = 1024 * 1024,
+            .timeout_ms = config.timeout_ms,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return error.OcrRasterizerUnavailable,
+            else => return err,
+        };
+        defer allocator.free(result.stdout);
+        defer allocator.free(result.stderr);
+
+        switch (result.term) {
+            .exited => |code| if (code != 0) return error.OcrRasterizerFailed,
+            else => return error.OcrRasterizerFailed,
+        }
+
+        const dimensions = try readPngDimensions(allocator, image_path);
+        const page = self.pages.items[page_idx];
+        return .{
+            .page_index = @intCast(page_idx),
+            .pdf_bbox = .{
+                .x0 = page.media_box[0],
+                .y0 = page.media_box[1],
+                .x1 = page.media_box[2],
+                .y1 = page.media_box[3],
+            },
+            .image_path = image_path,
+            .pixel_width = dimensions.width,
+            .pixel_height = dimensions.height,
+        };
+    }
+
+    fn readPngDimensions(allocator: std.mem.Allocator, image_path: []const u8) !struct { width: u32, height: u32 } {
+        const data = try runtime.readFileAllocAlignedCwd(allocator, image_path, .fromByteUnits(1));
+        defer allocator.free(data);
+
+        const png_signature = "\x89PNG\r\n\x1a\n";
+        if (data.len < 24 or !std.mem.eql(u8, data[0..8], png_signature)) return error.InvalidRasterImage;
+        if (!std.mem.eql(u8, data[12..16], "IHDR")) return error.InvalidRasterImage;
+
+        const width = std.mem.readInt(u32, data[16..][0..4], .big);
+        const height = std.mem.readInt(u32, data[20..][0..4], .big);
+        if (width == 0 or height == 0) return error.InvalidRasterImage;
+        return .{ .width = width, .height = height };
     }
 
     // =========================================================================

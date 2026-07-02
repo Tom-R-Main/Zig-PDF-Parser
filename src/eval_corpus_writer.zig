@@ -11,6 +11,9 @@ const Fixture = struct {
     doc_id: []const u8,
     pdf_name: []const u8,
     truth: []const u8,
+    table_truth: ?[]const u8 = null,
+    reading_order_truth: ?[]const u8 = null,
+    formula_truth: ?[]const u8 = null,
     generate: *const fn (std.mem.Allocator) anyerror![]u8,
 };
 
@@ -46,6 +49,17 @@ const fixtures = [_]Fixture{
         \\42
         \\
         ,
+        .reading_order_truth =
+        \\Chapter 1
+        \\Left column first line
+        \\Left column second line
+        \\Left column third line
+        \\Right column first line
+        \\Right column second line
+        \\Right column third line
+        \\42
+        \\
+        ,
         .generate = testpdf.generateTwoColumnPdf,
     },
     .{
@@ -60,6 +74,12 @@ const fixtures = [_]Fixture{
         \\normal paragraph text
         \\
         ,
+        .formula_truth =
+        \\E=mc^2++++////^^^^____
+        \\alpha+beta/gamma====
+        \\sum(x_i^2)>=delta++++
+        \\
+        ,
         .generate = testpdf.generateFormulaPdf,
     },
     .{
@@ -67,7 +87,7 @@ const fixtures = [_]Fixture{
         .doc_id = "image-only-page",
         .pdf_name = "image-only-page.pdf",
         .truth =
-        \\Scanned typewritten page requires OCR to recover this text.
+        \\SCANNED TYPEWRITTEN
         \\
         ,
         .generate = testpdf.generateImageOnlyPdf,
@@ -84,7 +104,76 @@ const fixtures = [_]Fixture{
         \\2021 140 25
         \\
         ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Year" },
+        \\        { "text": "Revenue" },
+        \\        { "text": "Margin" }
+        \\      ],
+        \\      [
+        \\        { "text": "2019" },
+        \\        { "text": "100" },
+        \\        { "text": "20" }
+        \\      ],
+        \\      [
+        \\        { "text": "2020" },
+        \\        { "text": "125" },
+        \\        { "text": "23" }
+        \\      ],
+        \\      [
+        \\        { "text": "2021" },
+        \\        { "text": "140" },
+        \\        { "text": "25" }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
         .generate = testpdf.generateTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "complex-financials",
+        .pdf_name = "complex-financials.pdf",
+        .truth =
+        \\Table 2.
+        \\Account Revenue Expense Net
+        \\Total revenue 1,200 (950) 250
+        \\Services* * excludes setup fees -300 (450) (750)
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Account" },
+        \\        { "text": "Revenue" },
+        \\        { "text": "Expense" },
+        \\        { "text": "Net" }
+        \\      ],
+        \\      [
+        \\        { "text": "Total revenue" },
+        \\        { "text": "1,200" },
+        \\        { "text": "(950)" },
+        \\        { "text": "250" }
+        \\      ],
+        \\      [
+        \\        { "text": "Services* * excludes setup fees" },
+        \\        { "text": "-300" },
+        \\        { "text": "(450)" },
+        \\        { "text": "(750)" }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateComplexFinancialTablePdf,
     },
     .{
         .category = "forms",
@@ -120,7 +209,7 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(allocator);
     var manifest_writer = runtime.arrayListWriter(&manifest, allocator);
-    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\n");
+    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\ttruth_table_json_path_optional\ttruth_reading_order_path_optional\ttruth_formula_path_optional\n");
 
     for (fixtures) |fixture| {
         const corpus_dir = try std.fmt.allocPrint(
@@ -156,17 +245,92 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
         try writeFile(pdf_path, pdf);
         try writeFile(truth_path, fixture.truth);
 
-        try manifest_writer.print("{s}\t{s}\t{s}\t{s}\n", .{
+        try manifest_writer.print("{s}\t{s}\t{s}\t{s}", .{
             fixture.category,
             fixture.doc_id,
             pdf_path,
             truth_path,
         });
+        const table_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "tables",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.table_truth,
+        );
+        defer if (table_truth_path) |path| allocator.free(path);
+        const reading_order_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "reading_order",
+            fixture.category,
+            fixture.doc_id,
+            "txt",
+            fixture.reading_order_truth,
+        );
+        defer if (reading_order_truth_path) |path| allocator.free(path);
+        const formula_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "formulas",
+            fixture.category,
+            fixture.doc_id,
+            "txt",
+            fixture.formula_truth,
+        );
+        defer if (formula_truth_path) |path| allocator.free(path);
+        try writeOptionalManifestFields(
+            manifest_writer,
+            &.{ table_truth_path, reading_order_truth_path, formula_truth_path },
+        );
+        try manifest_writer.writeByte('\n');
     }
 
     const manifest_path = try std.fmt.allocPrint(allocator, "{s}/corpus/manifest.tsv", .{root});
     defer allocator.free(manifest_path);
     try writeFile(manifest_path, manifest.items);
+}
+
+fn writeOptionalManifestFields(writer: anytype, fields: []const ?[]const u8) !void {
+    var field_count = fields.len;
+    while (field_count > 0 and fields[field_count - 1] == null) {
+        field_count -= 1;
+    }
+
+    for (fields[0..field_count]) |field| {
+        try writer.writeByte('\t');
+        if (field) |value| try writer.writeAll(value);
+    }
+}
+
+fn writeOptionalTruth(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    kind: []const u8,
+    category: []const u8,
+    doc_id: []const u8,
+    extension: []const u8,
+    content: ?[]const u8,
+) !?[]u8 {
+    const bytes = content orelse return null;
+    const truth_dir = try std.fmt.allocPrint(
+        allocator,
+        "{s}/ground_truth/{s}/{s}",
+        .{ root, kind, category },
+    );
+    defer allocator.free(truth_dir);
+    try runtime.createDirPathCwd(truth_dir);
+
+    const truth_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}.{s}",
+        .{ truth_dir, doc_id, extension },
+    );
+    errdefer allocator.free(truth_path);
+    try writeFile(truth_path, bytes);
+    return truth_path;
 }
 
 fn writeFile(path: []const u8, bytes: []const u8) !void {

@@ -16,7 +16,7 @@ pub const BlockKind = layout.BlockKind;
 pub const SourceMask = u32;
 
 pub const SpanLayer = struct {
-    source: SourceKind,
+    source: ?SourceKind = null,
     spans: []const TextSpan,
     trust: f32 = 1.0,
 };
@@ -27,6 +27,7 @@ pub const ReconcileOptions = struct {
     block_gap_multiplier: f64 = 1.8,
     default_chunk_source_id: []const u8 = "document",
     max_chunk_bytes: usize = 1600,
+    preserve_input_order: bool = false,
 };
 
 pub const ReconciledSpan = struct {
@@ -105,7 +106,8 @@ pub fn reconcile(
         for (layer.spans) |span| {
             if (span.text.len == 0) continue;
 
-            const candidate = try copySpan(allocator, span, layer.source, layer.trust);
+            const source = layer.source orelse span.source;
+            const candidate = try copySpan(allocator, span, source, layer.trust);
 
             if (findDuplicate(spans.items, candidate, options.overlap_threshold)) |index| {
                 mergeDuplicate(allocator, &spans.items[index], candidate);
@@ -118,7 +120,9 @@ pub fn reconcile(
         }
     }
 
-    std.mem.sort(ReconciledSpan, spans.items, {}, spanLessThan);
+    if (!options.preserve_input_order) {
+        std.mem.sort(ReconciledSpan, spans.items, {}, spanLessThan);
+    }
 
     const blocks = try buildBlocks(allocator, spans.items, options);
     errdefer {

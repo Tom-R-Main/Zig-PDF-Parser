@@ -3,6 +3,7 @@
 //! Tests the full parsing and extraction pipeline using generated PDFs.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
 const testpdf = @import("testpdf.zig");
@@ -62,6 +63,150 @@ test "adaptive extraction returns native spans routes traces and chunks" {
     const markdown = try result.render(allocator, .markdown);
     defer allocator.free(markdown);
     try std.testing.expect(std.mem.indexOf(u8, markdown, "Adaptive Test") != null);
+}
+
+test "adaptive OCR route invokes rasterizer and Tesseract adapter into fresh OCR spans" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var pdf_buf: [96]u8 = undefined;
+    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-ocr-adaptive-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(pdf_path);
+    defer runtime.deleteFileCwd(pdf_path);
+
+    const pdf_file = try runtime.createFileCwd(pdf_path);
+    try runtime.writeAllFile(pdf_file, pdf_data);
+    runtime.closeFile(pdf_file);
+
+    const fake_rasterizer =
+        \\#!/bin/sh
+        \\last=""
+        \\for arg do last="$arg"; done
+        \\printf '\211PNG\r\n\032\n\000\000\000\rIHDR\000\000\003\350\000\000\007\320' > "$last.png"
+        \\
+    ;
+    var raster_buf: [96]u8 = undefined;
+    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-fake-raster-{x}.sh", .{std.testing.random_seed});
+    runtime.deleteFileCwd(raster_path);
+    defer runtime.deleteFileCwd(raster_path);
+    const raster_file = try runtime.createFileCwd(raster_path);
+    try runtime.writeAllFile(raster_file, fake_rasterizer);
+    runtime.closeFile(raster_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", raster_path }));
+    var raster_exec_buf: [112]u8 = undefined;
+    const raster_exec = try std.fmt.bufPrint(&raster_exec_buf, "./{s}", .{raster_path});
+
+    const fake_tesseract =
+        "#!/bin/sh\n" ++
+        "printf '%s\\n' 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext'\n" ++
+        "printf '%s\\n' '1\t1\t0\t0\t0\t0\t0\t0\t1000\t2000\t-1\t'\n" ++
+        "printf '%s\\n' '5\t1\t1\t1\t1\t1\t100\t200\t160\t40\t91\tScanned'\n" ++
+        "printf '%s\\n' '5\t1\t1\t1\t1\t2\t300\t200\t260\t40\t92\ttypewritten'\n" ++
+        "printf '%s\\n' '5\t1\t1\t1\t1\t3\t600\t200\t120\t40\t93\ttext'\n";
+    var tess_buf: [96]u8 = undefined;
+    const tess_path = try std.fmt.bufPrint(&tess_buf, "pdf-parser-fake-tesseract-{x}.sh", .{std.testing.random_seed});
+    runtime.deleteFileCwd(tess_path);
+    defer runtime.deleteFileCwd(tess_path);
+    const tess_file = try runtime.createFileCwd(tess_path);
+    try runtime.writeAllFile(tess_file, fake_tesseract);
+    runtime.closeFile(tess_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", tess_path }));
+    var tess_exec_buf: [112]u8 = undefined;
+    const tess_exec = try std.fmt.bufPrint(&tess_exec_buf, "./{s}", .{tess_path});
+
+    const doc = try zpdf.Document.openWithConfig(allocator, pdf_path, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{
+        .ocr_config = .{
+            .executable = tess_exec,
+            .rasterizer_executable = raster_exec,
+            .dpi = 300,
+        },
+    });
+    defer result.deinit();
+
+    try std.testing.expect(result.reconciled.spans.len >= 3);
+    try std.testing.expect(result.reconciled.spans[0].chosen_source == .fresh_ocr);
+
+    const text = try result.render(allocator, .text);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Scanned typewritten text") != null);
+
+    var saw_ocr_recognize = false;
+    for (result.trace_records) |record| {
+        if (record.stage == .ocr_recognize and record.span_count == 3) {
+            saw_ocr_recognize = true;
+        }
+    }
+    try std.testing.expect(saw_ocr_recognize);
+}
+
+test "adaptive extraction preserves layout reading order for two columns" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateTwoColumnPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const text = try result.render(allocator, .text);
+    defer allocator.free(text);
+
+    const labels = [_][]const u8{
+        "Chapter 1",
+        "Left column first line",
+        "Left column second line",
+        "Left column third line",
+        "Right column first line",
+        "Right column second line",
+        "Right column third line",
+        "42",
+    };
+    var cursor: usize = 0;
+    for (labels) |label| {
+        const found = std.mem.indexOf(u8, text[cursor..], label) orelse return error.MissingExpectedText;
+        cursor += found + label.len;
+    }
+}
+
+test "adaptive extraction renders reconstructed complex financial tables" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateComplexFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const text = try result.render(allocator, .text);
+    defer allocator.free(text);
+
+    try std.testing.expect(std.mem.indexOf(u8, text, "Table 2.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Account Revenue Expense Net") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Total revenue 1,200 (950) 250") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Services* * excludes setup fees -300 (450) (750)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Totalrevenue") == null);
+
+    var saw_table_model = false;
+    for (result.reconciled.spans) |span| {
+        if (span.chosen_source == .table_model) saw_table_model = true;
+    }
+    try std.testing.expect(saw_table_model);
 }
 
 test "parse multi-page PDF" {
@@ -471,6 +616,34 @@ test "form field extraction" {
     }
     try std.testing.expect(found_text);
     try std.testing.expect(found_button);
+}
+
+test "structured text includes value-bearing form fields once" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateAllFormFieldsPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const page_text = try doc.extractTextStructured(0, allocator);
+    defer allocator.free(page_text);
+
+    try std.testing.expect(std.mem.indexOf(u8, page_text, "All Fields") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_text, "email user@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_text, "country USA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page_text, "ok_button") == null);
+    try std.testing.expect(std.mem.indexOf(u8, page_text, "signature") == null);
+
+    const form_text = try doc.extractFormFieldText(allocator);
+    defer allocator.free(form_text);
+    try std.testing.expectEqualStrings("email user@example.com\ncountry USA", form_text);
+
+    const fast_text = try doc.extractAllTextFast(allocator);
+    defer allocator.free(fast_text);
+    try std.testing.expect(std.mem.indexOf(u8, fast_text, "email user@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fast_text, "country USA") != null);
 }
 
 test "form fields returns empty for PDF without AcroForm" {

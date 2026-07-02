@@ -328,6 +328,13 @@ fn doExtract(doc: *zpdf.Document, pages: []const usize, output_format: OutputFor
         if (outline_items.len > 0) try writer.writeAll("\n  ");
         try writer.writeAll("],\n");
 
+        // AcroForm fields are document-level metadata/widgets. Keep them
+        // structured here even though value-bearing fields are also appended
+        // to page text for plain-text extraction.
+        try writer.writeAll("  \"form_fields\": ");
+        try writeFormFieldsJson(doc, allocator, writer);
+        try writer.writeAll(",\n");
+
         // Pages
         try writer.writeAll("  \"pages\": [\n");
     }
@@ -853,6 +860,7 @@ fn traceStageName(stage: zpdf.adaptive.TraceStage) []const u8 {
         .complexity_score => "complexity_score",
         .route_decision => "route_decision",
         .ocr_route_stub => "ocr_route_stub",
+        .ocr_recognize => "ocr_recognize",
         .table_route_stub => "table_route_stub",
         .formula_route_stub => "formula_route_stub",
         .reconcile => "reconcile",
@@ -1156,6 +1164,51 @@ test "extract CLI reconstructs financial table cells across text json and markdo
     try std.testing.expect(std.mem.indexOf(u8, markdown_output, "| 2021 | 140 | 25 |") != null);
 }
 
+test "extract CLI includes AcroForm field values in text and structured JSON" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateAllFormFieldsPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-form-cli-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var text_buf: [96]u8 = undefined;
+    const text_path = try std.fmt.bufPrint(&text_buf, "pdf-parser-form-cli-{x}.txt", .{std.testing.random_seed});
+    runtime.deleteFileCwd(text_path);
+    defer runtime.deleteFileCwd(text_path);
+    try runExtract(allocator, &.{ "-o", text_path, input_path });
+    const text_output = try runtime.readFileAllocAlignedCwd(allocator, text_path, .fromByteUnits(1));
+    defer allocator.free(text_output);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "All Fields") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "email user@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "country USA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_output, "ok_button") == null);
+
+    var json_buf: [96]u8 = undefined;
+    const json_path = try std.fmt.bufPrint(&json_buf, "pdf-parser-form-cli-{x}.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(json_path);
+    defer runtime.deleteFileCwd(json_path);
+    try runExtract(allocator, &.{ "--format", "json", "-o", json_path, input_path });
+    const json_output = try runtime.readFileAllocAlignedCwd(allocator, json_path, .fromByteUnits(1));
+    defer allocator.free(json_output);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"form_fields\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"name\": \"email\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"type\": \"choice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"value\": \"USA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_output, "\"text\": \"All Fields\\nemail user@example.com\\ncountry USA\"") != null);
+}
+
 test "adaptive debug svg shows formula candidates" {
     const testpdf = @import("testpdf.zig");
     const allocator = std.testing.allocator;
@@ -1230,6 +1283,49 @@ fn writeJsonEscapedString(writer: anytype, text: []const u8) !void {
             },
         }
     }
+}
+
+fn writeFormFieldsJson(doc: *zpdf.Document, allocator: std.mem.Allocator, writer: anytype) !void {
+    const fields = doc.getFormFields(allocator) catch {
+        try writer.writeAll("[]");
+        return;
+    };
+    defer zpdf.Document.freeFormFields(allocator, fields);
+
+    try writer.writeAll("[");
+    for (fields, 0..) |field, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\"name\": \"");
+        try writeJsonEscapedString(writer, field.name);
+        try writer.writeAll("\", \"type\": \"");
+        try writer.writeAll(formFieldTypeName(field.field_type));
+        try writer.writeAll("\"");
+        if (field.value) |value| {
+            try writer.writeAll(", \"value\": \"");
+            try writeJsonEscapedString(writer, value);
+            try writer.writeAll("\"");
+        } else {
+            try writer.writeAll(", \"value\": null");
+        }
+        if (field.rect) |rect| {
+            try writer.print(", \"rect\": [{d:.1}, {d:.1}, {d:.1}, {d:.1}]", .{
+                rect[0], rect[1], rect[2], rect[3],
+            });
+        }
+        try writer.writeAll("}");
+    }
+    if (fields.len > 0) try writer.writeAll("\n  ");
+    try writer.writeAll("]");
+}
+
+fn formFieldTypeName(field_type: zpdf.Document.FieldType) []const u8 {
+    return switch (field_type) {
+        .text => "text",
+        .button => "button",
+        .choice => "choice",
+        .signature => "signature",
+        .unknown => "unknown",
+    };
 }
 
 /// Extract text from a single page in reading order

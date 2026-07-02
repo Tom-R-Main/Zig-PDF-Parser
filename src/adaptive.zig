@@ -1,12 +1,12 @@
 //! Adaptive extraction orchestration types.
 //!
-//! Sprint 2 keeps OCR/table/formula specialists behind traceable route stubs:
-//! the native parser produces spans, layout and complexity score those spans,
-//! and the reconciler produces the output model.
+//! Adaptive extraction orchestration: native spans, layout, complexity routing,
+//! optional specialist span producers, reconciliation, and output rendering.
 
 const std = @import("std");
 const layout = @import("layout.zig");
 const complexity = @import("complexity.zig");
+const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
 const runtime = @import("runtime.zig");
 const specialists = @import("specialists.zig");
@@ -21,6 +21,9 @@ pub const SignalScores = complexity.SignalScores;
 pub const ExtractOptions = struct {
     page_start: ?usize = null,
     page_end: ?usize = null,
+    enable_ocr: bool = true,
+    ocr_config: ocr.OcrConfig = .{},
+    preserve_layout_order: bool = true,
     reconcile_options: ReconcileOptions = .{},
 };
 
@@ -59,6 +62,7 @@ pub const TraceStage = enum {
     complexity_score,
     route_decision,
     ocr_route_stub,
+    ocr_recognize,
     table_route_stub,
     formula_route_stub,
     reconcile,
@@ -208,6 +212,18 @@ pub fn extractDocument(
         native_pages.deinit(allocator);
     }
 
+    var ocr_pages: std.ArrayList([]layout.TextSpan) = .empty;
+    defer {
+        for (ocr_pages.items) |spans| ocr.freeSpans(allocator, spans);
+        ocr_pages.deinit(allocator);
+    }
+
+    var layout_pages: std.ArrayList([]layout.TextSpan) = .empty;
+    defer {
+        for (layout_pages.items) |spans| freeTextSpans(allocator, spans);
+        layout_pages.deinit(allocator);
+    }
+
     var layers: std.ArrayList(reconcile.SpanLayer) = .empty;
     defer layers.deinit(allocator);
 
@@ -238,11 +254,6 @@ pub fn extractDocument(
 
         const spans = try document.extractTextWithBounds(page_idx, allocator);
         try native_pages.append(allocator, spans);
-        try layers.append(allocator, .{
-            .source = .native_pdf,
-            .spans = spans,
-            .trust = 1.0,
-        });
         try trace_records.append(allocator, .{
             .page_index = page_index,
             .stage = .native_spans,
@@ -296,9 +307,86 @@ pub fn extractDocument(
             0,
         );
 
+        var page_ocr_spans: ?[]layout.TextSpan = null;
+        if (options.enable_ocr and page_route.route.needs_ocr) {
+            const maybe_ocr_input = document.rasterizePageForOcr(allocator, page_idx, options.ocr_config) catch |err| switch (err) {
+                error.OcrRasterizerUnavailable,
+                error.OcrRasterizerFailed,
+                error.InvalidRasterImage,
+                => null,
+                else => return err,
+            };
+            if (maybe_ocr_input) |ocr_input| {
+                defer {
+                    runtime.deleteFileCwd(ocr_input.image_path);
+                    allocator.free(@constCast(ocr_input.image_path));
+                }
+
+                const ocr_spans = ocr.recognizeRegion(allocator, ocr_input, options.ocr_config) catch |err| switch (err) {
+                    error.TesseractUnavailable,
+                    error.TesseractFailed,
+                    error.TesseractCBackendDisabled,
+                    => try allocator.alloc(layout.TextSpan, 0),
+                    else => return err,
+                };
+                try ocr_pages.append(allocator, ocr_spans);
+                page_ocr_spans = ocr_spans;
+                try trace_records.append(allocator, .{
+                    .page_index = page_index,
+                    .stage = .ocr_recognize,
+                    .route = page_route.route,
+                    .reason_mask = page_route.reason_mask,
+                    .span_count = ocr_spans.len,
+                });
+            } else {
+                try trace_records.append(allocator, .{
+                    .page_index = page_index,
+                    .stage = .ocr_recognize,
+                    .route = page_route.route,
+                    .reason_mask = page_route.reason_mask,
+                    .span_count = 0,
+                });
+            }
+        }
+
         const page_width = page.media_box[2] - page.media_box[0];
         var page_layout = try layout.analyzeLayout(allocator, spans, page_width);
         defer page_layout.deinit();
+        reorderSpansToLayoutOrder(spans, page_layout.spans);
+
+        if (page_layout.tables.len > 0) {
+            const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
+            if (layout_spans.len > 0) {
+                try layout_pages.append(allocator, layout_spans);
+                try layers.append(allocator, .{
+                    .spans = layout_spans,
+                    .trust = 1.0,
+                });
+            } else {
+                freeTextSpans(allocator, layout_spans);
+                try layers.append(allocator, .{
+                    .source = .native_pdf,
+                    .spans = spans,
+                    .trust = 1.0,
+                });
+            }
+        } else {
+            try layers.append(allocator, .{
+                .source = .native_pdf,
+                .spans = spans,
+                .trust = 1.0,
+            });
+        }
+
+        if (page_ocr_spans) |ocr_spans| {
+            if (ocr_spans.len > 0) {
+                try layers.append(allocator, .{
+                    .source = .fresh_ocr,
+                    .spans = ocr_spans,
+                    .trust = 0.82,
+                });
+            }
+        }
 
         try trace_records.append(allocator, .{
             .page_index = page_index,
@@ -371,7 +459,9 @@ pub fn extractDocument(
         }
     }
 
-    var reconciled = try reconcile.reconcile(allocator, layers.items, options.reconcile_options);
+    var reconcile_options = options.reconcile_options;
+    if (options.preserve_layout_order) reconcile_options.preserve_input_order = true;
+    var reconciled = try reconcile.reconcile(allocator, layers.items, reconcile_options);
     errdefer reconciled.deinit();
     try trace_records.append(allocator, .{
         .page_index = @intCast(page_start),
@@ -402,6 +492,117 @@ pub fn extractDocument(
         .page_routes = owned_page_routes,
         .region_routes = owned_region_routes,
         .trace_records = owned_trace_records,
+    };
+}
+
+fn reorderSpansToLayoutOrder(spans: []layout.TextSpan, ordered: []const layout.TextSpan) void {
+    if (spans.len != ordered.len) return;
+    @memcpy(spans, ordered);
+}
+
+fn buildLayoutLayerSpans(allocator: std.mem.Allocator, page_layout: *const layout.LayoutResult) ![]layout.TextSpan {
+    var spans: std.ArrayList(layout.TextSpan) = .empty;
+    errdefer {
+        for (spans.items) |span| allocator.free(@constCast(span.text));
+        spans.deinit(allocator);
+    }
+
+    for (page_layout.blocks, 0..) |block, block_index| {
+        if (block.removed or block.lines.len == 0) continue;
+
+        if (block.kind == .table_candidate) {
+            if (page_layout.tableForBlock(block_index)) |table| {
+                try appendTableRowSpans(allocator, &spans, table);
+                continue;
+            }
+            if (page_layout.blockCoveredByTable(block_index)) continue;
+        }
+
+        for (block.lines) |line| {
+            const text = try lineTextOwned(allocator, &line);
+            errdefer allocator.free(text);
+            if (text.len == 0) {
+                allocator.free(text);
+                continue;
+            }
+            try spans.append(allocator, layout.TextSpan.init(.{
+                .page_index = line.bounds.page_index,
+                .bbox = line.bounds.bbox,
+                .text = text,
+                .source = line.bounds.source,
+                .confidence = block.confidence,
+                .font = stableFont(line.bounds.font),
+                .block_id = line.bounds.block_id,
+                .line_id = line.bounds.line_id,
+                .mcid = line.bounds.mcid,
+            }));
+        }
+    }
+
+    return spans.toOwnedSlice(allocator);
+}
+
+fn appendTableRowSpans(
+    allocator: std.mem.Allocator,
+    spans: *std.ArrayList(layout.TextSpan),
+    table: *const layout.TableGrid,
+) !void {
+    for (table.rows) |row| {
+        const text = try tableRowTextOwned(allocator, row);
+        errdefer allocator.free(text);
+        if (text.len == 0) {
+            allocator.free(text);
+            continue;
+        }
+        try spans.append(allocator, layout.TextSpan.init(.{
+            .page_index = row.bounds.page_index,
+            .bbox = row.bounds.bbox,
+            .text = text,
+            .source = .table_model,
+            .confidence = table.confidence,
+            .font = stableFont(row.bounds.font),
+            .block_id = row.bounds.block_id,
+            .line_id = row.bounds.line_id,
+            .mcid = row.bounds.mcid,
+        }));
+    }
+}
+
+fn lineTextOwned(allocator: std.mem.Allocator, line: *const layout.TextLine) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    var wrote = false;
+    for (line.words, 0..) |word, word_index| {
+        if (word_index > 0 and wrote) try output.append(allocator, ' ');
+        for (word.spans) |span| {
+            try output.appendSlice(allocator, span.text);
+            wrote = true;
+        }
+    }
+
+    return output.toOwnedSlice(allocator);
+}
+
+fn tableRowTextOwned(allocator: std.mem.Allocator, row: layout.TableRow) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    var wrote_cell = false;
+    for (row.cells) |cell| {
+        if (cell.text.len == 0) continue;
+        if (wrote_cell) try output.append(allocator, ' ');
+        try output.appendSlice(allocator, cell.text);
+        wrote_cell = true;
+    }
+
+    return output.toOwnedSlice(allocator);
+}
+
+fn stableFont(font: layout.FontMetadata) layout.FontMetadata {
+    return .{
+        .size = font.size,
+        .has_to_unicode = font.has_to_unicode,
     };
 }
 

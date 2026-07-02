@@ -149,7 +149,7 @@ pub const TableCell = struct {
 
 pub const TableRow = struct {
     bounds: TextSpan,
-    cells: []const TableCell,
+    cells: []TableCell,
     row_index: u32,
 };
 
@@ -157,7 +157,7 @@ pub const TableGrid = struct {
     bounds: TextSpan,
     block_index: u32,
     block_count: usize = 1,
-    rows: []const TableRow,
+    rows: []TableRow,
     column_count: usize,
     confidence: f32 = 0.72,
 };
@@ -852,7 +852,23 @@ fn classifyLines(lines: []TextLine, body_font_size: f64) void {
         } else if (can_detect_furniture and bottom_band and line_index + 2 >= lines.len and text_len <= 120) {
             line.role = .footer;
         }
+
+        if ((line.role == .body or line.role == .list_item) and line_index > 0 and lineContinuesTable(&lines[line_index - 1], line)) {
+            line.role = .table_candidate;
+        }
     }
+}
+
+fn lineContinuesTable(previous: *const TextLine, current: *const TextLine) bool {
+    if (previous.role != .table_candidate) return false;
+    if (current.words.len == 0) return false;
+
+    const gap = previous.bounds.y0 - current.bounds.y0;
+    const max_gap = @max(previous.bounds.font_size, current.bounds.font_size) * 1.45;
+    if (gap < 0 or gap > max_gap) return false;
+
+    const indent = current.bounds.x0 - previous.bounds.x0;
+    return indent >= -current.bounds.font_size * 0.5 and indent <= current.bounds.font_size * 2.5;
 }
 
 fn paragraphKind(lines: []const TextLine) BlockKind {
@@ -1114,11 +1130,13 @@ fn buildTableGrids(allocator: std.mem.Allocator, blocks: []const LayoutBlock) ![
 }
 
 fn freeTableGrid(allocator: std.mem.Allocator, table: TableGrid) void {
-    for (table.rows) |row| {
-        for (row.cells) |cell| allocator.free(cell.text);
-        allocator.free(row.cells);
-    }
+    for (table.rows) |row| freeTableRow(allocator, row);
     allocator.free(table.rows);
+}
+
+fn freeTableRow(allocator: std.mem.Allocator, row: TableRow) void {
+    for (row.cells) |cell| allocator.free(cell.text);
+    allocator.free(row.cells);
 }
 
 fn freeTableGrids(allocator: std.mem.Allocator, tables: []const TableGrid) void {
@@ -1144,12 +1162,10 @@ fn buildTableGridForBlock(
     var table_line_count: usize = 0;
     var max_words: usize = 0;
     for (block.lines) |line| {
-        if (line.words.len < 2) continue;
+        if (!lineContributesColumnAnchors(&line)) continue;
         table_line_count += 1;
         max_words = @max(max_words, line.words.len);
-        for (line.words) |word| {
-            try addColumnAnchor(allocator, &anchors, word.bounds.x0, tolerance);
-        }
+        try addLineColumnAnchors(allocator, &anchors, &line, tolerance);
     }
 
     if (table_line_count < 2 or max_words < 2 or anchors.items.len < 2) return null;
@@ -1162,24 +1178,24 @@ fn buildTableGridForBlock(
     const column_count = anchors.items.len;
     var rows: std.ArrayList(TableRow) = .empty;
     errdefer {
-        for (rows.items) |row| {
-            for (row.cells) |cell| allocator.free(cell.text);
-            allocator.free(row.cells);
-        }
+        for (rows.items) |row| freeTableRow(allocator, row);
         rows.deinit(allocator);
     }
 
     for (block.lines) |line| {
-        if (line.words.len < 2) continue;
-        const row = try buildTableRow(allocator, line, anchors.items, @intCast(rows.items.len));
-        try rows.append(allocator, row);
+        if (line.words.len == 0) continue;
+        const row = try buildTableRow(allocator, line, anchors.items, block.bounds, @intCast(rows.items.len));
+        const occupied_cells = occupiedCellCount(row);
+        if (occupied_cells >= 2 or rows.items.len == 0) {
+            try rows.append(allocator, row);
+        } else {
+            try mergeContinuationRow(allocator, &rows.items[rows.items.len - 1], row);
+            freeTableRow(allocator, row);
+        }
     }
 
     if (rows.items.len < 2) {
-        for (rows.items) |row| {
-            for (row.cells) |cell| allocator.free(cell.text);
-            allocator.free(row.cells);
-        }
+        for (rows.items) |row| freeTableRow(allocator, row);
         rows.deinit(allocator);
         return null;
     }
@@ -1192,6 +1208,46 @@ fn buildTableGridForBlock(
         .column_count = column_count,
         .confidence = block.confidence,
     };
+}
+
+fn lineContributesColumnAnchors(line: *const TextLine) bool {
+    if (line.words.len < 2) return false;
+    var numeric_words: usize = 0;
+    for (line.words) |word| {
+        if (wordHasDigit(word)) numeric_words += 1;
+    }
+    if (numeric_words > 0) return true;
+    return lineLooksLikeTable(line);
+}
+
+fn addLineColumnAnchors(
+    allocator: std.mem.Allocator,
+    anchors: *std.ArrayList(ColumnAnchor),
+    line: *const TextLine,
+    tolerance: f64,
+) !void {
+    var has_numeric = false;
+    for (line.words) |word| {
+        if (wordHasDigit(word)) {
+            has_numeric = true;
+            break;
+        }
+    }
+
+    if (!has_numeric) {
+        for (line.words) |word| try addColumnAnchor(allocator, anchors, word.bounds.x0, tolerance);
+        return;
+    }
+
+    var added_label_anchor = false;
+    for (line.words) |word| {
+        if (wordHasDigit(word)) {
+            try addColumnAnchor(allocator, anchors, word.bounds.x0, tolerance);
+        } else if (!added_label_anchor) {
+            try addColumnAnchor(allocator, anchors, word.bounds.x0, tolerance);
+            added_label_anchor = true;
+        }
+    }
 }
 
 fn addColumnAnchor(
@@ -1216,8 +1272,13 @@ fn buildTableRow(
     allocator: std.mem.Allocator,
     line: TextLine,
     anchors: []const ColumnAnchor,
+    table_bounds: TextSpan,
     row_index: u32,
 ) !TableRow {
+    if (lineLooksLikeMergedTextRow(&line, anchors.len, table_bounds)) {
+        return buildMergedTextRow(allocator, line, anchors, row_index);
+    }
+
     var texts = try allocator.alloc(std.ArrayList(u8), anchors.len);
     defer allocator.free(texts);
     for (texts) |*text| text.* = .empty;
@@ -1259,6 +1320,96 @@ fn buildTableRow(
         .cells = cells,
         .row_index = row_index,
     };
+}
+
+fn lineLooksLikeMergedTextRow(line: *const TextLine, column_count: usize, table_bounds: TextSpan) bool {
+    if (column_count < 2 or line.words.len == 0) return false;
+    for (line.words) |word| {
+        if (wordHasDigit(word)) return false;
+    }
+    const table_width = @max(1, table_bounds.x1 - table_bounds.x0);
+    const line_width = line.bounds.x1 - line.bounds.x0;
+    return line_width <= table_width * 0.65 or line.words.len < column_count;
+}
+
+fn buildMergedTextRow(
+    allocator: std.mem.Allocator,
+    line: TextLine,
+    anchors: []const ColumnAnchor,
+    row_index: u32,
+) !TableRow {
+    const cells = try allocator.alloc(TableCell, anchors.len);
+    errdefer {
+        for (cells) |cell| allocator.free(cell.text);
+        allocator.free(cells);
+    }
+
+    const target_column = nearestColumn(anchors, line.bounds.x0);
+    for (cells, 0..) |*cell, column_index| {
+        const text = if (column_index == target_column)
+            try lineTextOwned(allocator, &line)
+        else
+            try allocator.alloc(u8, 0);
+        cell.* = .{
+            .bounds = if (column_index == target_column) line.bounds else emptyCellBounds(line, @intCast(column_index)),
+            .text = text,
+            .row_index = row_index,
+            .column_index = @intCast(column_index),
+            .confidence = if (text.len > 0) 0.72 else 0.45,
+        };
+    }
+
+    return .{
+        .bounds = line.bounds,
+        .cells = cells,
+        .row_index = row_index,
+    };
+}
+
+fn lineTextOwned(allocator: std.mem.Allocator, line: *const TextLine) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try appendLineText(allocator, &out, line);
+    return out.toOwnedSlice(allocator);
+}
+
+fn occupiedCellCount(row: TableRow) usize {
+    var count: usize = 0;
+    for (row.cells) |cell| {
+        if (cell.text.len > 0) count += 1;
+    }
+    return count;
+}
+
+fn mergeContinuationRow(allocator: std.mem.Allocator, target: *TableRow, continuation: TableRow) !void {
+    target.bounds = mergeTwoBounds(target.bounds, continuation.bounds);
+    for (continuation.cells, 0..) |cell, column_index| {
+        if (cell.text.len == 0) continue;
+        try appendCellContinuation(allocator, &target.cells[column_index], cell);
+    }
+}
+
+fn appendCellContinuation(allocator: std.mem.Allocator, target: *TableCell, continuation: TableCell) !void {
+    if (target.text.len == 0) {
+        const text = try allocator.dupe(u8, continuation.text);
+        allocator.free(target.text);
+        target.text = text;
+        target.bounds = continuation.bounds;
+        target.confidence = @min(target.confidence, continuation.confidence);
+        return;
+    }
+
+    var merged: std.ArrayList(u8) = .empty;
+    errdefer merged.deinit(allocator);
+    try merged.ensureTotalCapacity(allocator, target.text.len + 1 + continuation.text.len);
+    try merged.appendSlice(allocator, target.text);
+    try merged.append(allocator, ' ');
+    try merged.appendSlice(allocator, continuation.text);
+
+    allocator.free(target.text);
+    target.text = try merged.toOwnedSlice(allocator);
+    target.bounds = mergeTwoBounds(target.bounds, continuation.bounds);
+    target.confidence = @min(target.confidence, continuation.confidence);
 }
 
 fn nearestColumn(anchors: []const ColumnAnchor, x: f64) usize {
@@ -1778,4 +1929,84 @@ test "layout reconstruction builds table grid cells from aligned financial rows"
     try appendTableMarkdown(allocator, &markdown, &table);
     try std.testing.expect(std.mem.indexOf(u8, markdown.items, "| Year | Revenue | Margin |") != null);
     try std.testing.expect(std.mem.indexOf(u8, markdown.items, "| 2021 | 140 | 25 |") != null);
+}
+
+test "table grid merges multiline labels negatives and footnotes into cells" {
+    const allocator = std.testing.allocator;
+    const spans = [_]TextSpan{
+        testSpan("Account", 80, 720, 130, 732),
+        testSpan("Revenue", 190, 720, 242, 732),
+        testSpan("Variance", 280, 720, 336, 732),
+        testSpan("Subscriptions", 80, 700, 164, 712),
+        testSpan("1,200", 190, 700, 230, 712),
+        testSpan("(35)", 280, 700, 312, 712),
+        testSpan("North America", 94, 686, 184, 698),
+        testSpan("Services*", 80, 666, 144, 678),
+        testSpan("-250", 190, 666, 222, 678),
+        testSpan("12", 280, 666, 296, 678),
+        testSpan("* excludes setup fees", 94, 652, 220, 664),
+    };
+
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.tables.len);
+    const table = result.tables[0];
+    try std.testing.expectEqual(@as(usize, 3), table.column_count);
+    try std.testing.expectEqual(@as(usize, 3), table.rows.len);
+    try std.testing.expectEqualStrings("Account", table.rows[0].cells[0].text);
+    try std.testing.expectEqualStrings("Subscriptions North America", table.rows[1].cells[0].text);
+    try std.testing.expectEqualStrings("1,200", table.rows[1].cells[1].text);
+    try std.testing.expectEqualStrings("(35)", table.rows[1].cells[2].text);
+    try std.testing.expectEqualStrings("Services* * excludes setup fees", table.rows[2].cells[0].text);
+    try std.testing.expectEqualStrings("-250", table.rows[2].cells[1].text);
+    try std.testing.expectEqualStrings("12", table.rows[2].cells[2].text);
+
+    const text = try result.getReconstructedText(allocator);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Subscriptions North America 1,200 (35)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Services* * excludes setup fees -250 12") != null);
+}
+
+test "table grid preserves multiword merged labels without inventing columns" {
+    const allocator = std.testing.allocator;
+    const spans = [_]TextSpan{
+        testSpan("Account", 80, 720, 130, 732),
+        testSpan("Revenue", 180, 720, 232, 732),
+        testSpan("Expense", 260, 720, 310, 732),
+        testSpan("Net", 320, 720, 344, 732),
+        testSpan("Total", 80, 700, 116, 712),
+        testSpan("revenue", 122, 700, 174, 712),
+        testSpan("1,200", 180, 700, 220, 712),
+        testSpan("(950)", 260, 700, 300, 712),
+        testSpan("250", 320, 700, 344, 712),
+        testSpan("Services*", 80, 680, 144, 692),
+        testSpan("-300", 180, 680, 212, 692),
+        testSpan("(450)", 260, 680, 300, 692),
+        testSpan("(750)", 320, 680, 360, 692),
+        testSpan("*", 94, 666, 100, 678),
+        testSpan("excludes", 108, 666, 160, 678),
+        testSpan("setup", 168, 666, 206, 678),
+        testSpan("fees", 214, 666, 244, 678),
+    };
+
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.tables.len);
+    const table = result.tables[0];
+    try std.testing.expectEqual(@as(usize, 4), table.column_count);
+    try std.testing.expectEqual(@as(usize, 3), table.rows.len);
+    try std.testing.expectEqualStrings("Account", table.rows[0].cells[0].text);
+    try std.testing.expectEqualStrings("Revenue", table.rows[0].cells[1].text);
+    try std.testing.expectEqualStrings("Expense", table.rows[0].cells[2].text);
+    try std.testing.expectEqualStrings("Net", table.rows[0].cells[3].text);
+    try std.testing.expectEqualStrings("Total revenue", table.rows[1].cells[0].text);
+    try std.testing.expectEqualStrings("1,200", table.rows[1].cells[1].text);
+    try std.testing.expectEqualStrings("(950)", table.rows[1].cells[2].text);
+    try std.testing.expectEqualStrings("250", table.rows[1].cells[3].text);
+    try std.testing.expectEqualStrings("Services* * excludes setup fees", table.rows[2].cells[0].text);
+    try std.testing.expectEqualStrings("-300", table.rows[2].cells[1].text);
+    try std.testing.expectEqualStrings("(450)", table.rows[2].cells[2].text);
+    try std.testing.expectEqualStrings("(750)", table.rows[2].cells[3].text);
 }

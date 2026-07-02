@@ -1544,6 +1544,8 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
     var writer = runtime.arrayListWriter(&pdf, allocator);
+    const image = try generateOcrFixtureImage(allocator);
+    defer allocator.free(image.pixels);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -1562,9 +1564,11 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
 
     const obj5_offset = pdf.items.len;
-    try writer.writeAll("5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1800 /Height 2400 ");
-    try writer.writeAll("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\n");
-    try writer.writeAll("stream\n\xFF\nendstream\nendobj\n");
+    try writer.print("5 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} ", .{ image.width, image.height });
+    try writer.print("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\n", .{image.pixels.len});
+    try writer.writeAll("stream\n");
+    try writer.writeAll(image.pixels);
+    try writer.writeAll("\nendstream\nendobj\n");
 
     const xref_offset = pdf.items.len;
     try writer.writeAll("xref\n0 6\n");
@@ -1579,6 +1583,126 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
 
     return pdf.toOwnedSlice(allocator);
+}
+
+const RasterImage = struct {
+    width: u32,
+    height: u32,
+    pixels: []u8,
+};
+
+fn generateOcrFixtureImage(allocator: std.mem.Allocator) !RasterImage {
+    const width: u32 = 1200;
+    const height: u32 = 1600;
+    const pixels = try allocator.alloc(u8, width * height);
+    @memset(pixels, 0xFF);
+
+    drawBitmapText(pixels, width, height, "SCANNED TYPEWRITTEN", 36, 260, 8);
+
+    return .{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+    };
+}
+
+fn drawBitmapText(
+    pixels: []u8,
+    width: u32,
+    height: u32,
+    text: []const u8,
+    start_x: u32,
+    start_y: u32,
+    scale: u32,
+) void {
+    var cursor_x = start_x;
+    for (text) |byte| {
+        if (byte == ' ') {
+            cursor_x += 4 * scale;
+            continue;
+        }
+        const glyph = glyph5x7(byte);
+        drawGlyph(pixels, width, height, glyph, cursor_x, start_y, scale);
+        cursor_x += 6 * scale;
+    }
+}
+
+fn drawGlyph(
+    pixels: []u8,
+    width: u32,
+    height: u32,
+    rows: [7]u5,
+    start_x: u32,
+    start_y: u32,
+    scale: u32,
+) void {
+    for (rows, 0..) |row_bits, row_index| {
+        for (0..5) |col_index| {
+            const shift: u3 = @intCast(4 - col_index);
+            if (((row_bits >> shift) & 1) == 0) continue;
+            fillRect(
+                pixels,
+                width,
+                height,
+                start_x + @as(u32, @intCast(col_index)) * scale,
+                start_y + @as(u32, @intCast(row_index)) * scale,
+                scale,
+                scale,
+                0x00,
+            );
+        }
+    }
+}
+
+fn fillRect(
+    pixels: []u8,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    rect_width: u32,
+    rect_height: u32,
+    value: u8,
+) void {
+    var row: u32 = 0;
+    while (row < rect_height and y + row < height) : (row += 1) {
+        var col: u32 = 0;
+        while (col < rect_width and x + col < width) : (col += 1) {
+            pixels[(y + row) * width + x + col] = value;
+        }
+    }
+}
+
+fn glyph5x7(byte: u8) [7]u5 {
+    return switch (byte) {
+        'A' => .{ 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
+        'B' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110 },
+        'C' => .{ 0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111 },
+        'D' => .{ 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110 },
+        'E' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111 },
+        'F' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000 },
+        'G' => .{ 0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111 },
+        'H' => .{ 0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 },
+        'I' => .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111 },
+        'J' => .{ 0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100 },
+        'K' => .{ 0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001 },
+        'L' => .{ 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 },
+        'M' => .{ 0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001 },
+        'N' => .{ 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 },
+        'O' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
+        'P' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000 },
+        'Q' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101 },
+        'R' => .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001 },
+        'S' => .{ 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 },
+        'T' => .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100 },
+        'U' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
+        'V' => .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100 },
+        'W' => .{ 0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010 },
+        'X' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001 },
+        'Y' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100 },
+        'Z' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111 },
+        else => .{ 0b11111, 0b10001, 0b00110, 0b00100, 0b00110, 0b10001, 0b11111 },
+    };
 }
 
 const PositionedText = struct {
@@ -1618,6 +1742,32 @@ pub fn generateTablePdf(allocator: std.mem.Allocator) ![]u8 {
         .{ .text = "2021", .x = 80, .y = 660 },
         .{ .text = "140", .x = 200, .y = 660 },
         .{ .text = "25", .x = 320, .y = 660 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
+}
+
+/// Generate a harder financial table with a multi-word label cell, parenthesized
+/// negatives, minus-sign negatives, and a footnote continuation row.
+pub fn generateComplexFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Table 2.", .x = 72, .y = 740 },
+        .{ .text = "Account", .x = 80, .y = 720 },
+        .{ .text = "Revenue", .x = 180, .y = 720 },
+        .{ .text = "Expense", .x = 260, .y = 720 },
+        .{ .text = "Net", .x = 320, .y = 720 },
+        .{ .text = "Total", .x = 80, .y = 700 },
+        .{ .text = "revenue", .x = 122, .y = 700 },
+        .{ .text = "1,200", .x = 180, .y = 700 },
+        .{ .text = "(950)", .x = 260, .y = 700 },
+        .{ .text = "250", .x = 320, .y = 700 },
+        .{ .text = "Services*", .x = 80, .y = 680 },
+        .{ .text = "-300", .x = 180, .y = 680 },
+        .{ .text = "(450)", .x = 260, .y = 680 },
+        .{ .text = "(750)", .x = 320, .y = 680 },
+        .{ .text = "*", .x = 94, .y = 666 },
+        .{ .text = "excludes", .x = 108, .y = 666 },
+        .{ .text = "setup", .x = 168, .y = 666 },
+        .{ .text = "fees", .x = 214, .y = 666 },
     };
     return generatePositionedTextPdf(allocator, &cells);
 }

@@ -23,6 +23,7 @@ class Entry:
     doc_id: str
     pdf_path: Path
     truth_path: Path
+    table_truth_path: Path | None = None
 
 
 def main() -> int:
@@ -30,7 +31,7 @@ def main() -> int:
     parser.add_argument(
         "--manifest",
         default="benchmark/eval/corpus/manifest.tsv",
-        help="TSV manifest with category, doc_id, pdf_path, truth_text_path",
+        help="TSV manifest with category, doc_id, pdf_path, truth_text_path, and optional specialist truth paths",
     )
     parser.add_argument(
         "--tools",
@@ -51,6 +52,11 @@ def main() -> int:
         action="store_true",
         help="Fail if an optional baseline dependency is unavailable",
     )
+    parser.add_argument(
+        "--pdf-parser-adaptive",
+        action="store_true",
+        help="Run the pdf-parser lane through adaptive extraction, including OCR-routed pages",
+    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -61,7 +67,7 @@ def main() -> int:
     for entry in entries:
         truth = entry.truth_path.read_text(encoding="utf-8")
         for tool in tools:
-            row = run_tool(repo_root, entry, truth, tool)
+            row = run_tool(repo_root, entry, truth, tool, pdf_parser_adaptive=args.pdf_parser_adaptive)
             rows.append(row)
             if args.require_baselines and row["status"] != "ok" and row["parser"] != "tesseract":
                 raise SystemExit(f"{tool} failed for {entry.doc_id}: {row.get('reason', row['status'])}")
@@ -83,25 +89,34 @@ def load_manifest(path: Path, repo_root: Path) -> list[Entry]:
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) != 4:
+        if len(fields) < 4 or len(fields) > 7:
             raise ValueError(f"Malformed manifest row: {raw_line!r}")
-        category, doc_id, pdf_path, truth_path = fields
+        category, doc_id, pdf_path, truth_path = fields[:4]
+        table_truth_path = fields[4] if len(fields) >= 5 and fields[4] else None
         entries.append(
             Entry(
                 category=category,
                 doc_id=doc_id,
                 pdf_path=(repo_root / pdf_path).resolve(),
                 truth_path=(repo_root / truth_path).resolve(),
+                table_truth_path=(repo_root / table_truth_path).resolve() if table_truth_path else None,
             )
         )
     return entries
 
 
-def run_tool(repo_root: Path, entry: Entry, truth: str, tool: str) -> dict[str, object]:
+def run_tool(
+    repo_root: Path,
+    entry: Entry,
+    truth: str,
+    tool: str,
+    *,
+    pdf_parser_adaptive: bool,
+) -> dict[str, object]:
     started = time.perf_counter()
     try:
         if tool == "pdf-parser":
-            return run_pdf_parser(repo_root, entry)
+            return run_pdf_parser(repo_root, entry, adaptive=pdf_parser_adaptive)
         if tool == "pymupdf":
             text = extract_optional("fitz", extract_pymupdf, entry.pdf_path)
         elif tool == "pypdfium2":
@@ -128,7 +143,7 @@ def run_tool(repo_root: Path, entry: Entry, truth: str, tool: str) -> dict[str, 
     )
 
 
-def run_pdf_parser(repo_root: Path, entry: Entry) -> dict[str, object]:
+def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str, object]:
     cmd = [
         "zig",
         "build",
@@ -144,6 +159,10 @@ def run_pdf_parser(repo_root: Path, entry: Entry) -> dict[str, object]:
         "--parser",
         "pdf-parser",
     ]
+    if adaptive:
+        cmd.append("--adaptive")
+    if entry.table_truth_path is not None:
+        cmd.extend(["--truth-table-json", str(entry.table_truth_path)])
     proc = subprocess.run(
         cmd,
         cwd=repo_root,

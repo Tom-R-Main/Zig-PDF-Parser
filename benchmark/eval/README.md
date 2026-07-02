@@ -11,6 +11,19 @@ zig build eval -- benchmark/eval/corpus/clean_born_digital/clean-native.pdf \
   --doc-id clean-native
 ```
 
+Use adaptive mode when you want route decisions, reconciliation, and OCR
+adapters included in the measured output:
+
+```sh
+zig build eval -- benchmark/eval/corpus/scanned_typewritten/image-only-page.pdf \
+  --adaptive \
+  --ocr-rasterizer pdftoppm \
+  --ocr-executable tesseract \
+  --truth-text benchmark/eval/ground_truth/page_text/scanned_typewritten/image-only-page.txt \
+  --category scanned_typewritten \
+  --doc-id image-only-page
+```
+
 The tiny checked-in corpus is manifest-driven:
 
 ```sh
@@ -27,12 +40,24 @@ table/formula, latency, RSS, and provenance counters. Missing specialist ground
 truth is represented as `null`, so the same schema works for native text-only
 fixtures and richer labeled corpora.
 
+Manifest rows have four required TSV columns:
+`category`, `doc_id`, `pdf_path`, and `truth_text_path`. Three optional columns
+can follow: `truth_table_json_path`, `truth_reading_order_path`, and
+`truth_formula_path`. Empty optional columns are allowed when a later specialist
+truth file is present. Table truth emits `table_cell_accuracy`; reading-order
+truth emits `reading_order_score`; formula truth emits `formula_bleu` and
+`formula_edit_distance`.
+
 External task evaluators can feed their scores into the same record:
 
 ```sh
 zig build eval -- corpus/scientific_math/example.pdf \
   --truth-text ground_truth/page_text/example.txt \
+  --truth-table-json ground_truth/tables/example.json \
+  --truth-reading-order ground_truth/reading_order/example.txt \
+  --truth-formula ground_truth/formulas/example.txt \
   --category scientific_math \
+  --adaptive \
   --reading-order-score 0.88 \
   --table-f1 0.72 \
   --teds 0.64 \
@@ -80,10 +105,11 @@ benchmark/eval/
 
 The Zig harness currently computes CER, WER, token precision/recall/F1,
 normalized edit distance, BLEU-4, local alignment, latency summaries, peak RSS,
-and reading-order LCS when order labels are supplied. The result schema also has
-slots for table detection F1, TEDS, GriTS, formula BLEU, formula edit distance,
-and CDM so local specialist adapters can report into the same records as they
-come online.
+reading-order text alignment when order labels are supplied, table cell
+accuracy when table JSON labels are supplied, and formula BLEU/edit distance
+when formula labels are supplied. The result schema also has slots for table
+detection F1, TEDS, GriTS, and formula CDM so local specialist adapters can
+report into the same records as they come online.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.
@@ -107,6 +133,13 @@ python3 benchmark/eval/compare.py \
   --require-baselines \
   --jsonl \
   --output benchmark/eval/outputs/comparison/tiny-corpus.jsonl
+```
+
+Add `--pdf-parser-adaptive` when the first-party lane should run adaptive
+extraction and OCR-routed pages:
+
+```sh
+python3 benchmark/eval/compare.py --require-baselines --pdf-parser-adaptive
 ```
 
 Install optional baselines in your own environment when you want strict

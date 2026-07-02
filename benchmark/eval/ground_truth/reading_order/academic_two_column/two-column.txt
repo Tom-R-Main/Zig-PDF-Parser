@@ -1,0 +1,8 @@
+Chapter 1
+Left column first line
+Left column second line
+Left column third line
+Right column first line
+Right column second line
+Right column third line
+42
