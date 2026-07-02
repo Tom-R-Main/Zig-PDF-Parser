@@ -1,0 +1,8 @@
+# category	doc_id	pdf_path	password	page_count	source_note
+manuals	public-domain-book	benchmark/eval/raw_cache/large/public-domain-book.pdf			Born-digital long public-interest book source.
+manuals	pdf-reference-1k	benchmark/eval/raw_cache/large/pdf-reference-1k.pdf		1310	Large technical reference PDF.
+scanned_typewritten	image-heavy-scan	benchmark/eval/raw_cache/large/image-heavy-scan.pdf			Public-domain scanned manual for OCR routing and image-heavy behavior.
+financial_tables	table-heavy-sec	benchmark/eval/raw_cache/large/table-heavy-sec.pdf			Public SEC annual report with financial statement tables.
+clean_born_digital	text-100	benchmark/eval/raw_cache/large/text-100.pdf		100	qpdf first-100-page derivative.
+clean_born_digital	object-stream-heavy	benchmark/eval/raw_cache/large/object-stream-heavy.pdf		100	qpdf object-stream derivative of text-100.
+clean_born_digital	encrypted-text-100	benchmark/eval/raw_cache/large/encrypted-text-100.pdf	benchmark-password	100	qpdf AES-256 encrypted derivative of text-100.

@@ -18,6 +18,13 @@ DEFAULT_TOOLS = ("pdf-parser", "pymupdf", "pypdfium2", "pdfplumber", "tesseract"
 
 
 @dataclass(frozen=True)
+class PdfParserConfig:
+    runner: str
+    eval_command: Path
+    ensure_releasefast: bool
+
+
+@dataclass(frozen=True)
 class Entry:
     category: str
     doc_id: str
@@ -60,17 +67,55 @@ def main() -> int:
         action="store_true",
         help="Run the pdf-parser lane through adaptive extraction, including OCR-routed pages",
     )
+    parser.add_argument(
+        "--pdf-parser-eval-command",
+        default="zig-out/bin/pdf-parser-eval",
+        help="ReleaseFast pdf-parser-eval binary used by the pdf-parser lane",
+    )
+    parser.add_argument(
+        "--pdf-parser-runner",
+        choices=("binary", "zig-build"),
+        default="binary",
+        help="Use the ReleaseFast eval binary, or the legacy 'zig build eval' runner",
+    )
+    parser.add_argument(
+        "--ensure-releasefast",
+        dest="ensure_releasefast",
+        action="store_true",
+        help="Build ReleaseFast binaries once before running the pdf-parser binary lane",
+    )
+    parser.add_argument(
+        "--no-ensure-releasefast",
+        dest="ensure_releasefast",
+        action="store_false",
+        help="Do not build ReleaseFast binaries even if the eval binary is missing",
+    )
+    parser.set_defaults(ensure_releasefast=True)
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
     entries = load_manifest(repo_root / args.manifest, repo_root)
     tools = tuple(tool.strip() for tool in args.tools.split(",") if tool.strip())
+    pdf_parser_config = PdfParserConfig(
+        runner=args.pdf_parser_runner,
+        eval_command=resolve_command_path(repo_root, args.pdf_parser_eval_command),
+        ensure_releasefast=args.ensure_releasefast,
+    )
+    if "pdf-parser" in tools and pdf_parser_config.runner == "binary":
+        ensure_pdf_parser_eval_binary(repo_root, pdf_parser_config)
 
     rows: list[dict[str, object]] = []
     for entry in entries:
         truth = entry.truth_path.read_text(encoding="utf-8")
         for tool in tools:
-            row = run_tool(repo_root, entry, truth, tool, pdf_parser_adaptive=args.pdf_parser_adaptive)
+            row = run_tool(
+                repo_root,
+                entry,
+                truth,
+                tool,
+                pdf_parser_adaptive=args.pdf_parser_adaptive,
+                pdf_parser_config=pdf_parser_config,
+            )
             rows.append(row)
             if args.require_baselines and row["status"] != "ok" and row["parser"] != "tesseract":
                 raise SystemExit(f"{tool} failed for {entry.doc_id}: {row.get('reason', row['status'])}")
@@ -83,6 +128,27 @@ def main() -> int:
     else:
         print(output, end="")
     return 0
+
+
+def resolve_command_path(repo_root: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else repo_root / path
+
+
+def ensure_pdf_parser_eval_binary(repo_root: Path, config: PdfParserConfig) -> None:
+    if config.eval_command.exists():
+        return
+    if not config.ensure_releasefast:
+        raise SystemExit(f"Missing pdf-parser eval binary: {config.eval_command}")
+    cmd = ["zig", "build", "-Doptimize=ReleaseFast", "--summary", "all"]
+    proc = subprocess.run(cmd, cwd=repo_root, text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(
+            "ReleaseFast build failed while preparing comparator:\n"
+            + (proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}")
+        )
+    if not config.eval_command.exists():
+        raise SystemExit(f"ReleaseFast build completed but {config.eval_command} was not found")
 
 
 def load_manifest(path: Path, repo_root: Path) -> list[Entry]:
@@ -121,11 +187,12 @@ def run_tool(
     tool: str,
     *,
     pdf_parser_adaptive: bool,
+    pdf_parser_config: PdfParserConfig,
 ) -> dict[str, object]:
     started = time.perf_counter()
     try:
         if tool == "pdf-parser":
-            return run_pdf_parser(repo_root, entry, adaptive=pdf_parser_adaptive)
+            return run_pdf_parser(repo_root, entry, adaptive=pdf_parser_adaptive, config=pdf_parser_config)
         if tool == "pymupdf":
             text = extract_optional("fitz", extract_pymupdf, entry.pdf_path)
         elif tool == "pypdfium2":
@@ -148,36 +215,14 @@ def run_tool(
         status="ok",
         metrics=text_metrics(text, truth),
         latency_ms=elapsed_ms,
+        wall_ms=elapsed_ms,
         peak_rss_mb=current_peak_rss_mb(),
     )
 
 
-def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str, object]:
-    cmd = [
-        "zig",
-        "build",
-        "eval",
-        "--",
-        str(entry.pdf_path),
-        "--truth-text",
-        str(entry.truth_path),
-        "--category",
-        entry.category,
-        "--doc-id",
-        entry.doc_id,
-        "--parser",
-        "pdf-parser",
-    ]
-    if adaptive:
-        cmd.append("--adaptive")
-    if entry.table_truth_path is not None:
-        cmd.extend(["--truth-table-json", str(entry.table_truth_path)])
-    if entry.formula_truth_path is not None:
-        cmd.extend(["--truth-formula", str(entry.formula_truth_path)])
-    if entry.formula_json_truth_path is not None:
-        cmd.extend(["--truth-formula-json", str(entry.formula_json_truth_path)])
-    if entry.form_json_truth_path is not None:
-        cmd.extend(["--truth-form-json", str(entry.form_json_truth_path)])
+def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool, config: PdfParserConfig) -> dict[str, object]:
+    cmd = build_pdf_parser_command(entry, adaptive=adaptive, config=config)
+    started = time.perf_counter()
     proc = subprocess.run(
         cmd,
         cwd=repo_root,
@@ -185,8 +230,11 @@ def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str
         capture_output=True,
         check=False,
     )
+    wall_ms = (time.perf_counter() - started) * 1000.0
     if proc.returncode != 0:
-        return skipped(entry, "pdf-parser", proc.stderr.strip() or f"exit {proc.returncode}")
+        result = skipped(entry, "pdf-parser", proc.stderr.strip() or f"exit {proc.returncode}")
+        result["wall_ms"] = wall_ms
+        return result
     result = json.loads(proc.stdout.splitlines()[-1])
     metrics = result["metrics"]
     return row(
@@ -209,8 +257,45 @@ def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str
             "form_field_accuracy": metrics.get("form_field_accuracy"),
         },
         latency_ms=metrics["median_ms_per_page"],
+        wall_ms=wall_ms,
         peak_rss_mb=metrics["peak_rss_mb"],
     )
+
+
+def build_pdf_parser_command(entry: Entry, *, adaptive: bool, config: PdfParserConfig) -> list[str]:
+    if config.runner == "zig-build":
+        cmd = [
+            "zig",
+            "build",
+            "eval",
+            "--",
+        ]
+    else:
+        cmd = [str(config.eval_command)]
+    cmd.extend(
+        [
+        str(entry.pdf_path),
+        "--truth-text",
+        str(entry.truth_path),
+        "--category",
+        entry.category,
+        "--doc-id",
+        entry.doc_id,
+        "--parser",
+        "pdf-parser",
+        ]
+    )
+    if adaptive:
+        cmd.append("--adaptive")
+    if entry.table_truth_path is not None:
+        cmd.extend(["--truth-table-json", str(entry.table_truth_path)])
+    if entry.formula_truth_path is not None:
+        cmd.extend(["--truth-formula", str(entry.formula_truth_path)])
+    if entry.formula_json_truth_path is not None:
+        cmd.extend(["--truth-formula-json", str(entry.formula_json_truth_path)])
+    if entry.form_json_truth_path is not None:
+        cmd.extend(["--truth-form-json", str(entry.form_json_truth_path)])
+    return cmd
 
 
 def extract_optional(module_name: str, extractor: Callable[[Path], str], pdf_path: Path) -> str:
@@ -260,6 +345,7 @@ def row(
     status: str,
     metrics: dict[str, float | None],
     latency_ms: float | None,
+    wall_ms: float | None,
     peak_rss_mb: float | None,
 ) -> dict[str, object]:
     return {
@@ -269,6 +355,7 @@ def row(
         "status": status,
         "metrics": metrics,
         "latency_ms": latency_ms,
+        "wall_ms": wall_ms,
         "peak_rss_mb": peak_rss_mb,
     }
 
@@ -294,6 +381,7 @@ def skipped(entry: Entry, parser: str, reason: str) -> dict[str, object]:
             "form_field_accuracy": None,
         },
         latency_ms=None,
+        wall_ms=None,
         peak_rss_mb=None,
     )
     result["reason"] = reason
@@ -388,6 +476,7 @@ def render_table(rows: list[dict[str, object]]) -> str:
         "formula_struct",
         "form_fields",
         "latency_ms",
+        "wall_ms",
         "rss_mb",
     )
     body = []
@@ -414,6 +503,7 @@ def render_table(rows: list[dict[str, object]]) -> str:
                 fmt(metrics.get("formula_structure_accuracy")),
                 fmt(metrics.get("form_field_accuracy")),
                 fmt(data.get("latency_ms")),
+                fmt(data.get("wall_ms")),
                 fmt(data.get("peak_rss_mb")),
             )
         )

@@ -43,6 +43,16 @@ if the adaptive counters differ from those expectations. Large or raw third-part
 corpora should live under `benchmark/eval/raw_cache/`, which is ignored by git;
 checked-in PDFs should stay small, redistributable reductions.
 
+Large performance manifests live under `benchmark/eval/large/`. Those manifests
+point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
+and profiling work rather than truth-labeled correctness scoring:
+
+```sh
+.venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
+.venv/bin/python benchmark/eval/fetch_large_corpus.py --download --derive
+.venv/bin/python benchmark/eval/fetch_large_corpus.py --verify
+```
+
 The runner emits one JSONL record per document with text, layout-adjacent,
 table/formula, latency, RSS, and provenance counters. Missing specialist ground
 truth is represented as `null`, so the same schema works for native text-only
@@ -202,17 +212,22 @@ quality evidence, `benchmark_category_summary` to class-level gates, and
 Use the lightweight comparator for a side-by-side view over the manifest:
 
 ```sh
-python3 benchmark/eval/compare.py
+python3 benchmark/eval/compare.py --ensure-releasefast
 ```
 
 It reports CER, WER, token F1, latency, and RSS for `pdf-parser`, PyMuPDF,
-`pypdfium2`, `pdfplumber`, and a named Tesseract lane. Python baselines are
-optional by default; unavailable libraries are shown as skipped so first-party
-eval stays runnable on a clean machine. To require all installed-library
-baselines and write JSONL:
+`pypdfium2`, `pdfplumber`, and a named Tesseract lane. The `pdf-parser` lane
+uses `zig-out/bin/pdf-parser-eval` by default, building it once with
+`zig build -Doptimize=ReleaseFast` when needed. Its `latency_ms` is parser
+reported latency, while `wall_ms` captures subprocess overhead. Use
+`--pdf-parser-runner zig-build` only for legacy compatibility. Python baselines
+are optional by default; unavailable libraries are shown as skipped so
+first-party eval stays runnable on a clean machine. To require all
+installed-library baselines and write JSONL:
 
 ```sh
 python3 benchmark/eval/compare.py \
+  --ensure-releasefast \
   --require-baselines \
   --jsonl \
   --output benchmark/eval/outputs/comparison/tiny-corpus.jsonl
@@ -224,6 +239,24 @@ extraction and OCR-routed pages:
 ```sh
 python3 benchmark/eval/compare.py --require-baselines --pdf-parser-adaptive
 ```
+
+## Lane Profiling
+
+Profile extraction surfaces before tuning parser internals:
+
+```sh
+.venv/bin/python benchmark/eval/profile_lanes.py \
+  --manifest benchmark/eval/large/manifest.tsv \
+  --lanes native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
+  --repeat 3 \
+  --output benchmark/eval/outputs/profile/large.jsonl
+```
+
+The profiler writes one JSONL record per document/lane/repeat with wall time,
+peak RSS when `/usr/bin/time` exposes it, input SHA256, output byte count, and
+stream parser latency when the lane emits a `document_finished` record. Use the
+tiny checked-in manifest for CI smoke tests and the large manifest after
+populating `raw_cache/large`.
 
 Install optional baselines in your own environment when you want strict
 side-by-side numbers:

@@ -83,6 +83,10 @@ fn printUsage() !void {
         \\  --password PASS Open an encrypted PDF with a supplied password
         \\  --password-file FILE
         \\                  Read the encrypted PDF password from FILE (trailing newline ignored)
+        \\  --ocr-executable FILE
+        \\                  Tesseract executable for adaptive OCR routes
+        \\  --ocr-rasterizer FILE
+        \\                  pdftoppm-compatible rasterizer for adaptive OCR routes
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
         \\  --emit-specialist-requests FILE
@@ -720,6 +724,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var specialist_config_file: ?[]const u8 = null;
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
+    var ocr_config = zpdf.OcrConfig{};
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -742,6 +747,21 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         } else if (std.mem.eql(u8, arg, "--password-file")) {
             i += 1;
             if (i < args.len) password_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-executable")) {
+            i += 1;
+            if (i < args.len) ocr_config.executable = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-rasterizer")) {
+            i += 1;
+            if (i < args.len) ocr_config.rasterizer_executable = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-lang")) {
+            i += 1;
+            if (i < args.len) ocr_config.lang = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-dpi")) {
+            i += 1;
+            if (i < args.len) ocr_config.dpi = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
+                return;
+            };
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
@@ -823,6 +843,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
+                .ocr_config = ocr_config,
             },
         }) catch |err| {
             std.debug.print("Error during extract-adaptive: {}\n", .{err});
@@ -841,6 +862,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
+                .ocr_config = ocr_config,
             },
         }) catch |err| {
             std.debug.print("Error during extract-adaptive: {}\n", .{err});

@@ -64,7 +64,13 @@ pdf-parser benchmark \
 .venv/bin/python benchmark/eval/compare.py \
   --pdf-parser-adaptive \
   --tools pdf-parser,pymupdf,pypdfium2,pdfplumber \
+  --ensure-releasefast \
   --manifest benchmark/eval/corpus/manifest.tsv
+.venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
+.venv/bin/python benchmark/eval/profile_lanes.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --lanes native-text,adaptive-artifact-jsonl \
+  --output /tmp/pdf-parser-profile.jsonl
 ```
 
 Current fixture classes include clean born-digital text, academic two-column
@@ -82,6 +88,13 @@ neutral: use `pdf-parser:native`, `pdf-parser:adaptive`, or
 `command:<id>=<command template with {pdf}>`. `--candidate-command` and
 `--baseline-command` compare two pdf-parser-compatible executables and
 `--fail-on-regression` makes the scorecard usable as a CI ingestion gate.
+
+`benchmark/eval/corpus` is the tiny checked-in correctness and regression
+corpus. Large public or private PDFs belong under ignored
+`benchmark/eval/raw_cache/large`; use `benchmark/eval/fetch_large_corpus.py` to
+download/derive local performance fixtures and `benchmark/eval/profile_lanes.py`
+to measure native text, adaptive artifact JSONL, streaming JSONL, and OCR-routed
+lanes before doing parser optimization.
 
 ## Requirements
 
@@ -438,7 +451,7 @@ without removing the older top-level compatibility fields.
 | FlateDecode, LZW, ASCII85/Hex | Yes | Yes | Yes | Yes |
 | JBIG2, JPEG2000 | No | Yes | Yes | Via dependencies |
 | **Other** | | | |
-| Encrypted PDFs | No | Yes | Yes | Via dependencies |
+| Encrypted PDFs | Known password | Yes | Yes | Via dependencies |
 | Rendering | No | Yes | Yes | No |
 
 *\*CID fonts: Works when CMap is embedded directly.*
