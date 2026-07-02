@@ -226,6 +226,10 @@ fn optionalManifestField(field: ?[]const u8) ?[]const u8 {
     return if (value.len == 0) null else value;
 }
 
+fn docIdForMetrics(options: Options, pdf_path: []const u8) []const u8 {
+    return options.doc_id orelse std.fs.path.basename(pdf_path);
+}
+
 fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
     const pdf_path = options.pdf_path orelse return error.MissingInput;
     var truth_text: ?[]align(1) u8 = null;
@@ -280,12 +284,26 @@ fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
     var table_cell_accuracy: ?f64 = null;
     var table_span_accuracy: ?f64 = null;
     var table_role_accuracy: ?f64 = null;
+    var table_rowspan_accuracy: ?f64 = null;
+    var table_colspan_accuracy: ?f64 = null;
+    var table_page_accuracy: ?f64 = null;
+    var table_continuation_accuracy: ?f64 = null;
+    var table_source_span_coverage: ?f64 = null;
     if (truth_table_json) |truth_json| {
         const predicted_table_json = try renderDocumentTablesJson(allocator, doc);
         defer allocator.free(predicted_table_json);
         table_cell_accuracy = try evaluateTableCellAccuracy(allocator, predicted_table_json, truth_json);
         table_span_accuracy = try evaluateTableSpanAccuracy(allocator, predicted_table_json, truth_json);
         table_role_accuracy = try evaluateTableRoleAccuracy(allocator, predicted_table_json, truth_json);
+        table_rowspan_accuracy = try evaluateTableIntegerFieldAccuracy(allocator, predicted_table_json, truth_json, "\"rowspan\"");
+        table_colspan_accuracy = try evaluateTableIntegerFieldAccuracy(allocator, predicted_table_json, truth_json, "\"colspan\"");
+        table_page_accuracy = try evaluateTableIntegerFieldAccuracy(allocator, predicted_table_json, truth_json, "\"page\"");
+        table_continuation_accuracy = try evaluateTableContinuationAccuracy(allocator, predicted_table_json, truth_json);
+        if (extraction.adaptive) |*adaptive_result| {
+            const artifact_json = try zpdf.schema.renderArtifactJson(allocator, adaptive_result, .{ .document_id = docIdForMetrics(options, pdf_path) });
+            defer allocator.free(artifact_json);
+            table_source_span_coverage = evaluateTableSourceSpanCoverage(artifact_json);
+        }
     }
     var formula_metrics: eval.FormulaMetrics = .{
         .bleu = options.formula_bleu,
@@ -357,6 +375,11 @@ fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
             .cell_accuracy = table_cell_accuracy,
             .span_accuracy = table_span_accuracy,
             .role_accuracy = table_role_accuracy,
+            .rowspan_accuracy = table_rowspan_accuracy,
+            .colspan_accuracy = table_colspan_accuracy,
+            .page_accuracy = table_page_accuracy,
+            .continuation_accuracy = table_continuation_accuracy,
+            .source_span_coverage = table_source_span_coverage,
         },
         .formula = formula_metrics,
         .form = form_metrics,
@@ -675,6 +698,104 @@ fn evaluateTableRoleAccuracy(allocator: std.mem.Allocator, predicted_json: []con
 
     const denominator = @max(predicted.len, truth.len);
     return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(denominator));
+}
+
+fn evaluateTableIntegerFieldAccuracy(
+    allocator: std.mem.Allocator,
+    predicted_json: []const u8,
+    truth_json: []const u8,
+    needle: []const u8,
+) !?f64 {
+    if (std.mem.indexOf(u8, truth_json, needle) == null) return null;
+
+    var predicted_values: std.ArrayList(u32) = .empty;
+    defer predicted_values.deinit(allocator);
+    try appendJsonIntegerValues(allocator, &predicted_values, predicted_json, needle);
+
+    var truth_values: std.ArrayList(u32) = .empty;
+    defer truth_values.deinit(allocator);
+    try appendJsonIntegerValues(allocator, &truth_values, truth_json, needle);
+
+    if (truth_values.items.len == 0) return if (predicted_values.items.len == 0) @as(f64, 1.0) else @as(f64, 0.0);
+
+    var matched: usize = 0;
+    const compare_count = @min(predicted_values.items.len, truth_values.items.len);
+    for (0..compare_count) |index| {
+        if (predicted_values.items[index] == truth_values.items[index]) matched += 1;
+    }
+
+    const denominator = @max(predicted_values.items.len, truth_values.items.len);
+    return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(denominator));
+}
+
+fn evaluateTableContinuationAccuracy(allocator: std.mem.Allocator, predicted_json: []const u8, truth_json: []const u8) !?f64 {
+    if (std.mem.indexOf(u8, truth_json, "\"continued_from_table_id\"") == null and
+        std.mem.indexOf(u8, truth_json, "\"logical_table_id\"") == null)
+    {
+        return null;
+    }
+
+    const predicted = try extractContinuationValues(allocator, predicted_json);
+    defer freeStringList(allocator, predicted);
+    const truth = try extractContinuationValues(allocator, truth_json);
+    defer freeStringList(allocator, truth);
+
+    if (truth.len == 0) return if (predicted.len == 0) @as(f64, 1.0) else @as(f64, 0.0);
+
+    var matched: usize = 0;
+    const compare_count = @min(predicted.len, truth.len);
+    for (0..compare_count) |index| {
+        if (std.mem.eql(u8, predicted[index], truth[index])) matched += 1;
+    }
+    const denominator = @max(predicted.len, truth.len);
+    return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(denominator));
+}
+
+fn extractContinuationValues(allocator: std.mem.Allocator, json: []const u8) ![][]u8 {
+    const logical = try extractJsonStringValues(allocator, json, "\"logical_table_id\"");
+    errdefer freeStringList(allocator, logical);
+    const continued = try extractJsonStringValues(allocator, json, "\"continued_from_table_id\"");
+    errdefer freeStringList(allocator, continued);
+
+    var values: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (values.items) |value| allocator.free(value);
+        values.deinit(allocator);
+    }
+    for (logical) |value| try values.append(allocator, value);
+    for (continued) |value| try values.append(allocator, value);
+    allocator.free(logical);
+    allocator.free(continued);
+    return values.toOwnedSlice(allocator);
+}
+
+fn evaluateTableSourceSpanCoverage(json: []const u8) ?f64 {
+    if (std.mem.indexOf(u8, json, "\"source_span_ids\"") == null) return null;
+    var cursor: usize = 0;
+    var total: usize = 0;
+    var non_empty: usize = 0;
+    const needle = "\"source_span_ids\"";
+    while (std.mem.indexOf(u8, json[cursor..], needle)) |relative_index| {
+        var pos = cursor + relative_index + needle.len;
+        while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
+        if (pos >= json.len or json[pos] != ':') {
+            cursor = pos;
+            continue;
+        }
+        pos += 1;
+        while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
+        if (pos >= json.len or json[pos] != '[') {
+            cursor = pos;
+            continue;
+        }
+        total += 1;
+        pos += 1;
+        while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
+        if (pos < json.len and json[pos] != ']') non_empty += 1;
+        cursor = pos;
+    }
+    if (total == 0) return null;
+    return @as(f64, @floatFromInt(non_empty)) / @as(f64, @floatFromInt(total));
 }
 
 const FormSignature = struct {

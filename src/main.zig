@@ -1,6 +1,7 @@
 //! pdf-parser CLI - Text extraction tool
 //!
 //! Usage: pdf-parser extract [options] input.pdf [pages]
+//!        pdf-parser extract-adaptive --input input.pdf [options]
 //!        pdf-parser inspect complexity [options] input.pdf
 //!        pdf-parser info input.pdf
 //!        pdf-parser bench input.pdf
@@ -23,6 +24,8 @@ fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (std.mem.eql(u8, command, "extract")) {
         try runExtract(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "extract-adaptive")) {
+        try runExtractAdaptive(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "inspect")) {
         try runInspect(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "info")) {
@@ -51,6 +54,8 @@ fn printUsage() !void {
         \\
         \\Commands:
         \\  extract     Extract text from PDF (like mutool draw -F txt)
+        \\  extract-adaptive
+        \\              Host adapter extraction surface for adaptive artifacts
         \\  inspect     Inspect parser decisions and document signals
         \\  info        Show PDF structure information (metadata, outline, etc.)
         \\  search      Search for text across all pages
@@ -60,9 +65,11 @@ fn printUsage() !void {
         \\Extract options:
         \\  -o FILE         Output to file (default: stdout)
         \\  -p PAGES        Page range (e.g., "1-10" or "1,3,5")
+        \\  --pages PAGES   Page range alias for adapter-style commands
         \\  -f, --format    Output format: text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg
         \\  -m, --markdown  Shortcut for --format markdown
         \\  --adaptive      Use adaptive routing and reconciled outputs
+        \\  --source-id ID  External caller-owned source id for adaptive artifacts
         \\  --trace         Emit adaptive route trace JSON
         \\  --sequential    Disable parallel extraction
         \\  --reading-order Use visual reading order (experimental, slower)
@@ -79,6 +86,7 @@ fn printUsage() !void {
         \\  pdf-parser extract --adaptive -f rag-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f stream-jsonl doc.pdf
+        \\  pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
         \\  pdf-parser extract --adaptive -f debug-svg doc.pdf
         \\  pdf-parser extract doc.pdf --adaptive --trace
         \\  pdf-parser inspect complexity doc.pdf --format json
@@ -117,6 +125,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var extraction_mode: ExtractionMode = .normal;
     var adaptive = false;
     var trace = false;
+    var source_id: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -125,9 +134,12 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "-o")) {
             i += 1;
             if (i < args.len) output_file = args[i];
-        } else if (std.mem.eql(u8, arg, "-p")) {
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pages")) {
             i += 1;
             if (i < args.len) page_range = args[i];
+        } else if (std.mem.eql(u8, arg, "--source-id")) {
+            i += 1;
+            if (i < args.len) source_id = args[i];
         } else if (std.mem.eql(u8, arg, "--strict")) {
             error_mode = zpdf.ErrorConfig.strict();
         } else if (std.mem.eql(u8, arg, "--permissive")) {
@@ -202,7 +214,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(pages);
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, allocator, output_handle);
         return;
     }
 
@@ -454,6 +466,7 @@ fn doAdaptiveExtract(
     pages: []const usize,
     output_format: OutputFormat,
     trace: bool,
+    source_id: ?[]const u8,
     allocator: std.mem.Allocator,
     output_handle: ?runtime.File,
 ) !void {
@@ -480,6 +493,7 @@ fn doAdaptiveExtract(
 
     const schema_options = zpdf.schema.RenderOptions{
         .document_id = doc.source_path orelse "document",
+        .source_id = source_id,
         .input_sha256 = input_sha256,
         .source_path = doc.source_path,
         .page_count = doc.pageCount(),
@@ -532,7 +546,7 @@ fn doAdaptiveExtract(
     defer result.deinit();
 
     const rendered = if (trace)
-        zpdf.schema.renderTraceJson(allocator, &result, schema_options.document_id) catch |err| {
+        zpdf.schema.renderTraceJsonWithOptions(allocator, &result, schema_options) catch |err| {
             std.debug.print("Error rendering adaptive trace: {}\n", .{err});
             return;
         }
@@ -561,6 +575,114 @@ fn doAdaptiveExtract(
     } else {
         runtime.writeAllStdout(rendered) catch |err| {
             std.debug.print("Error writing output: {}\n", .{err});
+            return;
+        };
+    }
+}
+
+fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var input_file: ?[]const u8 = null;
+    var output_file: ?[]const u8 = null;
+    var page_range: ?[]const u8 = null;
+    var source_id: ?[]const u8 = null;
+    var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
+    var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--input")) {
+            i += 1;
+            if (i < args.len) input_file = args[i];
+        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i < args.len) output_file = args[i];
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pages")) {
+            i += 1;
+            if (i < args.len) page_range = args[i];
+        } else if (std.mem.eql(u8, arg, "--source-id")) {
+            i += 1;
+            if (i < args.len) source_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
+            i += 1;
+            if (i < args.len) {
+                adapter_format = zpdf.adapter.formatFromName(args[i]) orelse {
+                    std.debug.print("Unknown extract-adaptive format: {s}. Use json, artifact-jsonl, stream-jsonl, or trace-json.\n", .{args[i]});
+                    return;
+                };
+            }
+        } else if (std.mem.eql(u8, arg, "--trace")) {
+            adapter_format = .trace_json;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            error_mode = zpdf.ErrorConfig.strict();
+        } else if (std.mem.eql(u8, arg, "--permissive")) {
+            error_mode = zpdf.ErrorConfig.permissive();
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            std.debug.print("extract-adaptive requires --input; unexpected positional argument: {s}\n", .{arg});
+            return;
+        }
+    }
+
+    const path = input_file orelse {
+        std.debug.print("Error: extract-adaptive requires --input <file.pdf>\n", .{});
+        return;
+    };
+
+    const doc = zpdf.Document.openWithConfig(allocator, path, error_mode) catch |err| {
+        std.debug.print("Error opening {s}: {}\n", .{ path, err });
+        return;
+    };
+    defer doc.close();
+
+    const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
+        std.debug.print("Error parsing page range: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(pages);
+
+    const window = contiguousPageWindow(pages) catch |err| {
+        std.debug.print("Error: extract-adaptive currently requires a contiguous page range: {}\n", .{err});
+        return;
+    };
+
+    const output_handle = if (output_file) |out_path|
+        runtime.createFileCwd(out_path) catch |err| {
+            std.debug.print("Error creating {s}: {}\n", .{ out_path, err });
+            return;
+        }
+    else
+        null;
+    defer if (output_handle) |h| runtime.closeFile(h);
+
+    var write_buf: [4096]u8 = undefined;
+    if (output_handle) |h| {
+        var file_writer = runtime.fileWriter(h, &write_buf);
+        const writer = &file_writer.interface;
+        defer writer.flush() catch {};
+        _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
+            .source_id = source_id,
+            .format = adapter_format,
+            .adaptive_options = .{
+                .page_start = window.start,
+                .page_end = window.end,
+            },
+        }) catch |err| {
+            std.debug.print("Error during extract-adaptive: {}\n", .{err});
+            return;
+        };
+    } else {
+        var stdout_writer = runtime.stdoutWriter(&write_buf);
+        const writer = &stdout_writer.interface;
+        defer writer.flush() catch {};
+        _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
+            .source_id = source_id,
+            .format = adapter_format,
+            .adaptive_options = .{
+                .page_start = window.start,
+                .page_end = window.end,
+            },
+        }) catch |err| {
+            std.debug.print("Error during extract-adaptive: {}\n", .{err});
             return;
         };
     }
@@ -804,6 +926,78 @@ test "extract adaptive CLI supports reconciler formats" {
         const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
         defer allocator.free(output);
         try std.testing.expect(std.mem.indexOf(u8, output, case.needle) != null);
+    }
+}
+
+test "extract-adaptive CLI emits neutral source id artifacts" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateCleanNativePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-cli-adapter-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    const cases = [_]struct {
+        output_suffix: []const u8,
+        args: []const []const u8,
+        needles: []const []const u8,
+    }{
+        .{
+            .output_suffix = "artifact",
+            .args = &.{ "extract-adaptive", "--input", input_path, "--source-id", "external-123", "--format", "artifact-jsonl" },
+            .needles = &.{ "\"record_type\":\"document_manifest\"", "\"source_id\":\"external-123\"", "\"record_type\":\"rag_chunk\"" },
+        },
+        .{
+            .output_suffix = "stream",
+            .args = &.{ "extract-adaptive", "--input", input_path, "--source-id", "external-123", "--format", "stream-jsonl" },
+            .needles = &.{ "\"record_type\":\"document_finished\"", "\"source_id\":\"external-123\"", "\"event_type\":\"page_started\"" },
+        },
+        .{
+            .output_suffix = "legacy",
+            .args = &.{ "extract", "--adaptive", "--source-id", "external-123", "--format", "artifact-jsonl", input_path },
+            .needles = &.{ "\"record_type\":\"document_manifest\"", "\"source_id\":\"external-123\"", "\"provenance\":{\"document_id\"" },
+        },
+    };
+
+    for (cases) |case| {
+        var output_buf: [128]u8 = undefined;
+        const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-cli-adapter-{x}-{s}.out", .{
+            std.testing.random_seed,
+            case.output_suffix,
+        });
+        runtime.deleteFileCwd(output_path);
+        defer runtime.deleteFileCwd(output_path);
+
+        if (std.mem.eql(u8, case.args[0], "extract-adaptive")) {
+            var argv = try std.ArrayList([]const u8).initCapacity(allocator, case.args.len + 2);
+            defer argv.deinit(allocator);
+            try argv.appendSlice(allocator, case.args);
+            try argv.appendSlice(allocator, &.{ "--output", output_path });
+            try runExtractAdaptive(allocator, argv.items[1..]);
+        } else {
+            var argv = try std.ArrayList([]const u8).initCapacity(allocator, case.args.len + 2);
+            defer argv.deinit(allocator);
+            try argv.appendSlice(allocator, case.args);
+            try argv.appendSlice(allocator, &.{ "-o", output_path });
+            try runExtract(allocator, argv.items[1..]);
+        }
+
+        const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+        defer allocator.free(output);
+        for (case.needles) |needle| {
+            try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
+        }
     }
 }
 

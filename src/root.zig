@@ -36,6 +36,7 @@ pub const reconcile = @import("reconcile.zig");
 pub const adaptive = @import("adaptive.zig");
 pub const schema = @import("schema.zig");
 pub const stream = @import("stream.zig");
+pub const adapter = @import("adapter.zig");
 pub const eval = @import("eval.zig");
 
 // Re-exports
@@ -77,6 +78,9 @@ pub const AdaptiveOutputFormat = adaptive.OutputFormat;
 pub const StreamingOptions = stream.StreamingOptions;
 pub const StreamingSummary = stream.StreamingSummary;
 pub const StreamingEventType = stream.StreamingEventType;
+pub const AdaptiveAdapterOptions = adapter.AdaptiveAdapterOptions;
+pub const AdaptiveAdapterFormat = adapter.AdaptiveAdapterFormat;
+pub const AdaptiveAdapterSummary = adapter.AdaptiveAdapterSummary;
 pub const CorpusCategory = eval.CorpusCategory;
 pub const TextMetrics = eval.TextMetrics;
 pub const DocumentResult = eval.DocumentResult;

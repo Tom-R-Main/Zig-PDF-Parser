@@ -43,6 +43,7 @@ fn expectJsonlLinesParse(allocator: std.mem.Allocator, jsonl: []const u8) !void 
 fn expectProvenanceObject(value: std.json.Value) !void {
     const provenance = value.object.get("provenance") orelse return error.MissingProvenance;
     try std.testing.expect(provenance.object.get("document_id") != null);
+    try std.testing.expect(provenance.object.get("source_id") != null);
     try std.testing.expect(provenance.object.get("input_sha256") != null);
     try std.testing.expect(provenance.object.get("artifact_id") != null);
     try std.testing.expect(provenance.object.get("page_index") != null);
@@ -271,6 +272,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
 
     const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{
         .document_id = "clean-native",
+        .source_id = "external-clean-native",
         .input_sha256 = "fixture-hash",
         .page_count = doc.pageCount(),
         .encrypted = doc.isEncrypted(),
@@ -280,10 +282,12 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.3.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.5.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
+    try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);
     try std.testing.expectEqualStrings("lifecycle", parsed.value.object.get("provenance").?.object.get("source_kind").?.string);
+    try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("provenance").?.object.get("source_id").?.string);
     try std.testing.expectEqualStrings("fixture-hash", parsed.value.object.get("provenance").?.object.get("input_sha256").?.string);
     try std.testing.expectEqual(false, parsed.value.object.get("corrupt").?.bool);
     try std.testing.expect(parsed.value.object.get("route_counts") != null);
@@ -302,6 +306,8 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const spans = parsed.value.object.get("spans").?.array.items;
     try std.testing.expect(spans.len > 0);
     try expectProvenanceObject(spans[0]);
+    try std.testing.expectEqualStrings("external-clean-native", spans[0].object.get("source_id").?.string);
+    try std.testing.expectEqualStrings("external-clean-native", spans[0].object.get("provenance").?.object.get("source_id").?.string);
     try std.testing.expectEqualStrings("native", spans[0].object.get("provenance").?.object.get("source_kind").?.string);
     try std.testing.expect(spans[0].object.get("provenance").?.object.get("route_trace_ids").?.array.items.len > 0);
     const blocks = parsed.value.object.get("blocks").?.array.items;
@@ -310,19 +316,21 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const chunks = parsed.value.object.get("rag_chunks").?.array.items;
     try std.testing.expect(chunks.len > 0);
     try expectProvenanceObject(chunks[0]);
+    try std.testing.expectEqualStrings("external-clean-native", chunks[0].object.get("source_id").?.string);
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.3.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.5.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"debug_asset\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"bbox\":{\"x0\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"input_sha256\":\"fixture-hash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_id\":\"external-clean-native\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"provenance\":") != null);
 }
 
@@ -338,7 +346,10 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     var result = try doc.extractAdaptive(allocator, .{});
     defer result.deinit();
 
-    const jsonl = try zpdf.schema.renderArtifactJsonl(allocator, &result, .{ .document_id = "jsonl-fixture" });
+    const jsonl = try zpdf.schema.renderArtifactJsonl(allocator, &result, .{
+        .document_id = "jsonl-fixture",
+        .source_id = "external-jsonl",
+    });
     defer allocator.free(jsonl);
 
     try std.testing.expect(std.mem.startsWith(u8, jsonl, "{\"schema_name\":\"document_manifest\""));
@@ -346,11 +357,13 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     const manifest = try std.json.parseFromSlice(std.json.Value, allocator, jsonl[0..first_newline], .{});
     defer manifest.deinit();
     try std.testing.expectEqualStrings("document_manifest", manifest.value.object.get("record_type").?.string);
+    try std.testing.expectEqualStrings("external-jsonl", manifest.value.object.get("source_id").?.string);
     try expectProvenanceObject(manifest.value);
+    try std.testing.expectEqualStrings("external-jsonl", manifest.value.object.get("provenance").?.object.get("source_id").?.string);
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.3.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.5.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
@@ -373,6 +386,7 @@ test "streaming adaptive jsonl emits manifest page artifacts and document finish
     const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{
         .schema_options = .{
             .document_id = "stream-native",
+            .source_id = "external-stream",
             .page_count = doc.pageCount(),
             .encrypted = doc.isEncrypted(),
         },
@@ -385,7 +399,9 @@ test "streaming adaptive jsonl emits manifest page artifacts and document finish
     const manifest = try std.json.parseFromSlice(std.json.Value, allocator, output.items[0..first_newline], .{});
     defer manifest.deinit();
     try std.testing.expectEqual(true, manifest.value.object.get("streaming").?.bool);
+    try std.testing.expectEqualStrings("external-stream", manifest.value.object.get("source_id").?.string);
     try expectProvenanceObject(manifest.value);
+    try std.testing.expectEqualStrings("external-stream", manifest.value.object.get("provenance").?.object.get("source_id").?.string);
     try std.testing.expectEqualStrings("lifecycle", manifest.value.object.get("provenance").?.object.get("source_kind").?.string);
     try std.testing.expectEqual(true, manifest.value.object.get("capability_coverage").?.object.get("streaming").?.bool);
     const artifacts = manifest.value.object.get("output_artifacts").?.array.items;
@@ -415,6 +431,27 @@ test "streaming adaptive jsonl emits financial table before page finish" {
     try std.testing.expect(summary.artifact_counts.tables > 0);
     try expectIndexBefore(output.items, "\"record_type\":\"table\"", "\"event_type\":\"page_finished\"");
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"colspan\":3") != null);
+    try expectJsonlLinesParse(allocator, output.items);
+}
+
+test "streaming adaptive jsonl links multipage financial tables" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMultipageFinancialStatementPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-multipage-table" } });
+    try std.testing.expect(summary.artifact_counts.tables >= 2);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"logical_table_id\":\"logical-table-0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"table_part_index\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"continued_from_table_id\":\"table-0\"") != null);
     try expectJsonlLinesParse(allocator, output.items);
 }
 
@@ -500,7 +537,10 @@ test "versioned schema exposes financial table cell span metadata" {
     var result = try doc.extractAdaptive(allocator, .{});
     defer result.deinit();
 
-    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "merged-cells" });
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{
+        .document_id = "merged-cells",
+        .source_id = "external-merged-cells",
+    });
     defer allocator.free(json);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
@@ -508,15 +548,34 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
+    try std.testing.expectEqualStrings("0.5.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expect(tables[0].object.get("logical_table_id") != null);
+    try std.testing.expect(tables[0].object.get("table_part_index") != null);
+    try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
+    try std.testing.expect(tables[0].object.get("continued_to_table_id") != null);
+    try std.testing.expect(tables[0].object.get("source_span_ids") != null);
     try std.testing.expectEqualStrings("table_model", tables[0].object.get("provenance").?.object.get("source_kind").?.string);
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
+    try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
+    try std.testing.expectEqualStrings("0.5.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expect(cells[0].object.get("cell_id") != null);
+    try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
+    try std.testing.expect(cells[0].object.get("raw_text") != null);
+    try std.testing.expect(cells[0].object.get("normalized_text") != null);
+    try std.testing.expect(cells[0].object.get("numeric") != null);
     try expectProvenanceObject(cells[0]);
+    try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("provenance").?.object.get("source_id").?.string);
     try std.testing.expectEqualStrings("table_model", cells[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"table\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"table_cell\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"logical_table_id\":\"logical-table-0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"text\":\"Operating metrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"raw_text\":\"Operating metrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"normalized_text\":\"Operating metrics\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"colspan\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"numeric\":{\"is_numeric\":true,\"value\":1200.000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_span_ids\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"bbox\":{\"x0\":") != null);
 }
@@ -1118,9 +1177,14 @@ test "multipage financial statement emits page-indexed table JSON" {
 
     try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"text\":\"Cash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"text\":\"1,000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"normalized_text\":\"1,000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"numeric\":{\"is_numeric\":true,\"value\":1000.000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"logical_table_id\":\"logical-table-0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"cell_id\":\"table-0-cell-1-1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"page\":0") != null);
     try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"text\":\"Debt\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"text\":\"(300)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"numeric\":{\"is_numeric\":true,\"value\":-300.000000") != null);
     try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"page\":1") != null);
 }
 

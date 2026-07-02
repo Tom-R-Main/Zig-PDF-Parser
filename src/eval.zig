@@ -62,6 +62,11 @@ pub const TableMetrics = struct {
     cell_accuracy: ?f64 = null,
     span_accuracy: ?f64 = null,
     role_accuracy: ?f64 = null,
+    rowspan_accuracy: ?f64 = null,
+    colspan_accuracy: ?f64 = null,
+    page_accuracy: ?f64 = null,
+    continuation_accuracy: ?f64 = null,
+    source_span_coverage: ?f64 = null,
 };
 
 pub const FormulaMetrics = struct {
@@ -265,6 +270,16 @@ pub fn writeJsonlResult(writer: anytype, result: DocumentResult) !void {
     try writeOptionalFloat(writer, result.table.span_accuracy);
     try writer.writeAll(",\"table_role_accuracy\":");
     try writeOptionalFloat(writer, result.table.role_accuracy);
+    try writer.writeAll(",\"table_rowspan_accuracy\":");
+    try writeOptionalFloat(writer, result.table.rowspan_accuracy);
+    try writer.writeAll(",\"table_colspan_accuracy\":");
+    try writeOptionalFloat(writer, result.table.colspan_accuracy);
+    try writer.writeAll(",\"table_page_accuracy\":");
+    try writeOptionalFloat(writer, result.table.page_accuracy);
+    try writer.writeAll(",\"table_continuation_accuracy\":");
+    try writeOptionalFloat(writer, result.table.continuation_accuracy);
+    try writer.writeAll(",\"table_source_span_coverage\":");
+    try writeOptionalFloat(writer, result.table.source_span_coverage);
     try writer.writeAll(",\"formula_bleu\":");
     try writeOptionalFloat(writer, result.formula.bleu);
     try writer.writeAll(",\"formula_edit_distance\":");
@@ -595,6 +610,9 @@ test "result jsonl exposes all north-star metrics" {
         .table = .{
             .detection = scoreDetection(.{ .true_positive = 3, .false_positive = 1 }),
             .role_accuracy = 0.66,
+            .rowspan_accuracy = 0.77,
+            .colspan_accuracy = 0.88,
+            .source_span_coverage = 0.55,
         },
         .formula = .{ .bleu = 0.9, .cdm = 0.8, .structure_accuracy = 0.75 },
         .form = .{ .field_accuracy = 0.5 },
@@ -607,6 +625,9 @@ test "result jsonl exposes all north-star metrics" {
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_order_score\":0.880000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"teds\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_role_accuracy\":0.660000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_rowspan_accuracy\":0.770000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_colspan_accuracy\":0.880000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_source_span_coverage\":0.550000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"formula_edit_distance\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"formula_structure_accuracy\":0.750000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"form_field_accuracy\":0.500000") != null);

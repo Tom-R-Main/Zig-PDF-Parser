@@ -166,6 +166,7 @@ pub const TableCellRole = enum(u8) {
     header,
     row_header,
     note,
+    footer,
 };
 
 pub const TableRow = struct {
@@ -182,6 +183,10 @@ pub const TableGrid = struct {
     column_count: usize,
     page_index: u32 = 0,
     confidence: f32 = 0.72,
+    logical_table_index: ?u32 = null,
+    table_part_index: u32 = 0,
+    continued_from_table_index: ?u32 = null,
+    continued_to_table_index: ?u32 = null,
 };
 
 pub const LayoutCandidate = struct {
@@ -371,9 +376,17 @@ pub const LayoutResult = struct {
         try writer.writeByte('[');
         for (self.tables, 0..) |table, table_index| {
             if (table_index > 0) try writer.writeByte(',');
+            const logical_index = table.logical_table_index orelse @as(u32, @intCast(table_index));
             try writer.print(
-                "{{\"block_index\":{},\"block_count\":{},\"confidence\":{d:.3},\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"rows\":[",
-                .{ table.block_index, table.block_count, table.confidence, table.bounds.x0, table.bounds.y0, table.bounds.x1, table.bounds.y1 },
+                "{{\"table_id\":\"table-{d}\",\"logical_table_id\":\"logical-table-{d}\",\"table_index\":{},\"table_part_index\":{},\"continued_from_table_id\":",
+                .{ table_index, logical_index, table_index, table.table_part_index },
+            );
+            try writeOptionalTableId(writer, table.continued_from_table_index);
+            try writer.writeAll(",\"continued_to_table_id\":");
+            try writeOptionalTableId(writer, table.continued_to_table_index);
+            try writer.print(
+                ",\"page_index\":{},\"block_index\":{},\"block_count\":{},\"column_count\":{},\"confidence\":{d:.3},\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"source_span_ids\":[],\"rows\":[",
+                .{ table.page_index, table.block_index, table.block_count, table.column_count, table.confidence, table.bounds.x0, table.bounds.y0, table.bounds.x1, table.bounds.y1 },
             );
             for (table.rows, 0..) |row, row_index| {
                 if (row_index > 0) try writer.writeByte(',');
@@ -385,14 +398,20 @@ pub const LayoutResult = struct {
                     wrote_cell = true;
                     try writer.writeByte('{');
                     try writer.print(
-                        "\"page\":{},\"row\":{},\"column\":{},\"rowspan\":{},\"colspan\":{},\"role\":\"",
-                        .{ cell.bounds.page_index, cell.row_index, cell.column_index, cell.rowspan, cell.colspan },
+                        "\"cell_id\":\"table-{d}-cell-{d}-{d}\",\"page\":{},\"page_index\":{},\"row\":{},\"column\":{},\"rowspan\":{},\"colspan\":{},\"role\":\"",
+                        .{ table_index, cell.row_index, cell.column_index, cell.bounds.page_index, cell.bounds.page_index, cell.row_index, cell.column_index, cell.rowspan, cell.colspan },
                     );
                     try writer.writeAll(tableCellRoleName(cell.role));
                     try writer.writeAll("\",\"text\":\"");
                     try writeJsonEscaped(writer, cell.text);
+                    try writer.writeAll("\",\"raw_text\":\"");
+                    try writeJsonEscaped(writer, cell.text);
+                    try writer.writeAll("\",\"normalized_text\":\"");
+                    try writeNormalizedJsonEscaped(writer, cell.text);
+                    try writer.writeAll("\",\"numeric\":");
+                    try writeNumericHint(writer, cell.text);
                     try writer.print(
-                        "\",\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}]",
+                        ",\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"source_span_ids\":[]",
                         .{ cell.bounds.x0, cell.bounds.y0, cell.bounds.x1, cell.bounds.y1 },
                     );
                     try writer.writeByte('}');
@@ -411,6 +430,7 @@ fn tableCellRoleName(role: TableCellRole) []const u8 {
         .header => "header",
         .row_header => "row_header",
         .note => "note",
+        .footer => "footer",
     };
 }
 
@@ -1185,6 +1205,7 @@ fn buildTableGrids(allocator: std.mem.Allocator, blocks: []const LayoutBlock) ![
         block_index += 1;
     }
 
+    assignPageLocalTableIds(tables.items);
     return tables.toOwnedSlice(allocator);
 }
 
@@ -1258,6 +1279,8 @@ fn buildTableGridForBlock(
         rows.deinit(allocator);
         return null;
     }
+
+    markFooterRows(rows.items);
 
     return TableGrid{
         .bounds = block.bounds,
@@ -1413,6 +1436,8 @@ fn buildRuledTableGrid(
             .row_index = @intCast(row_index),
         };
     }
+
+    markFooterRows(rows);
 
     return TableGrid{
         .bounds = grid_bbox,
@@ -1662,6 +1687,71 @@ fn heuristicCellRole(row_index: u32, column_index: u32, text: []const u8) TableC
     return .data;
 }
 
+fn markFooterRows(rows: []TableRow) void {
+    if (rows.len < 3) return;
+
+    var row_index = rows.len;
+    while (row_index > 0) {
+        row_index -= 1;
+        if (rowIsNote(rows[row_index])) continue;
+        if (!rowLooksLikeFooter(rows[row_index])) return;
+        for (rows[row_index].cells) |*cell| {
+            if (cell.text.len > 0) cell.role = .footer;
+        }
+        return;
+    }
+}
+
+fn rowLooksLikeFooter(row: TableRow) bool {
+    var first_text: ?[]const u8 = null;
+    var numeric_count: usize = 0;
+    for (row.cells) |cell| {
+        if (cell.text.len == 0) continue;
+        if (first_text == null) first_text = cell.text;
+        if (cellLooksNumeric(cell.text)) numeric_count += 1;
+    }
+    const label = first_text orelse return false;
+    return numeric_count > 0 and startsWithFinancialFooterLabel(label);
+}
+
+fn startsWithFinancialFooterLabel(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    return startsWithIgnoreCase(trimmed, "total") or
+        startsWithIgnoreCase(trimmed, "subtotal") or
+        startsWithIgnoreCase(trimmed, "net income") or
+        startsWithIgnoreCase(trimmed, "net loss") or
+        startsWithIgnoreCase(trimmed, "ending balance");
+}
+
+fn startsWithIgnoreCase(text: []const u8, prefix: []const u8) bool {
+    if (text.len < prefix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[0..prefix.len], prefix);
+}
+
+fn cellLooksNumeric(text: []const u8) bool {
+    var saw_digit = false;
+    for (text) |byte| {
+        if (std.ascii.isDigit(byte)) {
+            saw_digit = true;
+            continue;
+        }
+        switch (byte) {
+            ' ', '\t', '\r', '\n', ',', '.', '-', '+', '(', ')', '$', '%' => {},
+            else => return false,
+        }
+    }
+    return saw_digit;
+}
+
+fn assignPageLocalTableIds(tables: []TableGrid) void {
+    for (tables, 0..) |*table, index| {
+        table.logical_table_index = @intCast(index);
+        table.table_part_index = 0;
+        table.continued_from_table_index = null;
+        table.continued_to_table_index = null;
+    }
+}
+
 fn lineTextOwned(allocator: std.mem.Allocator, line: *const TextLine) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -1814,21 +1904,117 @@ fn appendMarkdownEscaped(allocator: std.mem.Allocator, output: *std.ArrayList(u8
 
 fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
     for (text) |byte| {
-        switch (byte) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            else => {
-                if (byte < 0x20) {
-                    try writer.print("\\u00{X:0>2}", .{byte});
-                } else {
-                    try writer.writeByte(byte);
-                }
-            },
+        try writeJsonEscapedByte(writer, byte);
+    }
+}
+
+fn writeJsonEscapedByte(writer: anytype, byte: u8) !void {
+    switch (byte) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        else => {
+            if (byte < 0x20) {
+                try writer.print("\\u00{X:0>2}", .{byte});
+            } else {
+                try writer.writeByte(byte);
+            }
+        },
+    }
+}
+
+fn writeOptionalTableId(writer: anytype, table_index: ?u32) !void {
+    if (table_index) |index| {
+        try writer.print("\"table-{d}\"", .{index});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeNormalizedJsonEscaped(writer: anytype, text: []const u8) !void {
+    var previous_space = true;
+    for (text) |byte| {
+        if (std.ascii.isWhitespace(byte)) {
+            if (!previous_space) {
+                try writer.writeByte(' ');
+                previous_space = true;
+            }
+        } else {
+            try writeJsonEscapedByte(writer, byte);
+            previous_space = false;
         }
     }
+}
+
+fn writeNumericHint(writer: anytype, text: []const u8) !void {
+    if (parseNumericCell(text)) |numeric| {
+        try writer.print(
+            "{{\"is_numeric\":true,\"value\":{d:.6},\"negative\":{},\"format\":\"{s}\"}}",
+            .{ numeric.value, numeric.negative, numeric.format },
+        );
+    } else {
+        try writer.writeAll("{\"is_numeric\":false,\"value\":null,\"negative\":false,\"format\":null}");
+    }
+}
+
+const NumericCell = struct {
+    value: f64,
+    negative: bool,
+    format: []const u8,
+};
+
+fn parseNumericCell(text: []const u8) ?NumericCell {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0 or trimmed.len > 96) return null;
+
+    var buf: [128]u8 = undefined;
+    var len: usize = 0;
+    var saw_digit = false;
+    var negative = false;
+    var paren_negative = false;
+    var minus_negative = false;
+
+    for (trimmed, 0..) |byte, index| {
+        switch (byte) {
+            '0'...'9' => {
+                saw_digit = true;
+                buf[len] = byte;
+                len += 1;
+            },
+            '.' => {
+                buf[len] = byte;
+                len += 1;
+            },
+            ',', ' ', '\t', '$', '%' => {},
+            '(' => {
+                if (index != 0) return null;
+                negative = true;
+                paren_negative = true;
+            },
+            ')' => {
+                if (!paren_negative or index + 1 != trimmed.len) return null;
+            },
+            '-' => {
+                if (len != 0) return null;
+                negative = true;
+                minus_negative = true;
+            },
+            '+' => {
+                if (len != 0) return null;
+            },
+            else => return null,
+        }
+        if (len >= buf.len) return null;
+    }
+    if (!saw_digit or len == 0) return null;
+    const value = std.fmt.parseFloat(f64, buf[0..len]) catch return null;
+    return .{
+        .value = if (negative) -value else value,
+        .negative = negative,
+        .format = if (paren_negative) "parentheses" else if (minus_negative) "minus" else "plain",
+    };
 }
 
 fn endsWithSoftHyphen(text: []const u8) bool {
@@ -2318,4 +2504,32 @@ test "table grid preserves multiword merged labels without inventing columns" {
     try std.testing.expectEqualStrings("* excludes setup fees", table.rows[3].cells[0].text);
     try std.testing.expectEqual(TableCellRole.note, table.rows[3].cells[0].role);
     try std.testing.expectEqual(@as(u32, 4), table.rows[3].cells[0].colspan);
+}
+
+test "table grid marks bottom financial total rows as footer" {
+    const allocator = std.testing.allocator;
+    const spans = [_]TextSpan{
+        testSpan("Account", 80, 720, 130, 732),
+        testSpan("Actual", 200, 720, 242, 732),
+        testSpan("Budget", 300, 720, 346, 732),
+        testSpan("Cash", 80, 700, 112, 712),
+        testSpan("1,000", 200, 700, 240, 712),
+        testSpan("900", 300, 700, 324, 712),
+        testSpan("Debt", 80, 680, 112, 692),
+        testSpan("(200)", 200, 680, 240, 692),
+        testSpan("(175)", 300, 680, 340, 692),
+        testSpan("Total assets", 80, 660, 154, 672),
+        testSpan("800", 200, 660, 224, 672),
+        testSpan("725", 300, 660, 324, 672),
+    };
+
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.tables.len);
+    const table = result.tables[0];
+    try std.testing.expectEqualStrings("Total assets", table.rows[3].cells[0].text);
+    try std.testing.expectEqual(TableCellRole.footer, table.rows[3].cells[0].role);
+    try std.testing.expectEqual(TableCellRole.footer, table.rows[3].cells[1].role);
+    try std.testing.expectEqual(TableCellRole.footer, table.rows[3].cells[2].role);
 }

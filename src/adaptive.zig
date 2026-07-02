@@ -521,6 +521,7 @@ pub fn extractDocument(
     errdefer allocator.free(owned_region_routes);
     const owned_trace_records = try trace_records.toOwnedSlice(allocator);
     errdefer allocator.free(owned_trace_records);
+    linkLogicalTables(tables.items);
     const owned_tables = try tables.toOwnedSlice(allocator);
     errdefer freeOwnedTables(allocator, owned_tables);
 
@@ -636,6 +637,73 @@ fn freeOwnedTables(allocator: std.mem.Allocator, tables: []layout.TableGrid) voi
         allocator.free(table.rows);
     }
     allocator.free(tables);
+}
+
+fn linkLogicalTables(tables: []layout.TableGrid) void {
+    for (tables, 0..) |*table, index| {
+        table.logical_table_index = @intCast(index);
+        table.table_part_index = 0;
+        table.continued_from_table_index = null;
+        table.continued_to_table_index = null;
+    }
+
+    if (tables.len < 2) return;
+
+    for (1..tables.len) |index| {
+        const previous_index = index - 1;
+        if (!tablesLikelyContinue(tables[previous_index], tables[index])) continue;
+
+        const logical_index = tables[previous_index].logical_table_index orelse @as(u32, @intCast(previous_index));
+        tables[index].logical_table_index = logical_index;
+        tables[index].table_part_index = tables[previous_index].table_part_index + 1;
+        tables[index].continued_from_table_index = @intCast(previous_index);
+        tables[previous_index].continued_to_table_index = @intCast(index);
+    }
+}
+
+fn tablesLikelyContinue(previous: layout.TableGrid, current: layout.TableGrid) bool {
+    if (current.page_index <= previous.page_index) return false;
+    if (current.column_count == 0 or previous.column_count != current.column_count) return false;
+    if (!tableHeadersMatch(previous, current)) return false;
+
+    const previous_width = @max(1.0, previous.bounds.x1 - previous.bounds.x0);
+    const current_width = @max(1.0, current.bounds.x1 - current.bounds.x0);
+    const width_delta = @abs(previous_width - current_width);
+    const left_delta = @abs(previous.bounds.x0 - current.bounds.x0);
+    return left_delta <= 18.0 and width_delta <= @max(24.0, previous_width * 0.08);
+}
+
+fn tableHeadersMatch(previous: layout.TableGrid, current: layout.TableGrid) bool {
+    const previous_header = firstHeaderRow(previous) orelse return false;
+    const current_header = firstHeaderRow(current) orelse return false;
+    if (previous_header.cells.len != current_header.cells.len) return false;
+
+    var comparable_cells: usize = 0;
+    var matched_cells: usize = 0;
+    for (previous_header.cells, current_header.cells) |prev_cell, curr_cell| {
+        if (prev_cell.text.len == 0 and curr_cell.text.len == 0) continue;
+        comparable_cells += 1;
+        if (std.ascii.eqlIgnoreCase(prev_cell.text, curr_cell.text)) matched_cells += 1;
+    }
+    return comparable_cells > 0 and matchedCellsEnough(matched_cells, comparable_cells);
+}
+
+fn firstHeaderRow(table: layout.TableGrid) ?layout.TableRow {
+    for (table.rows) |row| {
+        var header_cells: usize = 0;
+        var text_cells: usize = 0;
+        for (row.cells) |cell| {
+            if (cell.text.len == 0) continue;
+            text_cells += 1;
+            if (cell.role == .header) header_cells += 1;
+        }
+        if (text_cells > 0 and header_cells * 2 >= text_cells) return row;
+    }
+    return null;
+}
+
+fn matchedCellsEnough(matched_cells: usize, comparable_cells: usize) bool {
+    return matched_cells == comparable_cells or matched_cells * 100 >= comparable_cells * 75;
 }
 
 fn formFieldsToSpans(allocator: std.mem.Allocator, fields: []const FormField) ![]layout.TextSpan {

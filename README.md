@@ -110,6 +110,7 @@ pdf-parser extract --adaptive -f jsonl doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
+pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract --adaptive -f hocr doc.pdf
 pdf-parser extract --adaptive -f alto doc.pdf
 pdf-parser extract --adaptive -f debug-svg doc.pdf
@@ -137,6 +138,20 @@ artifacts, `page_finished`, optional debug assets, then `document_finished`.
 `jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
 The schema is documented in [docs/output-schema.md](docs/output-schema.md).
 
+For host applications, prefer the neutral adapter command:
+
+```bash
+pdf-parser extract-adaptive \
+  --input doc.pdf \
+  --source-id external-system-id \
+  --format artifact-jsonl
+```
+
+`source_id` is a caller-owned external identity, separate from the parser's
+`document_id`. It is emitted on the manifest, artifacts, chunks, and provenance
+envelopes so any pipeline can join records back to its own source table,
+object-store key, or ingestion run.
+
 The document manifest is the top-level intelligence summary: input SHA256,
 parser/schema versions, page count, encrypted/corrupt flags, route counts,
 OCR/table/form/formula extraction counts, output artifact hashes or stream hash
@@ -150,11 +165,13 @@ processing records: `document_manifest` as a manifest artifact,
 or OCR diagnostics, and `rag_chunk` as chunk-index artifacts that can be queued
 for embeddings before the full document finishes.
 
-Table records include page-aware cell geometry plus `rowspan`, `colspan`,
-`role`, confidence, and source span ids when available. OCR remains local and
-deterministic: when a page or region is routed to OCR, the adapter invokes
-Tesseract and reconciles the fresh OCR spans with native PDF spans rather than
-replacing the whole page.
+Table records are structured data artifacts: rows/cells, page-aware geometry,
+logical multi-page table ids, continuation links, `rowspan`/`colspan`, roles
+(`header`, `row_header`, `data`, `note`, `footer`), confidence, raw and
+normalized text, deterministic numeric hints, and source span ids when
+available. OCR remains local and deterministic: when a page or region is routed
+to OCR, the adapter invokes Tesseract and reconciles the fresh OCR spans with
+native PDF spans rather than replacing the whole page.
 
 ### Python
 
@@ -245,11 +262,11 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.3.0`. Every emitted record carries a `provenance` envelope with document and
-input hash context, artifact id, page/bbox, source kind, confidence, related
-span/block/chunk ids, route trace ids, and route reasons. This makes parser
-outputs usable as reviewable evidence in Siftable-style pipelines without
-removing the older top-level compatibility fields.
+`0.5.0`. Every emitted record carries a `provenance` envelope with document and
+source identity, input hash context, artifact id, page/bbox, source kind,
+confidence, related span/block/chunk ids, route trace ids, and route reasons.
+This makes parser outputs usable as reviewable evidence in host pipelines
+without removing the older top-level compatibility fields.
 
 ## Comparison
 

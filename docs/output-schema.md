@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.3.0`
+Current schema version: `0.5.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -21,6 +21,7 @@ Every public JSON object includes:
 - `schema_name`
 - `schema_version`
 - `record_type`
+- `source_id`, or `null` when the caller did not provide one
 - `provenance`
 
 JSON output is a `document_manifest` object with arrays of typed records.
@@ -39,6 +40,7 @@ prefer provenance for evidence and routing context.
 `provenance` contains:
 
 - `document_id`
+- `source_id`, or `null` when the caller did not provide one
 - `input_sha256`, or `null` when the caller did not provide one
 - `artifact_id`
 - `page_index`, or `null` for document-scoped records
@@ -59,11 +61,11 @@ intersecting region route first, then page route, then stage trace fallback.
 
 ### `document_manifest`
 
-Document/run summary with `document_id`, parser version, optional input SHA256,
-source path, page count, encryption and corrupt flags, extraction options,
-route counts, OCR/table/form/formula extraction counts, artifact counts,
-output artifact hashes, capability coverage, warnings, errors, and available
-output formats.
+Document/run summary with `document_id`, optional caller-owned `source_id`,
+parser version, optional input SHA256, source path, page count, encryption and
+corrupt flags, extraction options, route counts, OCR/table/form/formula
+extraction counts, artifact counts, output artifact hashes, capability
+coverage, warnings, errors, and available output formats.
 
 The manifest is intended to be a durable document-intelligence run record. Batch
 JSON and `artifact-jsonl` include `output_artifacts` entries with SHA256 hashes
@@ -91,9 +93,17 @@ mask, confidence, span range, and optional candidate kind.
 
 ### `table`
 
-Logical table with `table_id`, page index, block range, bbox, confidence,
-column count, and rows. Cells include page index, row, column, rowspan, colspan,
-role, confidence, text, bbox, and source span ids when available.
+Logical table data artifact with `table_id`, `logical_table_id`,
+`table_part_index`, continuation links, page index, block range, bbox,
+confidence, column count, table-level source span ids, and rows. Cells include
+their own `table_cell` schema header, stable `cell_id`, page index, row, column,
+rowspan, colspan, role, confidence, text, raw text, normalized text, deterministic
+numeric parse hints, bbox, source span ids, and provenance.
+
+Cell roles are `header`, `row_header`, `data`, `note`, and `footer`. `data` is
+the current body-cell role name. Multi-page financial tables are represented as
+page-local table records linked by the same `logical_table_id`; each page record
+keeps its own geometry and provenance.
 
 ### `form_field`
 
@@ -154,8 +164,12 @@ The page block repeats for each requested page.
 
 ## Siftable Artifact Mapping
 
-`stream-jsonl` is designed to map cleanly onto Siftable-style
-`processing_runs` and `stage_artifacts`:
+`source_id` is intentionally neutral: callers can set it to a database id,
+object-store key, URL, CMS id, processing-run source id, or any other external
+identifier. The parser does not interpret it.
+
+`stream-jsonl` is designed to map cleanly onto host application artifact
+pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 
 - `document_manifest` -> `manifest` or run summary, including input hash,
   parser version, page count, encryption/corruption flags, route totals,
@@ -170,6 +184,8 @@ The page block repeats for each requested page.
 ## CLI
 
 ```bash
+pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
+pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format stream-jsonl
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf

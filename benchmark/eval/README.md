@@ -128,10 +128,12 @@ reading-order text alignment when order labels are supplied, table cell
 accuracy when table JSON labels are supplied, and formula BLEU/edit distance
 when formula text labels are supplied. Formula JSON labels add formula structure
 accuracy for page/text sequence. Form JSON labels add field accuracy for
-value-bearing AcroForm name/type/value sequence. Table JSON labels with role
-fields add role accuracy for header/row-header/data/note semantics. The result schema also has slots for table
-detection F1, TEDS, GriTS, and formula CDM so local specialist adapters can
-report into the same records as they come online.
+value-bearing AcroForm name/type/value sequence. Table JSON labels with role,
+rowspan, colspan, page, or continuation fields add structure accuracy metrics
+for header/row-header/data/note/footer semantics, row spans, column spans, page
+identity, continuation links, and source-span coverage. The result schema also
+has slots for table detection F1, TEDS, GriTS, and formula CDM so local
+specialist adapters can report into the same records as they come online.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.

@@ -50,6 +50,7 @@ pub fn extractAdaptiveStreaming(
     const started_ns = runtime.nanoTimestamp();
     var summary = StreamingSummary{ .page_count = page_end - page_start };
     var event_index: u64 = 0;
+    var table_context = StreamTableContext{};
 
     var manifest_options = options.schema_options;
     manifest_options.include_debug_asset_refs = options.include_debug_asset_refs;
@@ -64,7 +65,7 @@ pub fn extractAdaptiveStreaming(
         const page_index: u32 = @intCast(page_idx);
         const page_bbox = pageBBox(page);
 
-        try schema.writePageStartedRecord(writer, manifest_options.document_id, manifest_options.input_sha256, page_index, page_bbox, event_index);
+        try schema.writePageStartedRecord(writer, manifest_options.document_id, manifest_options.source_id, manifest_options.input_sha256, page_index, page_bbox, event_index);
         event_index += 1;
         try writer.writeByte('\n');
 
@@ -78,10 +79,12 @@ pub fn extractAdaptiveStreaming(
         const page_counts = try writePageArtifacts(
             writer,
             manifest_options.document_id,
+            manifest_options.source_id,
             manifest_options.input_sha256,
             page_index,
             &page_result,
             summary.artifact_counts,
+            &table_context,
             &event_index,
         );
         summary.artifact_counts.spans += page_counts.spans;
@@ -96,6 +99,7 @@ pub fn extractAdaptiveStreaming(
         try schema.writePageFinishedRecord(
             writer,
             manifest_options.document_id,
+            manifest_options.source_id,
             manifest_options.input_sha256,
             page_index,
             page_bbox,
@@ -108,7 +112,7 @@ pub fn extractAdaptiveStreaming(
     }
 
     if (options.include_debug_asset_refs) {
-        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, manifest_options.input_sha256, &event_index);
+        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, manifest_options.source_id, manifest_options.input_sha256, &event_index);
     }
 
     const elapsed_ns = runtime.nanoTimestamp() - started_ns;
@@ -116,6 +120,7 @@ pub fn extractAdaptiveStreaming(
     try schema.writeDocumentFinishedRecord(
         writer,
         manifest_options.document_id,
+        manifest_options.source_id,
         manifest_options.input_sha256,
         summary.artifact_counts,
         summary.route_counts,
@@ -132,10 +137,12 @@ pub fn extractAdaptiveStreaming(
 fn writePageArtifacts(
     writer: anytype,
     document_id: []const u8,
+    source_id: ?[]const u8,
     input_sha256: ?[]const u8,
     page_index: u32,
     result: anytype,
     global_counts: schema.StreamCounts,
+    table_context: *StreamTableContext,
     event_index: *u64,
 ) !schema.StreamCounts {
     var counts = schema.StreamCounts{};
@@ -147,11 +154,11 @@ fn writePageArtifacts(
         .route_base = @intCast(global_counts.route_traces),
     };
 
-    counts.route_traces = try schema.writeRouteTraceStreamRecords(writer, document_id, input_sha256, result, offsets, event_index);
+    counts.route_traces = try schema.writeRouteTraceStreamRecords(writer, document_id, source_id, input_sha256, result, offsets, event_index);
 
     for (result.reconciled.spans, 0..) |span, local_index| {
         if (span.span.page_index != page_index) continue;
-        try schema.writeSpanStreamRecord(writer, result, document_id, input_sha256, span, offsets.span_base + @as(u32, @intCast(local_index)), offsets, .{
+        try schema.writeSpanStreamRecord(writer, result, document_id, source_id, input_sha256, span, offsets.span_base + @as(u32, @intCast(local_index)), offsets, .{
             .event_type = "span",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -164,7 +171,7 @@ fn writePageArtifacts(
 
     for (result.reconciled.blocks) |block| {
         if (block.page_index != page_index) continue;
-        try schema.writeBlockStreamRecord(writer, result, document_id, input_sha256, block, offsets, .{
+        try schema.writeBlockStreamRecord(writer, result, document_id, source_id, input_sha256, block, offsets, .{
             .event_type = "block",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -177,7 +184,10 @@ fn writePageArtifacts(
 
     for (result.tables, 0..) |table, local_index| {
         if (table.page_index != page_index) continue;
-        try schema.writeTableStreamRecord(writer, document_id, input_sha256, result, table, offsets.table_base + @as(u32, @intCast(local_index)), offsets, .{
+        const global_table_index = offsets.table_base + @as(u32, @intCast(local_index));
+        var stream_table = table;
+        table_context.apply(&stream_table, global_table_index);
+        try schema.writeTableStreamRecord(writer, document_id, source_id, input_sha256, result, stream_table, global_table_index, offsets, .{
             .event_type = "table",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -190,7 +200,7 @@ fn writePageArtifacts(
 
     for (result.reconciled.chunks) |chunk| {
         if (chunk.page_start > page_index or chunk.page_end < page_index) continue;
-        try schema.writeRagChunkStreamRecord(writer, result, document_id, input_sha256, chunk, offsets, .{
+        try schema.writeRagChunkStreamRecord(writer, result, document_id, source_id, input_sha256, chunk, offsets, .{
             .event_type = "rag_chunk",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -202,6 +212,96 @@ fn writePageArtifacts(
     }
 
     return counts;
+}
+
+const StreamTableContext = struct {
+    previous: ?PreviousTable = null,
+
+    fn apply(self: *StreamTableContext, table: *layout.TableGrid, global_table_index: u32) void {
+        table.logical_table_index = global_table_index;
+        table.table_part_index = 0;
+        table.continued_from_table_index = null;
+        table.continued_to_table_index = null;
+
+        const signature = PreviousTable.fromTable(table.*, global_table_index) orelse {
+            self.previous = null;
+            return;
+        };
+
+        if (self.previous) |previous| {
+            if (previous.continuesTo(signature)) {
+                table.logical_table_index = previous.logical_table_index;
+                table.table_part_index = previous.table_part_index + 1;
+                table.continued_from_table_index = previous.table_index;
+            }
+        }
+
+        self.previous = .{
+            .table_index = global_table_index,
+            .logical_table_index = table.logical_table_index orelse global_table_index,
+            .table_part_index = table.table_part_index,
+            .page_index = table.page_index,
+            .column_count = table.column_count,
+            .x0 = table.bounds.x0,
+            .width = table.bounds.x1 - table.bounds.x0,
+            .header_hash = signature.header_hash,
+        };
+    }
+};
+
+const PreviousTable = struct {
+    table_index: u32,
+    logical_table_index: u32,
+    table_part_index: u32,
+    page_index: u32,
+    column_count: usize,
+    x0: f64,
+    width: f64,
+    header_hash: u64,
+
+    fn fromTable(table: layout.TableGrid, table_index: u32) ?PreviousTable {
+        const header_hash = tableHeaderHash(table) orelse return null;
+        return .{
+            .table_index = table_index,
+            .logical_table_index = table.logical_table_index orelse table_index,
+            .table_part_index = table.table_part_index,
+            .page_index = table.page_index,
+            .column_count = table.column_count,
+            .x0 = table.bounds.x0,
+            .width = table.bounds.x1 - table.bounds.x0,
+            .header_hash = header_hash,
+        };
+    }
+
+    fn continuesTo(self: PreviousTable, current: PreviousTable) bool {
+        if (current.page_index <= self.page_index) return false;
+        if (current.column_count == 0 or current.column_count != self.column_count) return false;
+        if (current.header_hash != self.header_hash) return false;
+        const width_delta = @abs(self.width - current.width);
+        const left_delta = @abs(self.x0 - current.x0);
+        return left_delta <= 18.0 and width_delta <= @max(24.0, @max(self.width, 1.0) * 0.08);
+    }
+};
+
+fn tableHeaderHash(table: layout.TableGrid) ?u64 {
+    for (table.rows) |row| {
+        var header_cells: usize = 0;
+        var text_cells: usize = 0;
+        var hash: u64 = 14695981039346656037;
+        for (row.cells) |cell| {
+            if (cell.text.len == 0) continue;
+            text_cells += 1;
+            if (cell.role == .header) header_cells += 1;
+            for (cell.text) |byte| {
+                hash ^= std.ascii.toLower(byte);
+                hash *%= 1099511628211;
+            }
+            hash ^= '|';
+            hash *%= 1099511628211;
+        }
+        if (text_cells > 0 and header_cells * 2 >= text_cells) return hash;
+    }
+    return null;
 }
 
 fn pageBBox(page: anytype) layout.BBox {
