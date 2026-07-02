@@ -72,6 +72,10 @@ fn printUsage() !void {
         \\  --source-id ID  External caller-owned source id for adaptive artifacts
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
+        \\  --emit-specialist-requests FILE
+        \\                  Write specialist request JSONL without invoking specialists
+        \\  --specialist-config FILE
+        \\                  Specialist executable config for future local adapters
         \\  --trace         Emit adaptive route trace JSON
         \\  --sequential    Disable parallel extraction
         \\  --reading-order Use visual reading order (experimental, slower)
@@ -129,6 +133,8 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var trace = false;
     var source_id: ?[]const u8 = null;
     var debug_assets_dir: ?[]const u8 = null;
+    var specialist_requests_file: ?[]const u8 = null;
+    var specialist_config_file: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -146,6 +152,12 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--emit-specialist-requests")) {
+            i += 1;
+            if (i < args.len) specialist_requests_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--specialist-config")) {
+            i += 1;
+            if (i < args.len) specialist_config_file = args[i];
         } else if (std.mem.eql(u8, arg, "--strict")) {
             error_mode = zpdf.ErrorConfig.strict();
         } else if (std.mem.eql(u8, arg, "--permissive")) {
@@ -220,7 +232,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(pages);
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, allocator, output_handle);
         return;
     }
 
@@ -474,6 +486,8 @@ fn doAdaptiveExtract(
     trace: bool,
     source_id: ?[]const u8,
     debug_assets_dir: ?[]const u8,
+    specialist_requests_file: ?[]const u8,
+    specialist_config_file: ?[]const u8,
     allocator: std.mem.Allocator,
     output_handle: ?runtime.File,
 ) !void {
@@ -508,9 +522,24 @@ fn doAdaptiveExtract(
         .corrupt = doc.errors.items.len > 0,
         .errors = parser_errors,
         .debug_assets_dir = debug_assets_dir,
+        .specialist_config_path = specialist_config_file,
     };
 
     if (!trace and output_format == .stream_jsonl) {
+        if (specialist_requests_file) |requests_path| {
+            var request_result = doc.extractAdaptive(allocator, .{
+                .page_start = window.start,
+                .page_end = window.end,
+            }) catch |err| {
+                std.debug.print("Error generating specialist requests: {}\n", .{err});
+                return;
+            };
+            defer request_result.deinit();
+            writeSpecialistRequestsFile(allocator, requests_path, &request_result, schema_options) catch |err| {
+                std.debug.print("Error writing specialist requests: {}\n", .{err});
+                return;
+            };
+        }
         var write_buf: [4096]u8 = undefined;
         if (output_handle) |h| {
             var file_writer = runtime.fileWriter(h, &write_buf);
@@ -553,6 +582,13 @@ fn doAdaptiveExtract(
     };
     defer result.deinit();
 
+    if (specialist_requests_file) |requests_path| {
+        writeSpecialistRequestsFile(allocator, requests_path, &result, schema_options) catch |err| {
+            std.debug.print("Error writing specialist requests: {}\n", .{err});
+            return;
+        };
+    }
+
     const rendered = if (trace)
         zpdf.schema.renderTraceJsonWithOptions(allocator, &result, schema_options) catch |err| {
             std.debug.print("Error rendering adaptive trace: {}\n", .{err});
@@ -588,12 +624,27 @@ fn doAdaptiveExtract(
     }
 }
 
+fn writeSpecialistRequestsFile(allocator: std.mem.Allocator, path: []const u8, result: anytype, options: zpdf.schema.RenderOptions) !void {
+    const rendered = try zpdf.specialist_protocol.renderRequestsJsonl(allocator, result, .{
+        .document_id = options.document_id,
+        .source_id = options.source_id,
+        .input_sha256 = options.input_sha256,
+    });
+    defer allocator.free(rendered);
+
+    const file = try runtime.createFileCwd(path);
+    defer runtime.closeFile(file);
+    try runtime.writeAllFile(file, rendered);
+}
+
 fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var input_file: ?[]const u8 = null;
     var output_file: ?[]const u8 = null;
     var page_range: ?[]const u8 = null;
     var source_id: ?[]const u8 = null;
     var debug_assets_dir: ?[]const u8 = null;
+    var specialist_requests_file: ?[]const u8 = null;
+    var specialist_config_file: ?[]const u8 = null;
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
 
@@ -615,6 +666,12 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--emit-specialist-requests")) {
+            i += 1;
+            if (i < args.len) specialist_requests_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--specialist-config")) {
+            i += 1;
+            if (i < args.len) specialist_config_file = args[i];
         } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
             i += 1;
             if (i < args.len) {
@@ -675,6 +732,8 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .source_id = source_id,
             .format = adapter_format,
             .debug_assets_dir = debug_assets_dir,
+            .emit_specialist_requests_path = specialist_requests_file,
+            .specialist_config_path = specialist_config_file,
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
@@ -691,6 +750,8 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .source_id = source_id,
             .format = adapter_format,
             .debug_assets_dir = debug_assets_dir,
+            .emit_specialist_requests_path = specialist_requests_file,
+            .specialist_config_path = specialist_config_file,
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
@@ -1012,6 +1073,91 @@ test "extract-adaptive CLI emits neutral source id artifacts" {
         for (case.needles) |needle| {
             try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
         }
+    }
+}
+
+test "adaptive CLI emits specialist request JSONL sidecars" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateTableFormulaPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-cli-specialist-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    const cases = [_]struct {
+        suffix: []const u8,
+        legacy: bool,
+    }{
+        .{ .suffix = "adapter", .legacy = false },
+        .{ .suffix = "legacy", .legacy = true },
+    };
+
+    for (cases) |case| {
+        var output_buf: [128]u8 = undefined;
+        const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-cli-specialist-{x}-{s}.jsonl", .{ std.testing.random_seed, case.suffix });
+        runtime.deleteFileCwd(output_path);
+        defer runtime.deleteFileCwd(output_path);
+
+        var requests_buf: [128]u8 = undefined;
+        const requests_path = try std.fmt.bufPrint(&requests_buf, "pdf-parser-cli-specialist-{x}-{s}.requests.jsonl", .{ std.testing.random_seed, case.suffix });
+        runtime.deleteFileCwd(requests_path);
+        defer runtime.deleteFileCwd(requests_path);
+
+        if (case.legacy) {
+            try runExtract(allocator, &.{
+                "--adaptive",
+                "--source-id",
+                "external-specialist-cli",
+                "--format",
+                "artifact-jsonl",
+                "--emit-specialist-requests",
+                requests_path,
+                "--specialist-config",
+                "specialists.json",
+                "-o",
+                output_path,
+                input_path,
+            });
+        } else {
+            try runExtractAdaptive(allocator, &.{
+                "--input",
+                input_path,
+                "--source-id",
+                "external-specialist-cli",
+                "--format",
+                "artifact-jsonl",
+                "--emit-specialist-requests",
+                requests_path,
+                "--specialist-config",
+                "specialists.json",
+                "--output",
+                output_path,
+            });
+        }
+
+        const requests = try runtime.readFileAllocAlignedCwd(allocator, requests_path, .fromByteUnits(1));
+        defer allocator.free(requests);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"record_type\":\"specialist_request\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.7.0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"source_id\":\"external-specialist-cli\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_kind\":\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_outputs\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"provenance\"") != null);
+
+        const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+        defer allocator.free(output);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\"record_type\":\"specialist_request\"") != null);
     }
 }
 

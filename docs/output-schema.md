@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.6.0`
+Current schema version: `0.7.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -29,6 +29,11 @@ JSON output is a `document_manifest` object with arrays of typed records.
 `document_manifest` record. `stream-jsonl` also emits one typed record per line,
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
+
+Schema `0.7.0` adds specialist protocol records. These are additive and keep the
+native Zig kernel deterministic: the parser can emit page/region requests for
+local OCR, table, formula, layout, or entity specialists without requiring any
+specific external model package.
 
 ## Provenance Envelope
 
@@ -76,9 +81,9 @@ open before page artifacts exist, so they include the same artifact slots with
 `capability_coverage` reports implemented and advertised parser capabilities
 such as native text, span modeling, layout reconstruction, complexity routing,
 reconciliation, table reconstruction, form fields, OCR adapter support, formula
-routing, debug assets, and streaming. Formula recognition is currently marked
-false because formulas are routed but not yet recognized by a specialist in the
-default path.
+routing, specialist protocol support, debug assets, and streaming. Formula
+recognition is currently marked false because formulas are routed but not yet
+recognized by a specialist in the default path.
 
 ### `span`
 
@@ -115,7 +120,41 @@ mismatch and missing appearance.
 
 Page, region, or stage routing record with page/region scope, stage, route,
 confidence, reasons, counts, signals, bbox, and specialist metadata when
-available.
+available. Route traces include `specialist_request_ids` and
+`specialist_status` when a route maps to a request.
+
+### `specialist_request`
+
+Request record for a swappable local specialist. The parser emits these records
+when routing says a page or region would benefit from OCR, table, formula,
+layout, or entity handling. Default extraction emits requests but does not
+invoke table/formula/layout/entity specialists.
+
+Stable fields include `request_id`, `document_id`, optional `source_id`,
+optional `input_sha256`, `page_index`, optional `region_index`, page-aware
+`bbox`, `route`, `route_reasons`, `signals`, `requested_kind`,
+`requested_outputs`, `span_ids`, compact native `spans`, `block_ids`, compact
+native `blocks`, `ruling_lines`, optional `crop_image_path`,
+`debug_asset_ids`, and provenance with `source_kind:"lifecycle"`.
+
+`requested_kind` is one of `ocr`, `table`, `formula`, `layout`, or `entity`.
+
+### `specialist_response`
+
+Response record from a specialist boundary. Existing Tesseract OCR output is
+represented this way when OCR runs. Future subprocess specialists should return
+one response JSON object per request through JSONL-over-stdin/stdout.
+
+Stable fields include `request_id`, `response_id`, `specialist_id`,
+`specialist_kind`, `status`, `confidence`, returned `spans`, `tables`, `blocks`,
+`formulas`, `entities`, `debug_assets`, `warnings`, `errors`, and provenance.
+
+### `specialist_result`
+
+Compact result summary tying returned specialist artifacts back to their
+request. Current OCR results report fresh OCR span ids and counts. Future table,
+formula, layout, and entity specialists should use the same provenance-bearing
+artifact ids.
 
 ### `rag_chunk`
 
@@ -174,6 +213,9 @@ Streaming order is deterministic:
 document_manifest
 page_started
 route_trace*
+specialist_request*
+specialist_response*
+specialist_result*
 span*
 block*
 table*
@@ -204,6 +246,8 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 - `page_started`, `page_finished`, `document_finished` -> `status`
 - `span`, `block`, `table` -> `extracted_text_ref`
 - `route_trace` -> `metadata` or `ocr_ref`
+- `specialist_request` -> `metadata`, `specialist_queue_ref`, or review prompt
+- `specialist_response`, `specialist_result` -> specialist evidence artifacts
 - `rag_chunk` -> `chunk_index_ref`
 - `debug_asset` -> `external_ref`
 
@@ -213,6 +257,9 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format stream-jsonl
 pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
+pdf-parser extract-adaptive --input doc.pdf --source-id external-123 \
+  --format artifact-jsonl --emit-specialist-requests requests.jsonl \
+  --specialist-config specialists.json
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
@@ -221,3 +268,19 @@ pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 `jsonl` remains a compatibility format for reconciled span JSONL. Use
 `artifact-jsonl` for the full batch versioned stream, and `stream-jsonl` when
 the caller wants page-level progress and early chunks.
+
+Minimal specialist config shape:
+
+```json
+{
+  "ocr": { "enabled": true, "executable": "tesseract", "args": [], "timeout_ms": 30000 },
+  "table": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
+  "formula": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
+  "layout": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
+  "entity": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 }
+}
+```
+
+The config format is intentionally small. In schema `0.7.0`, it is adapter
+plumbing for future local subprocess invocation; the kernel never depends on a
+specific Python package or hosted model.

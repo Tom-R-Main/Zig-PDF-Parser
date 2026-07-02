@@ -9,6 +9,7 @@ const adaptive = @import("adaptive.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 const schema = @import("schema.zig");
+const specialist_protocol = @import("specialist_protocol.zig");
 const visual_assets = @import("visual_assets.zig");
 
 pub const StreamingEventType = enum {
@@ -19,6 +20,9 @@ pub const StreamingEventType = enum {
     table,
     rag_chunk,
     route_trace,
+    specialist_request,
+    specialist_response,
+    specialist_result,
     page_finished,
     document_finished,
     debug_asset,
@@ -94,6 +98,9 @@ pub fn extractAdaptiveStreaming(
         summary.artifact_counts.blocks += page_counts.blocks;
         summary.artifact_counts.tables += page_counts.tables;
         summary.artifact_counts.route_traces += page_counts.route_traces;
+        summary.artifact_counts.specialist_requests += page_counts.specialist_requests;
+        summary.artifact_counts.specialist_responses += page_counts.specialist_responses;
+        summary.artifact_counts.specialist_results += page_counts.specialist_results;
         summary.artifact_counts.rag_chunks += page_counts.rag_chunks;
         summary.artifact_counts.debug_assets += page_counts.debug_assets;
 
@@ -163,6 +170,14 @@ fn writePageArtifacts(
     };
 
     counts.route_traces = try schema.writeRouteTraceStreamRecords(writer, document_id, source_id, input_sha256, result, offsets, event_index);
+    const specialist_context = specialist_protocol.RenderContext{
+        .document_id = document_id,
+        .source_id = source_id,
+        .input_sha256 = input_sha256,
+    };
+    counts.specialist_requests = try specialist_protocol.writePageRequestsJsonl(writer, result, specialist_context, page_index, event_index);
+    counts.specialist_responses = try specialist_protocol.writePageResponsesJsonl(writer, result, specialist_context, page_index, event_index);
+    counts.specialist_results = try specialist_protocol.writePageResultsJsonl(writer, result, specialist_context, page_index, event_index);
 
     for (result.reconciled.spans, 0..) |span, local_index| {
         if (span.span.page_index != page_index) continue;

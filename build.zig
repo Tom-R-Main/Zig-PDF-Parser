@@ -144,6 +144,12 @@ pub fn build(b: *std.Build) void {
 
     const run_specialists_unit_tests = b.addRunArtifact(specialists_unit_tests);
 
+    const specialist_protocol_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/specialist_protocol.zig", target, optimize, ocr_build),
+    });
+
+    const run_specialist_protocol_unit_tests = b.addRunArtifact(specialist_protocol_unit_tests);
+
     const reconcile_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/reconcile.zig", target, optimize, ocr_build),
     });
@@ -274,6 +280,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_layout_unit_tests.step);
     test_step.dependOn(&run_complexity_unit_tests.step);
     test_step.dependOn(&run_specialists_unit_tests.step);
+    test_step.dependOn(&run_specialist_protocol_unit_tests.step);
     test_step.dependOn(&run_reconcile_unit_tests.step);
     test_step.dependOn(&run_schema_unit_tests.step);
     test_step.dependOn(&run_stream_unit_tests.step);

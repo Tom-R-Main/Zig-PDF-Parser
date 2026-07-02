@@ -22,6 +22,7 @@ kernel into a hybrid, adaptive parser.
 - JSON/JSONL/RAG/hOCR/ALTO/debug-SVG output surfaces with typed provenance
 - Optional visual review sidecars for page overlays, table grids, OCR routes,
   low-confidence regions, and span/block ids
+- Specialist protocol records for OCR/table/formula/layout/entity adapters
 - JSON inspection and trace output for page and region routing decisions
 
 ## Performance Benchmark
@@ -113,6 +114,8 @@ pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
+pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl \
+  --emit-specialist-requests requests.jsonl
 pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
 pdf-parser extract --adaptive -f hocr doc.pdf
 pdf-parser extract --adaptive -f alto doc.pdf
@@ -132,16 +135,18 @@ such as `image_dominant`, `missing_tounicode`, `table_alignment`,
 `formula_density`, and `low_reading_order_confidence`.
 
 Adaptive `json` emits the versioned public schema: a `document_manifest` plus
-typed `span`, `block`, `table`, `form_field`, `route_trace`, `rag_chunk`, and
-`debug_asset` records. `artifact-jsonl` emits the same contract as a
+typed `span`, `block`, `table`, `form_field`, `route_trace`,
+`specialist_request`, `specialist_response`, `specialist_result`, `rag_chunk`,
+and `debug_asset` records. `artifact-jsonl` emits the same contract as a
 manifest-first batch JSONL stream for host applications and ingestion
 pipelines. `stream-jsonl` emits page-by-page lifecycle events and artifacts as
-soon as each page is processed: `document_manifest`, `page_started`, page
-artifacts, `page_finished`, optional debug assets, then `document_finished`.
-`jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
-The schema is documented in [docs/output-schema.md](docs/output-schema.md).
+soon as each page is processed: `document_manifest`, `page_started`, route
+traces, specialist requests/results, page artifacts, `page_finished`, optional
+debug assets, then `document_finished`. `jsonl` remains a compatibility span
+stream, and `rag-jsonl` remains chunk-only. The schema is documented in
+[docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets are formal `debug_asset` records in schema `0.6.0`. By
+Visual review assets are formal `debug_asset` records in schema `0.7.0`. By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
 `page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`, `document.hocr.html`,
@@ -163,6 +168,34 @@ pdf-parser extract-adaptive \
 envelopes so any pipeline can join records back to its own source table,
 object-store key, or ingestion run.
 
+The specialist protocol keeps the Zig kernel deterministic while making local
+specialists swappable. Route traces identify regions that need OCR, table,
+formula, layout, or entity review; `specialist_request` records include the
+page/region bbox, route reasons, signal scores, native spans/blocks, optional
+crop/debug asset references, and provenance. By default the parser emits
+requests and does not invoke table/formula/layout/entity specialists. Existing
+Tesseract OCR output is represented as `specialist_response` and
+`specialist_result` records when OCR runs. Future subprocess specialists should
+use JSONL-over-stdin/stdout: one request JSON object in, one response JSON
+object out.
+
+Optional specialist flags:
+
+```bash
+pdf-parser extract-adaptive \
+  --input doc.pdf \
+  --source-id external-system-id \
+  --format artifact-jsonl \
+  --emit-specialist-requests requests.jsonl \
+  --specialist-config specialists.json
+```
+
+The minimal specialist config shape is a JSON object with optional `ocr`,
+`table`, `formula`, `layout`, and `entity` entries. Each entry may include
+`enabled`, `executable`, `args`, and `timeout_ms`. The config is accepted and
+carried as adapter plumbing in this sprint; non-OCR specialist invocation is
+intentionally not enabled by default.
+
 The document manifest is the top-level intelligence summary: input SHA256,
 parser/schema versions, page count, encrypted/corrupt flags, route counts,
 OCR/table/form/formula extraction counts, output artifact hashes or stream hash
@@ -172,9 +205,11 @@ stable run record for general pipelines, not just this CLI.
 For Siftable-style ingestion, `stream-jsonl` maps naturally to durable
 processing records: `document_manifest` as a manifest artifact,
 `page_started`/`page_finished`/`document_finished` as status artifacts,
-`span`/`block`/`table` as extracted text artifacts, `route_trace` as metadata
-or OCR diagnostics, and `rag_chunk` as chunk-index artifacts that can be queued
-for embeddings before the full document finishes.
+`span`/`block`/`table` as extracted text artifacts, `route_trace` and
+`specialist_request` as metadata or OCR/specialist diagnostics,
+`specialist_result` as returned specialist evidence, and `rag_chunk` as
+chunk-index artifacts that can be queued for embeddings before the full
+document finishes.
 
 Table records are structured data artifacts: rows/cells, page-aware geometry,
 logical multi-page table ids, continuation links, `rowspan`/`colspan`, roles
@@ -240,6 +275,7 @@ src/
 ├── stream.zig       # Page-by-page adaptive JSONL artifact streaming
 ├── reconcile.zig    # Provenance-preserving span/block/chunk outputs
 ├── specialists.zig  # Table/formula heuristics and adapter stubs
+├── specialist_protocol.zig # Public JSONL protocol for local specialists
 ├── ocr.zig          # OCR routing adapter and Tesseract subprocess/C-FFI hooks
 ├── eval.zig         # Evaluation metrics
 ├── eval_runner.zig  # Eval CLI
@@ -273,7 +309,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.6.0`. Every emitted record carries a `provenance` envelope with document and
+`0.7.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

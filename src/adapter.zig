@@ -5,7 +5,9 @@
 
 const std = @import("std");
 const adaptive = @import("adaptive.zig");
+const runtime = @import("runtime.zig");
 const schema = @import("schema.zig");
+const specialist_protocol = @import("specialist_protocol.zig");
 const stream = @import("stream.zig");
 
 pub const AdaptiveAdapterFormat = enum {
@@ -22,6 +24,8 @@ pub const AdaptiveAdapterOptions = struct {
     adaptive_options: adaptive.ExtractOptions = .{},
     include_debug_asset_refs: bool = true,
     debug_assets_dir: ?[]const u8 = null,
+    emit_specialist_requests_path: ?[]const u8 = null,
+    specialist_config_path: ?[]const u8 = null,
 };
 
 pub const AdaptiveAdapterSummary = struct {
@@ -60,9 +64,15 @@ pub fn extractAdaptive(
         .errors = parser_errors,
         .include_debug_asset_refs = options.include_debug_asset_refs,
         .debug_assets_dir = options.debug_assets_dir,
+        .specialist_config_path = options.specialist_config_path,
     };
 
     if (options.format == .stream_jsonl) {
+        if (options.emit_specialist_requests_path) |requests_path| {
+            var request_result = try adaptive.extractDocument(allocator, document, options.adaptive_options);
+            defer request_result.deinit();
+            try writeSpecialistRequestsFile(allocator, requests_path, &request_result, render_options);
+        }
         const summary = try document.extractAdaptiveStreaming(allocator, writer, .{
             .adaptive_options = options.adaptive_options,
             .schema_options = render_options,
@@ -74,6 +84,10 @@ pub fn extractAdaptive(
     var result = try adaptive.extractDocument(allocator, document, options.adaptive_options);
     defer result.deinit();
 
+    if (options.emit_specialist_requests_path) |requests_path| {
+        try writeSpecialistRequestsFile(allocator, requests_path, &result, render_options);
+    }
+
     const rendered = switch (options.format) {
         .json => try schema.renderArtifactJson(allocator, &result, render_options),
         .artifact_jsonl => try schema.renderArtifactJsonl(allocator, &result, render_options),
@@ -84,6 +98,19 @@ pub fn extractAdaptive(
 
     try writer.writeAll(rendered);
     return .{ .format = options.format };
+}
+
+fn writeSpecialistRequestsFile(allocator: std.mem.Allocator, path: []const u8, result: anytype, options: schema.RenderOptions) !void {
+    const rendered = try specialist_protocol.renderRequestsJsonl(allocator, result, .{
+        .document_id = options.document_id,
+        .source_id = options.source_id,
+        .input_sha256 = options.input_sha256,
+    });
+    defer allocator.free(rendered);
+
+    const file = try runtime.createFileCwd(path);
+    defer runtime.closeFile(file);
+    try runtime.writeAllFile(file, rendered);
 }
 
 pub fn formatFromName(name: []const u8) ?AdaptiveAdapterFormat {

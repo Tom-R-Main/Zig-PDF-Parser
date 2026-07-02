@@ -7,9 +7,10 @@ const std = @import("std");
 const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
+const specialist_protocol = @import("specialist_protocol.zig");
 const visual_assets = @import("visual_assets.zig");
 
-pub const schema_version = "0.6.0";
+pub const schema_version = specialist_protocol.schema_version;
 pub const parser_version = "0.1.0-alpha";
 
 pub const RenderOptions = struct {
@@ -24,6 +25,7 @@ pub const RenderOptions = struct {
     errors: []const ManifestDiagnostic = &.{},
     include_debug_asset_refs: bool = true,
     debug_assets_dir: ?[]const u8 = null,
+    specialist_config_path: ?[]const u8 = null,
 };
 
 pub const ManifestDiagnostic = struct {
@@ -45,6 +47,9 @@ pub const StreamCounts = struct {
     blocks: usize = 0,
     tables: usize = 0,
     route_traces: usize = 0,
+    specialist_requests: usize = 0,
+    specialist_responses: usize = 0,
+    specialist_results: usize = 0,
     rag_chunks: usize = 0,
     debug_assets: usize = 0,
 };
@@ -96,6 +101,12 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
     }
     try writer.writeAll("],\"route_traces\":[");
     try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, false, .{}, null);
+    try writer.writeAll("],\"specialist_requests\":[");
+    try specialist_protocol.writeRequestsArray(writer, result, specialistContext(options));
+    try writer.writeAll("],\"specialist_responses\":[");
+    try specialist_protocol.writeResponsesArray(writer, result, specialistContext(options));
+    try writer.writeAll("],\"specialist_results\":[");
+    try specialist_protocol.writeResultsArray(writer, result, specialistContext(options));
     try writer.writeAll("],\"rag_chunks\":[");
     for (result.reconciled.chunks, 0..) |chunk, index| {
         if (index > 0) try writer.writeByte(',');
@@ -135,6 +146,7 @@ pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, option
         try writer.writeByte('\n');
     }
     try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, true, .{}, null);
+    _ = try specialist_protocol.writeArtifactJsonl(writer, result, specialistContext(options));
     for (result.reconciled.chunks) |chunk| {
         try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, .{}, null);
         try writer.writeByte('\n');
@@ -237,7 +249,9 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
     try writeOptionalString(writer, options.input_sha256);
     try writer.writeAll(",\"source_path\":");
     try writeOptionalString(writer, options.source_path);
-    try writer.writeAll(",\"extraction_options\":{\"adaptive\":true}");
+    try writer.writeAll(",\"extraction_options\":{\"adaptive\":true,\"specialist_config\":");
+    try writer.print("{}", .{options.specialist_config_path != null});
+    try writer.writeByte('}');
     try writer.writeAll(",\"route_counts\":");
     try writeRouteCounts(writer, result);
     try writer.writeAll(",\"artifact_counts\":");
@@ -283,14 +297,18 @@ fn writeRouteCounts(writer: anytype, result: anytype) !void {
 }
 
 fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions) !void {
+    const specialist_counts = specialist_protocol.counts(result);
     try writer.print(
-        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"form_fields\":{},\"route_traces\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
+        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"form_fields\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
         .{
             result.reconciled.spans.len,
             result.reconciled.blocks.len,
             result.tables.len,
             result.form_fields.len,
             routeTraceCount(result),
+            specialist_counts.requests,
+            specialist_counts.responses,
+            specialist_counts.results,
             result.reconciled.chunks.len,
             visual_assets.assetCount(result, options.include_debug_asset_refs),
         },
@@ -365,6 +383,9 @@ const ArtifactHashKind = enum {
     tables,
     form_fields,
     route_traces,
+    specialist_requests,
+    specialist_responses,
+    specialist_results,
     rag_chunks,
     debug_assets,
 };
@@ -381,6 +402,9 @@ const output_artifact_specs = [_]OutputArtifactSpec{
     .{ .name = "tables", .record_type = "table", .kind = .tables },
     .{ .name = "form_fields", .record_type = "form_field", .kind = .form_fields },
     .{ .name = "route_traces", .record_type = "route_trace", .kind = .route_traces },
+    .{ .name = "specialist_requests", .record_type = "specialist_request", .kind = .specialist_requests },
+    .{ .name = "specialist_responses", .record_type = "specialist_response", .kind = .specialist_responses },
+    .{ .name = "specialist_results", .record_type = "specialist_result", .kind = .specialist_results },
     .{ .name = "rag_chunks", .record_type = "rag_chunk", .kind = .rag_chunks },
     .{ .name = "debug_assets", .record_type = "debug_asset", .kind = .debug_assets },
 };
@@ -430,6 +454,9 @@ fn outputArtifactCount(result: anytype, kind: ArtifactHashKind, options: RenderO
         .tables => result.tables.len,
         .form_fields => result.form_fields.len,
         .route_traces => routeTraceCount(result),
+        .specialist_requests => specialist_protocol.countRequests(result),
+        .specialist_responses => specialist_protocol.countResponses(result),
+        .specialist_results => specialist_protocol.countResults(result),
         .rag_chunks => result.reconciled.chunks.len,
         .debug_assets => visual_assets.assetCount(result, options.include_debug_asset_refs),
     };
@@ -442,6 +469,9 @@ fn streamOutputArtifactCount(counts: StreamCounts, kind: ArtifactHashKind) usize
         .tables => counts.tables,
         .form_fields => 0,
         .route_traces => counts.route_traces,
+        .specialist_requests => counts.specialist_requests,
+        .specialist_responses => counts.specialist_responses,
+        .specialist_results => counts.specialist_results,
         .rag_chunks => counts.rag_chunks,
         .debug_assets => counts.debug_assets,
     };
@@ -457,6 +487,9 @@ fn artifactDigest(result: anytype, kind: ArtifactHashKind, options: RenderOption
         .tables => hashTables(&hasher, result),
         .form_fields => hashFormFields(&hasher, result),
         .route_traces => hashRouteTraces(&hasher, result),
+        .specialist_requests => hashSpecialistProtocol(&hasher, result, .requests),
+        .specialist_responses => hashSpecialistProtocol(&hasher, result, .responses),
+        .specialist_results => hashSpecialistProtocol(&hasher, result, .results),
         .rag_chunks => hashRagChunks(&hasher, result),
         .debug_assets => hashDebugAssets(&hasher, options.include_debug_asset_refs),
     }
@@ -535,6 +568,36 @@ fn hashRoute(hasher: anytype, kind: []const u8, page_index: u32, region_index: ?
     hashPrint(hasher, "{s}|{d};", .{ routeName(route), reason_mask });
 }
 
+const SpecialistHashKind = enum { requests, responses, results };
+
+fn hashSpecialistProtocol(hasher: anytype, result: anytype, kind: SpecialistHashKind) void {
+    switch (kind) {
+        .requests => {
+            for (result.page_routes) |route| {
+                if (route.route.needs_ocr) hashPrint(hasher, "ocr|{d}|{d};", .{ route.page_index, route.reason_mask });
+            }
+            for (result.region_routes) |route| {
+                if (route.route.needs_table_model) hashPrint(hasher, "table|{d}|{d}|{d};", .{ route.page_index, route.region_index, route.reason_mask });
+                if (route.route.needs_formula_model) hashPrint(hasher, "formula|{d}|{d}|{d};", .{ route.page_index, route.region_index, route.reason_mask });
+                if (route.route.needs_layout_model) hashPrint(hasher, "layout|{d}|{d}|{d};", .{ route.page_index, route.region_index, route.reason_mask });
+            }
+        },
+        .responses => {
+            for (result.page_routes) |route| {
+                if (route.route.needs_ocr) hashPrint(hasher, "ocr-response|{d};", .{route.page_index});
+            }
+        },
+        .results => {
+            for (result.reconciled.spans) |span| {
+                if (span.chosen_source == .fresh_ocr or span.span.source == .fresh_ocr) {
+                    hashPrint(hasher, "ocr-result|{d}|", .{span.span.page_index});
+                    hashText(hasher, span.span.text);
+                }
+            }
+        },
+    }
+}
+
 fn hashRagChunks(hasher: anytype, result: anytype) void {
     for (result.reconciled.chunks) |chunk| {
         hashPrint(hasher, "{d}|{d}|{d}|{d}|", .{
@@ -566,7 +629,7 @@ fn hashPrint(hasher: anytype, comptime fmt: []const u8, args: anytype) void {
 
 fn writeCapabilityCoverage(writer: anytype, streaming: bool, include_debug_asset_refs: bool) !void {
     try writer.print(
-        "{{\"native_text\":true,\"span_model\":true,\"layout_reconstruction\":true,\"complexity_routing\":true,\"reconciliation\":true,\"table_reconstruction\":true,\"form_fields\":true,\"ocr_adapter\":true,\"formula_routing\":true,\"formula_recognition\":false,\"debug_assets\":{},\"streaming\":{}}}",
+        "{{\"native_text\":true,\"span_model\":true,\"layout_reconstruction\":true,\"complexity_routing\":true,\"reconciliation\":true,\"table_reconstruction\":true,\"form_fields\":true,\"ocr_adapter\":true,\"specialist_protocol\":true,\"formula_routing\":true,\"formula_recognition\":false,\"debug_assets\":{},\"streaming\":{}}}",
         .{ include_debug_asset_refs, streaming },
     );
 }
@@ -619,7 +682,9 @@ pub fn writeStreamManifestRecord(writer: anytype, options: RenderOptions, event_
     try writeOptionalString(writer, options.input_sha256);
     try writer.writeAll(",\"source_path\":");
     try writeOptionalString(writer, options.source_path);
-    try writer.writeAll(",\"extraction_options\":{\"adaptive\":true,\"streaming\":true}");
+    try writer.writeAll(",\"extraction_options\":{\"adaptive\":true,\"streaming\":true,\"specialist_config\":");
+    try writer.print("{}", .{options.specialist_config_path != null});
+    try writer.writeByte('}');
     try writer.writeAll(",\"route_counts\":null,\"artifact_counts\":null,\"extraction_counts\":null");
     try writer.writeAll(",\"output_artifacts\":");
     try writeStreamingOutputArtifacts(writer, null);
@@ -1085,6 +1150,7 @@ fn writePageRouteRecord(writer: anytype, document_id: []const u8, source_id: ?[]
     }
     try writer.print(",\"trace_kind\":\"page_route\",\"page_index\":{},\"region_index\":null,\"stage\":\"route_decision\"", .{route.page_index});
     try writeRouteFields(writer, route.route, route.reason_mask, route.span_count, 0, route.image_count, route.char_count, route.signals, route.bbox);
+    try specialist_protocol.writeRouteTraceSpecialistFieldsWithReason(writer, route.route, route.reason_mask, route.page_index, null);
     try writeProvenancePrefix(writer, .{
         .document_id = document_id,
         .source_id = source_id,
@@ -1131,6 +1197,7 @@ fn writeRegionRouteRecord(writer: anytype, document_id: []const u8, source_id: ?
     try writeRouteFields(writer, route.route, route.reason_mask, route.span_count, 0, route.image_count, route.char_count, route.signals, route.bbox);
     try writer.writeAll(",\"specialist\":");
     try writeSpecialistJson(writer, route);
+    try specialist_protocol.writeRouteTraceSpecialistFieldsWithReason(writer, route.route, route.reason_mask, route.page_index, route.region_index);
     try writeProvenancePrefix(writer, .{
         .document_id = document_id,
         .source_id = source_id,
@@ -1170,6 +1237,7 @@ fn writeTraceRecord(writer: anytype, document_id: []const u8, source_id: ?[]cons
     try writer.writeByte('"');
     const bbox = traceBBox(result, record);
     try writeRouteFields(writer, record.route, record.reason_mask, record.span_count, record.block_count, 0, 0, null, bbox);
+    try specialist_protocol.writeRouteTraceSpecialistFieldsWithReason(writer, record.route, record.reason_mask, record.page_index, record.region_index);
     try writeProvenancePrefix(writer, .{
         .document_id = document_id,
         .source_id = source_id,
@@ -1702,16 +1770,27 @@ fn nextRouteStreamMeta(stream_event_index: ?*u64, page_index: u32) ?StreamRecord
 
 fn writeStreamCounts(writer: anytype, counts: StreamCounts) !void {
     try writer.print(
-        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"route_traces\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
+        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
         .{
             counts.spans,
             counts.blocks,
             counts.tables,
             counts.route_traces,
+            counts.specialist_requests,
+            counts.specialist_responses,
+            counts.specialist_results,
             counts.rag_chunks,
             counts.debug_assets,
         },
     );
+}
+
+fn specialistContext(options: RenderOptions) specialist_protocol.RenderContext {
+    return .{
+        .document_id = options.document_id,
+        .source_id = options.source_id,
+        .input_sha256 = options.input_sha256,
+    };
 }
 
 fn writeRouteTotals(writer: anytype, routes: RouteTotals) !void {

@@ -282,7 +282,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.6.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.7.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);
@@ -320,7 +320,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
-    try std.testing.expectEqualStrings("0.6.0", debug_assets[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.7.0", debug_assets[0].object.get("schema_version").?.string);
     try std.testing.expect(debug_assets[0].object.get("asset_kind") != null);
     try std.testing.expect(debug_assets[0].object.get("path") != null);
     try std.testing.expectEqual(.null, debug_assets[0].object.get("path").?);
@@ -331,7 +331,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.6.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.7.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -445,10 +445,93 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.6.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.7.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
+}
+
+test "specialist protocol emits batch request records for routed table formula regions" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateTableFormulaPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{
+        .document_id = "specialist-table-formula",
+        .source_id = "external-specialist",
+        .input_sha256 = "specialist-hash",
+    });
+    defer allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    const requests = parsed.value.object.get("specialist_requests").?.array.items;
+    try std.testing.expect(requests.len > 0);
+    try expectProvenanceObject(requests[0]);
+    try std.testing.expectEqualStrings("0.7.0", requests[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("specialist_request", requests[0].object.get("record_type").?.string);
+    try std.testing.expectEqualStrings("external-specialist", requests[0].object.get("source_id").?.string);
+    try std.testing.expect(requests[0].object.get("requested_kind") != null);
+    try std.testing.expect(requests[0].object.get("requested_outputs") != null);
+    try std.testing.expect(requests[0].object.get("signals") != null);
+    try std.testing.expect(requests[0].object.get("spans") != null);
+    try std.testing.expect(requests[0].object.get("blocks") != null);
+    try std.testing.expectEqualStrings("lifecycle", requests[0].object.get("provenance").?.object.get("source_kind").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"specialist_request\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"specialist_request_ids\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"specialist_status\":\"requested\"") != null);
+}
+
+test "artifact jsonl and streaming jsonl expose specialist request ordering" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateTableFormulaPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const jsonl = try zpdf.schema.renderArtifactJsonl(allocator, &result, .{
+        .document_id = "specialist-jsonl",
+        .source_id = "external-jsonl-specialist",
+    });
+    defer allocator.free(jsonl);
+
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"specialist_request\"") != null);
+    try expectIndexBefore(jsonl, "\"record_type\":\"route_trace\"", "\"record_type\":\"specialist_request\"");
+    try expectJsonlLinesParse(allocator, jsonl);
+
+    const stream_pdf_data = try testpdf.generateMixedNativeScanPdf(allocator);
+    defer allocator.free(stream_pdf_data);
+
+    const stream_doc = try zpdf.Document.openFromMemory(allocator, stream_pdf_data, zpdf.ErrorConfig.permissive());
+    defer stream_doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+    const summary = try stream_doc.extractAdaptiveStreaming(allocator, writer, .{
+        .schema_options = .{
+            .document_id = "specialist-stream",
+            .source_id = "external-stream-specialist",
+        },
+    });
+
+    try std.testing.expect(summary.artifact_counts.specialist_requests > 0);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event_type\":\"specialist_request\"") != null);
+    try expectIndexBefore(output.items, "\"event_type\":\"route_trace\"", "\"event_type\":\"specialist_request\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"specialist_request\"", "\"event_type\":\"span\"");
+    try expectJsonlLinesParse(allocator, output.items);
 }
 
 test "streaming adaptive jsonl emits manifest page artifacts and document finish in order" {
@@ -642,7 +725,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
-    try std.testing.expectEqualStrings("0.6.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.7.0", tables[0].object.get("schema_version").?.string);
     try std.testing.expect(tables[0].object.get("logical_table_id") != null);
     try std.testing.expect(tables[0].object.get("table_part_index") != null);
     try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
@@ -652,7 +735,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
     try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.6.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.7.0", cells[0].object.get("schema_version").?.string);
     try std.testing.expect(cells[0].object.get("cell_id") != null);
     try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
     try std.testing.expect(cells[0].object.get("raw_text") != null);
