@@ -1,0 +1,8 @@
+Statement page 1
+Account Amount
+Cash 1,000
+Inventory 450
+Statement page 2
+Account Amount
+Debt (300)
+Equity 1,150

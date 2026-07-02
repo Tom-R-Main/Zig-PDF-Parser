@@ -5,4 +5,6 @@ results/
 
 # Test corpora (download separately)
 verapdf/
+eval/raw_cache/
 *.pdf
+!eval/corpus/**/*.pdf

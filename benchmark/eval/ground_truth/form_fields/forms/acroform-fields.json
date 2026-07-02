@@ -1,0 +1,4 @@
+[
+  {"name":"email","type":"text","value":"user@example.com"},
+  {"name":"country","type":"choice","value":"USA"}
+]

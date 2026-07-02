@@ -24,6 +24,9 @@ class Entry:
     pdf_path: Path
     truth_path: Path
     table_truth_path: Path | None = None
+    formula_truth_path: Path | None = None
+    formula_json_truth_path: Path | None = None
+    form_json_truth_path: Path | None = None
 
 
 def main() -> int:
@@ -89,10 +92,13 @@ def load_manifest(path: Path, repo_root: Path) -> list[Entry]:
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
-        if len(fields) < 4 or len(fields) > 7:
+        if len(fields) < 4 or len(fields) > 9:
             raise ValueError(f"Malformed manifest row: {raw_line!r}")
         category, doc_id, pdf_path, truth_path = fields[:4]
         table_truth_path = fields[4] if len(fields) >= 5 and fields[4] else None
+        formula_truth_path = fields[6] if len(fields) >= 7 and fields[6] else None
+        formula_json_truth_path = fields[7] if len(fields) >= 8 and fields[7] else None
+        form_json_truth_path = fields[8] if len(fields) >= 9 and fields[8] else None
         entries.append(
             Entry(
                 category=category,
@@ -100,6 +106,9 @@ def load_manifest(path: Path, repo_root: Path) -> list[Entry]:
                 pdf_path=(repo_root / pdf_path).resolve(),
                 truth_path=(repo_root / truth_path).resolve(),
                 table_truth_path=(repo_root / table_truth_path).resolve() if table_truth_path else None,
+                formula_truth_path=(repo_root / formula_truth_path).resolve() if formula_truth_path else None,
+                formula_json_truth_path=(repo_root / formula_json_truth_path).resolve() if formula_json_truth_path else None,
+                form_json_truth_path=(repo_root / form_json_truth_path).resolve() if form_json_truth_path else None,
             )
         )
     return entries
@@ -163,6 +172,12 @@ def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str
         cmd.append("--adaptive")
     if entry.table_truth_path is not None:
         cmd.extend(["--truth-table-json", str(entry.table_truth_path)])
+    if entry.formula_truth_path is not None:
+        cmd.extend(["--truth-formula", str(entry.formula_truth_path)])
+    if entry.formula_json_truth_path is not None:
+        cmd.extend(["--truth-formula-json", str(entry.formula_json_truth_path)])
+    if entry.form_json_truth_path is not None:
+        cmd.extend(["--truth-form-json", str(entry.form_json_truth_path)])
     proc = subprocess.run(
         cmd,
         cwd=repo_root,
@@ -182,6 +197,11 @@ def run_pdf_parser(repo_root: Path, entry: Entry, *, adaptive: bool) -> dict[str
             "cer": metrics["cer"],
             "wer": metrics["wer"],
             "token_f1": metrics["token_f1"],
+            "table_cell_accuracy": metrics.get("table_cell_accuracy"),
+            "table_span_accuracy": metrics.get("table_span_accuracy"),
+            "table_role_accuracy": metrics.get("table_role_accuracy"),
+            "formula_structure_accuracy": metrics.get("formula_structure_accuracy"),
+            "form_field_accuracy": metrics.get("form_field_accuracy"),
         },
         latency_ms=metrics["median_ms_per_page"],
         peak_rss_mb=metrics["peak_rss_mb"],
@@ -253,7 +273,16 @@ def skipped(entry: Entry, parser: str, reason: str) -> dict[str, object]:
         entry=entry,
         parser=parser,
         status="skipped",
-        metrics={"cer": None, "wer": None, "token_f1": None},
+        metrics={
+            "cer": None,
+            "wer": None,
+            "token_f1": None,
+            "table_cell_accuracy": None,
+            "table_span_accuracy": None,
+            "table_role_accuracy": None,
+            "formula_structure_accuracy": None,
+            "form_field_accuracy": None,
+        },
         latency_ms=None,
         peak_rss_mb=None,
     )
@@ -330,7 +359,22 @@ def render_jsonl(rows: list[dict[str, object]]) -> str:
 
 
 def render_table(rows: list[dict[str, object]]) -> str:
-    headers = ("doc_id", "category", "parser", "status", "cer", "wer", "token_f1", "latency_ms", "rss_mb")
+    headers = (
+        "doc_id",
+        "category",
+        "parser",
+        "status",
+        "cer",
+        "wer",
+        "token_f1",
+        "table_cell",
+        "table_span",
+        "table_role",
+        "formula_struct",
+        "form_fields",
+        "latency_ms",
+        "rss_mb",
+    )
     body = []
     for data in rows:
         metrics = data["metrics"]
@@ -344,6 +388,11 @@ def render_table(rows: list[dict[str, object]]) -> str:
                 fmt(metrics.get("cer")),
                 fmt(metrics.get("wer")),
                 fmt(metrics.get("token_f1")),
+                fmt(metrics.get("table_cell_accuracy")),
+                fmt(metrics.get("table_span_accuracy")),
+                fmt(metrics.get("table_role_accuracy")),
+                fmt(metrics.get("formula_structure_accuracy")),
+                fmt(metrics.get("form_field_accuracy")),
                 fmt(data.get("latency_ms")),
                 fmt(data.get("peak_rss_mb")),
             )

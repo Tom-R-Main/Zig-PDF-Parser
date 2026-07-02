@@ -1,0 +1,4 @@
+Ruled Statement
+Account Q1 Q2
+Cash 1,000 (200)
+Debt -50 (75)

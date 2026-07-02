@@ -1,0 +1,25 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Category", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Q1", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Q2", "role": "header", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Assets", "role": "row_header", "rowspan": 2, "colspan": 1 },
+        { "text": "1,000", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "450", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "300", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "125", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Liabilities", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "(700)", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(200)", "role": "data", "rowspan": 1, "colspan": 1 }
+      ]
+    ]
+  }
+]

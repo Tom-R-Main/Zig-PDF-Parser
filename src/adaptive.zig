@@ -173,6 +173,13 @@ pub const RegionRoute = struct {
     }
 };
 
+pub const FormField = struct {
+    name: []u8,
+    value: ?[]u8,
+    field_type: []u8,
+    rect: ?[4]f64,
+};
+
 pub const Result = struct {
     allocator: std.mem.Allocator,
     reconciled: ReconciledDocument,
@@ -180,6 +187,7 @@ pub const Result = struct {
     page_routes: []PageRoute,
     region_routes: []RegionRoute,
     trace_records: []TraceRecord,
+    form_fields: []FormField,
 
     pub fn deinit(self: *Result) void {
         self.reconciled.deinit();
@@ -187,11 +195,13 @@ pub const Result = struct {
         self.allocator.free(self.page_routes);
         self.allocator.free(self.region_routes);
         self.allocator.free(self.trace_records);
+        freeFormFields(self.allocator, self.form_fields);
     }
 
     pub fn render(self: *const Result, allocator: std.mem.Allocator, format: OutputFormat) ![]u8 {
         return switch (format) {
             .debug_svg => renderDebugSvg(allocator, self),
+            .json => renderJson(allocator, self),
             else => renderOutput(allocator, &self.reconciled, format),
         };
     }
@@ -238,6 +248,9 @@ pub fn extractDocument(
 
     var trace_records: std.ArrayList(TraceRecord) = .empty;
     defer trace_records.deinit(allocator);
+
+    const form_fields = try collectFormFields(allocator, document);
+    errdefer freeFormFields(allocator, form_fields);
 
     const has_structure_tree = document.hasStructureTree();
     var region_index: u32 = 0;
@@ -322,13 +335,14 @@ pub fn extractDocument(
                     allocator.free(@constCast(ocr_input.image_path));
                 }
 
-                const ocr_spans = ocr.recognizeRegion(allocator, ocr_input, options.ocr_config) catch |err| switch (err) {
+                const raw_ocr_spans = ocr.recognizeRegion(allocator, ocr_input, options.ocr_config) catch |err| switch (err) {
                     error.TesseractUnavailable,
                     error.TesseractFailed,
                     error.TesseractCBackendDisabled,
                     => try allocator.alloc(layout.TextSpan, 0),
                     else => return err,
                 };
+                const ocr_spans = try filterOcrSpansForPage(allocator, raw_ocr_spans, spans, image_boxes);
                 try ocr_pages.append(allocator, ocr_spans);
                 page_ocr_spans = ocr_spans;
                 try trace_records.append(allocator, .{
@@ -349,8 +363,11 @@ pub fn extractDocument(
             }
         }
 
+        const ruling_lines = try document.getPageRulingLines(page_idx, allocator);
+        defer allocator.free(ruling_lines);
+
         const page_width = page.media_box[2] - page.media_box[0];
-        var page_layout = try layout.analyzeLayout(allocator, spans, page_width);
+        var page_layout = try layout.analyzeLayoutWithRulings(allocator, spans, page_width, ruling_lines);
         defer page_layout.deinit();
         reorderSpansToLayoutOrder(spans, page_layout.spans);
 
@@ -394,9 +411,6 @@ pub fn extractDocument(
             .span_count = spans.len,
             .block_count = page_layout.blocks.len,
         });
-
-        const ruling_lines = try document.getPageRulingLines(page_idx, allocator);
-        defer allocator.free(ruling_lines);
 
         if (page_layout.blocks.len == 0) {
             const score = complexity.scoreRegion(page_input, page_bbox);
@@ -459,6 +473,16 @@ pub fn extractDocument(
         }
     }
 
+    const form_spans = try formFieldsToSpans(allocator, form_fields);
+    defer freeTextSpans(allocator, form_spans);
+    if (form_spans.len > 0) {
+        try layers.append(allocator, .{
+            .source = .manual,
+            .spans = form_spans,
+            .trust = 1.0,
+        });
+    }
+
     var reconcile_options = options.reconcile_options;
     if (options.preserve_layout_order) reconcile_options.preserve_input_order = true;
     var reconciled = try reconcile.reconcile(allocator, layers.items, reconcile_options);
@@ -492,7 +516,139 @@ pub fn extractDocument(
         .page_routes = owned_page_routes,
         .region_routes = owned_region_routes,
         .trace_records = owned_trace_records,
+        .form_fields = form_fields,
     };
+}
+
+fn collectFormFields(allocator: std.mem.Allocator, document: anytype) ![]FormField {
+    const DocumentPtr = @TypeOf(document);
+    const document_info = @typeInfo(DocumentPtr);
+    if (document_info != .pointer) return allocator.alloc(FormField, 0);
+    const DocumentType = document_info.pointer.child;
+    if (!@hasDecl(DocumentType, "getFormFields") or !@hasDecl(DocumentType, "freeFormFields")) {
+        return allocator.alloc(FormField, 0);
+    }
+
+    const source_fields = try document.getFormFields(allocator);
+    defer DocumentType.freeFormFields(allocator, source_fields);
+
+    var fields: std.ArrayList(FormField) = .empty;
+    errdefer {
+        for (fields.items) |field| freeFormField(allocator, field);
+        fields.deinit(allocator);
+    }
+
+    for (source_fields) |field| {
+        const copied_name = try allocator.dupe(u8, field.name);
+        errdefer allocator.free(copied_name);
+
+        const copied_value = if (field.value) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (copied_value) |value| allocator.free(value);
+
+        const copied_type = try allocator.dupe(u8, @tagName(field.field_type));
+        errdefer allocator.free(copied_type);
+
+        try fields.append(allocator, .{
+            .name = copied_name,
+            .value = copied_value,
+            .field_type = copied_type,
+            .rect = field.rect,
+        });
+    }
+
+    return fields.toOwnedSlice(allocator);
+}
+
+fn freeFormFields(allocator: std.mem.Allocator, fields: []FormField) void {
+    for (fields) |field| freeFormField(allocator, field);
+    allocator.free(fields);
+}
+
+fn freeFormField(allocator: std.mem.Allocator, field: FormField) void {
+    allocator.free(field.name);
+    if (field.value) |value| allocator.free(value);
+    allocator.free(field.field_type);
+}
+
+fn formFieldsToSpans(allocator: std.mem.Allocator, fields: []const FormField) ![]layout.TextSpan {
+    var spans: std.ArrayList(layout.TextSpan) = .empty;
+    errdefer {
+        for (spans.items) |span| freeOwnedTextSpan(allocator, span);
+        spans.deinit(allocator);
+    }
+
+    for (fields) |field| {
+        const value = field.value orelse continue;
+        if (field.name.len == 0 or value.len == 0) continue;
+
+        var text = try std.ArrayList(u8).initCapacity(allocator, field.name.len + 1 + value.len);
+        errdefer text.deinit(allocator);
+        try text.appendSlice(allocator, field.name);
+        try text.append(allocator, ' ');
+        try text.appendSlice(allocator, value);
+        const owned_text = try text.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_text);
+
+        const bbox = if (field.rect) |rect|
+            BBox{ .x0 = rect[0], .y0 = rect[1], .x1 = rect[2], .y1 = rect[3] }
+        else
+            BBox{ .x0 = 36, .y0 = 36, .x1 = 576, .y1 = 50 };
+
+        try spans.append(allocator, layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = bbox,
+            .text = owned_text,
+            .source = .manual,
+            .confidence = 1.0,
+            .font = .{ .size = 10 },
+        }));
+    }
+
+    return spans.toOwnedSlice(allocator);
+}
+
+fn filterOcrSpansForPage(
+    allocator: std.mem.Allocator,
+    ocr_spans: []layout.TextSpan,
+    native_spans: []const layout.TextSpan,
+    images: []const complexity.ImageBox,
+) ![]layout.TextSpan {
+    if (ocr_spans.len == 0 or native_spans.len == 0 or images.len == 0) return ocr_spans;
+
+    var kept = try std.ArrayList(layout.TextSpan).initCapacity(allocator, ocr_spans.len);
+    errdefer {
+        for (kept.items) |span| allocator.free(@constCast(span.text));
+        kept.deinit(allocator);
+    }
+
+    for (ocr_spans) |span| {
+        if (spanOverlapsAnyImage(span, images)) {
+            try kept.append(allocator, span);
+        } else {
+            allocator.free(@constCast(span.text));
+        }
+    }
+    allocator.free(ocr_spans);
+    return kept.toOwnedSlice(allocator);
+}
+
+fn spanOverlapsAnyImage(span: layout.TextSpan, images: []const complexity.ImageBox) bool {
+    const span_area = width(span.bbox) * height(span.bbox);
+    if (span_area <= 0) return false;
+    for (images) |image| {
+        const overlap = overlapArea(span.bbox, image.bbox);
+        if (overlap / span_area >= 0.50) return true;
+    }
+    return false;
+}
+
+fn overlapArea(a: BBox, b: BBox) f64 {
+    const x0 = @max(a.x0, b.x0);
+    const y0 = @max(a.y0, b.y0);
+    const x1 = @min(a.x1, b.x1);
+    const y1 = @min(a.y1, b.y1);
+    if (x1 <= x0 or y1 <= y0) return 0;
+    return (x1 - x0) * (y1 - y0);
 }
 
 fn reorderSpansToLayoutOrder(spans: []layout.TextSpan, ordered: []const layout.TextSpan) void {
@@ -510,12 +666,19 @@ fn buildLayoutLayerSpans(allocator: std.mem.Allocator, page_layout: *const layou
     for (page_layout.blocks, 0..) |block, block_index| {
         if (block.removed or block.lines.len == 0) continue;
 
-        if (block.kind == .table_candidate) {
-            if (page_layout.tableForBlock(block_index)) |table| {
+        if (page_layout.tableForBlock(block_index)) |table| {
+            if (tableHasUsefulTextRows(table)) {
+                try appendBlockLinesOutsideTable(allocator, &spans, block, table);
                 try appendTableRowSpans(allocator, &spans, table);
                 continue;
             }
-            if (page_layout.blockCoveredByTable(block_index)) continue;
+        }
+        if (page_layout.blockCoveredByTable(block_index)) {
+            var skip_covered = false;
+            if (tableCoveringBlock(page_layout.tables, block_index)) |table| {
+                skip_covered = tableHasUsefulTextRows(table);
+            }
+            if (skip_covered) continue;
         }
 
         for (block.lines) |line| {
@@ -542,6 +705,27 @@ fn buildLayoutLayerSpans(allocator: std.mem.Allocator, page_layout: *const layou
     return spans.toOwnedSlice(allocator);
 }
 
+fn tableCoveringBlock(tables: []const layout.TableGrid, block_index: usize) ?*const layout.TableGrid {
+    for (tables) |*table| {
+        const start: usize = @intCast(table.block_index);
+        if (block_index >= start and block_index < start + table.block_count) return table;
+    }
+    return null;
+}
+
+fn tableHasUsefulTextRows(table: *const layout.TableGrid) bool {
+    var occupied_rows: usize = 0;
+    for (table.rows) |row| {
+        for (row.cells) |cell| {
+            if (cell.text.len > 0) {
+                occupied_rows += 1;
+                break;
+            }
+        }
+    }
+    return occupied_rows >= 2;
+}
+
 fn appendTableRowSpans(
     allocator: std.mem.Allocator,
     spans: *std.ArrayList(layout.TextSpan),
@@ -566,6 +750,47 @@ fn appendTableRowSpans(
             .mcid = row.bounds.mcid,
         }));
     }
+}
+
+fn appendBlockLinesOutsideTable(
+    allocator: std.mem.Allocator,
+    spans: *std.ArrayList(layout.TextSpan),
+    block: layout.LayoutBlock,
+    table: *const layout.TableGrid,
+) !void {
+    for (block.lines) |line| {
+        if (spansIntersect(line.bounds, table.bounds)) continue;
+        try appendLineSpan(allocator, spans, line, block.confidence);
+    }
+}
+
+fn appendLineSpan(
+    allocator: std.mem.Allocator,
+    spans: *std.ArrayList(layout.TextSpan),
+    line: layout.TextLine,
+    confidence: f32,
+) !void {
+    const text = try lineTextOwned(allocator, &line);
+    errdefer allocator.free(text);
+    if (text.len == 0) {
+        allocator.free(text);
+        return;
+    }
+    try spans.append(allocator, layout.TextSpan.init(.{
+        .page_index = line.bounds.page_index,
+        .bbox = line.bounds.bbox,
+        .text = text,
+        .source = line.bounds.source,
+        .confidence = confidence,
+        .font = stableFont(line.bounds.font),
+        .block_id = line.bounds.block_id,
+        .line_id = line.bounds.line_id,
+        .mcid = line.bounds.mcid,
+    }));
+}
+
+fn spansIntersect(a: layout.TextSpan, b: layout.TextSpan) bool {
+    return a.x0 <= b.x1 and a.x1 >= b.x0 and a.y0 <= b.y1 and a.y1 >= b.y0;
 }
 
 fn lineTextOwned(allocator: std.mem.Allocator, line: *const layout.TextLine) ![]u8 {
@@ -726,6 +951,50 @@ pub fn renderOutput(
     };
 }
 
+fn renderJson(allocator: std.mem.Allocator, result: *const Result) ![]u8 {
+    const base = try reconcile.renderJson(allocator, &result.reconciled);
+    defer allocator.free(base);
+
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    if (base.len > 0 and base[base.len - 1] == '}') {
+        try writer.writeAll(base[0 .. base.len - 1]);
+    } else {
+        try writer.writeAll("{");
+    }
+    try writer.writeAll(",\"form_fields\":");
+    try writeFormFieldsJson(writer, result.form_fields);
+    try writer.writeByte('}');
+
+    return output.toOwnedSlice(allocator);
+}
+
+fn writeFormFieldsJson(writer: anytype, fields: []const FormField) !void {
+    try writer.writeByte('[');
+    for (fields, 0..) |field, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"name\":\"");
+        try writeJsonEscaped(writer, field.name);
+        try writer.writeAll("\",\"type\":\"");
+        try writeJsonEscaped(writer, field.field_type);
+        try writer.writeAll("\",\"value\":");
+        if (field.value) |value| {
+            try writer.writeByte('"');
+            try writeJsonEscaped(writer, value);
+            try writer.writeByte('"');
+        } else {
+            try writer.writeAll("null");
+        }
+        if (field.rect) |rect| {
+            try writer.print(",\"rect\":[{d:.2},{d:.2},{d:.2},{d:.2}]", .{ rect[0], rect[1], rect[2], rect[3] });
+        }
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
 pub fn renderDebugSvg(allocator: std.mem.Allocator, result: *const Result) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
@@ -830,6 +1099,25 @@ fn renderText(allocator: std.mem.Allocator, doc: *const ReconciledDocument) ![]u
     }
 
     return output.toOwnedSlice(allocator);
+}
+
+fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
+    for (text) |byte| {
+        switch (byte) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            '\x08' => try writer.writeAll("\\b"),
+            '\x0c' => try writer.writeAll("\\f"),
+            else => if (byte < 0x20) {
+                try writer.print("\\u00{X:0>2}", .{byte});
+            } else {
+                try writer.writeByte(byte);
+            },
+        }
+    }
 }
 
 fn writeRouteRect(
@@ -1008,10 +1296,12 @@ fn writeXmlEscaped(writer: anytype, text: []const u8) !void {
 
 fn freeTextSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
     if (spans.len == 0) return;
-    for (spans) |span| {
-        if (span.text.len > 0) allocator.free(@constCast(span.text));
-    }
+    for (spans) |span| freeOwnedTextSpan(allocator, span);
     allocator.free(spans);
+}
+
+fn freeOwnedTextSpan(allocator: std.mem.Allocator, span: layout.TextSpan) void {
+    if (span.text.len > 0) allocator.free(@constCast(span.text));
 }
 
 fn testSpan(text: []const u8, x0: f64, y0: f64, x1: f64, y1: f64) layout.TextSpan {
@@ -1091,10 +1381,53 @@ test "debug svg marks low-confidence review regions" {
         .page_routes = &page_routes,
         .region_routes = &region_routes,
         .trace_records = &trace_records,
+        .form_fields = &.{},
     };
 
     const svg = try renderDebugSvg(std.testing.allocator, &result);
     defer std.testing.allocator.free(svg);
     try std.testing.expect(std.mem.indexOf(u8, svg, "class=\"low-confidence\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, svg, "low_reading_order_confidence") != null);
+}
+
+test "mixed native OCR filter keeps image OCR and drops page furniture OCR" {
+    const allocator = std.testing.allocator;
+
+    var ocr_spans = try allocator.alloc(layout.TextSpan, 2);
+    ocr_spans[0] = layout.TextSpan.init(.{
+        .page_index = 0,
+        .bbox = .{ .x0 = 10, .y0 = 10, .x1 = 40, .y1 = 24 },
+        .text = try allocator.dupe(u8, "native duplicate"),
+        .source = .fresh_ocr,
+    });
+    ocr_spans[1] = layout.TextSpan.init(.{
+        .page_index = 0,
+        .bbox = .{ .x0 = 110, .y0 = 110, .x1 = 160, .y1 = 124 },
+        .text = try allocator.dupe(u8, "scan text"),
+        .source = .fresh_ocr,
+    });
+
+    const native_spans = [_]layout.TextSpan{
+        layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = .{ .x0 = 10, .y0 = 10, .x1 = 40, .y1 = 24 },
+            .text = "native duplicate",
+        }),
+    };
+    const images = [_]complexity.ImageBox{
+        .{
+            .bbox = .{ .x0 = 100, .y0 = 100, .x1 = 200, .y1 = 200 },
+            .pixel_width = 1000,
+            .pixel_height = 1000,
+        },
+    };
+
+    const filtered = try filterOcrSpansForPage(allocator, ocr_spans, &native_spans, &images);
+    defer {
+        for (filtered) |span| allocator.free(@constCast(span.text));
+        allocator.free(filtered);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), filtered.len);
+    try std.testing.expectEqualStrings("scan text", filtered[0].text);
 }

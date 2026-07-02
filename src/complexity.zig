@@ -189,6 +189,7 @@ const RegionStats = struct {
                 if (isAsciiMathByte(byte)) self.math_chars += 1;
             }
             self.math_chars += countUnicodeMathSequences(text_span.text);
+            self.math_chars += countAsciiMathWords(text_span.text) * 2;
 
             if (text_span.font.has_to_unicode) |has_to_unicode| {
                 if (has_to_unicode) {
@@ -350,7 +351,7 @@ fn xBucket(x: f64) i64 {
 
 fn isAsciiMathByte(byte: u8) bool {
     return switch (byte) {
-        '+', '-', '*', '/', '=', '<', '>', '^', '_', '|', '~', '(', ')', '[', ']' => true,
+        '+', '-', '*', '/', '=', '<', '>', '^', '_', '|', '~' => true,
         else => false,
     };
 }
@@ -370,6 +371,13 @@ fn countUnicodeMathSequences(text: []const u8) usize {
         "\xE2\x88\x9E", // infinity
     };
 
+    var total: usize = 0;
+    for (needles) |needle| total += countNeedle(text, needle);
+    return total;
+}
+
+fn countAsciiMathWords(text: []const u8) usize {
+    const needles = [_][]const u8{ "sqrt", "sin", "cos", "tan", "log", "lim" };
     var total: usize = 0;
     for (needles) |needle| total += countNeedle(text, needle);
     return total;
@@ -555,6 +563,23 @@ test "formula-like symbols route to formula model and region scoring isolates it
     try std.testing.expect(formula_region.signals.formula_density >= 0.55);
     try std.testing.expect(formula_region.route.needs_formula_model);
     try std.testing.expect(prose_region.signals.formula_density < 0.55);
+}
+
+test "parenthesized financial negatives do not route to formula model" {
+    const spans = [_]TextSpan{
+        span("Cash", 84, 680, 118, 694),
+        span("1,000", 190, 680, 230, 694),
+        span("(200)", 286, 680, 326, 694),
+    };
+    const input = PageInput{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .spans = &spans,
+    };
+
+    const row = scoreRegion(input, .{ .x0 = 80, .y0 = 672, .x1 = 340, .y1 = 704 });
+
+    try std.testing.expect(row.signals.formula_density < 0.20);
+    try std.testing.expect(!row.route.needs_formula_model);
 }
 
 test "stream-order inversions reduce reading order confidence unless tagged" {

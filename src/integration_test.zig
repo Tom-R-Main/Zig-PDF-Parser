@@ -199,7 +199,7 @@ test "adaptive extraction renders reconstructed complex financial tables" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Table 2.") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Account Revenue Expense Net") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Total revenue 1,200 (950) 250") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Services* * excludes setup fees -300 (450) (750)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Services* -300 (450) (750)\n* excludes setup fees") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Totalrevenue") == null);
 
     var saw_table_model = false;
@@ -618,6 +618,50 @@ test "form field extraction" {
     try std.testing.expect(found_button);
 }
 
+test "form field extraction inherits parent type and value" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateInheritedWidgetFieldsPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const fields = try doc.getFormFields(allocator);
+    defer zpdf.Document.freeFormFields(allocator, fields);
+
+    try std.testing.expectEqual(@as(usize, 3), fields.len);
+
+    var found_consent = false;
+    var found_region = false;
+    var found_phone = false;
+    for (fields) |field| {
+        if (std.mem.eql(u8, field.name, "consent.agree")) {
+            found_consent = true;
+            try std.testing.expectEqual(zpdf.Document.FieldType.button, field.field_type);
+            try std.testing.expectEqualStrings("Yes", field.value.?);
+        } else if (std.mem.eql(u8, field.name, "preferences.region")) {
+            found_region = true;
+            try std.testing.expectEqual(zpdf.Document.FieldType.choice, field.field_type);
+            try std.testing.expectEqualStrings("EMEA", field.value.?);
+        } else if (std.mem.eql(u8, field.name, "profile.phone")) {
+            found_phone = true;
+            try std.testing.expectEqual(zpdf.Document.FieldType.text, field.field_type);
+            try std.testing.expectEqualStrings("555-0100", field.value.?);
+        }
+    }
+
+    try std.testing.expect(found_consent);
+    try std.testing.expect(found_region);
+    try std.testing.expect(found_phone);
+
+    const form_text = try doc.extractFormFieldText(allocator);
+    defer allocator.free(form_text);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "consent.agree Yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "preferences.region EMEA") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "profile.phone 555-0100") != null);
+}
+
 test "structured text includes value-bearing form fields once" {
     const allocator = std.testing.allocator;
 
@@ -644,6 +688,71 @@ test "structured text includes value-bearing form fields once" {
     defer allocator.free(fast_text);
     try std.testing.expect(std.mem.indexOf(u8, fast_text, "email user@example.com") != null);
     try std.testing.expect(std.mem.indexOf(u8, fast_text, "country USA") != null);
+}
+
+test "realistic widget fields include nested and name-valued values" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateRealisticWidgetFieldsPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const form_text = try doc.extractFormFieldText(allocator);
+    defer allocator.free(form_text);
+
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "profile.first_name Ada") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "profile.email ada@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "subscribe Yes") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "cadence Quarterly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, form_text, "country USA") != null);
+}
+
+test "multipage financial statement extracts both pages" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMultipageFinancialStatementPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try doc.extractAllText(runtime.arrayListWriter(&output, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "Statement page 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "Cash") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "1,000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "Statement page 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "Debt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "(300)") != null);
+}
+
+test "multipage financial statement emits page-indexed table JSON" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMultipageFinancialStatementPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var page1_json: std.ArrayList(u8) = .empty;
+    defer page1_json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&page1_json, allocator));
+
+    var page2_json: std.ArrayList(u8) = .empty;
+    defer page2_json.deinit(allocator);
+    try doc.writePageTablesJson(1, allocator, runtime.arrayListWriter(&page2_json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"text\":\"Cash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"text\":\"1,000\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page1_json.items, "\"page\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"text\":\"Debt\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"text\":\"(300)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page2_json.items, "\"page\":1") != null);
 }
 
 test "form fields returns empty for PDF without AcroForm" {
@@ -1095,6 +1204,81 @@ test "ruling line detection from stroked rectangle" {
     try std.testing.expectEqual(@as(usize, 4), lines.len);
     try std.testing.expectEqual(@as(usize, 2), horizontal_count);
     try std.testing.expectEqual(@as(usize, 2), vertical_count);
+}
+
+test "ruled financial table JSON preserves cell geometry metadata" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateRuledFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Account\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"(200)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"role\":\"header\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"rowspan\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"colspan\":1") != null);
+}
+
+test "ruled multiline table keeps wrapped label in one cell" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateRuledMultilineFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Deferred revenue\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"1,250\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"(300)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"-25\"") != null);
+}
+
+test "merged ruled header reports colspan" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Operating metrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"colspan\":3") != null);
+}
+
+test "rowspan ruled section label reports rowspan" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateRowspanFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Assets\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"rowspan\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"300\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Liabilities\"") != null);
 }
 
 test "page complexity sees parser spans, image boxes, and missing ToUnicode" {

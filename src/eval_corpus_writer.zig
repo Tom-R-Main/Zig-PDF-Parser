@@ -10,10 +10,17 @@ const Fixture = struct {
     category: []const u8,
     doc_id: []const u8,
     pdf_name: []const u8,
+    source_note: []const u8 = "deterministic reduced fixture generated in-repo",
+    license_status: []const u8 = "redistributable synthetic reduction",
+    expected_ocr_pages: u32 = 0,
+    expected_table_regions: u32 = 0,
+    expected_formula_regions: u32 = 0,
     truth: []const u8,
     table_truth: ?[]const u8 = null,
     reading_order_truth: ?[]const u8 = null,
     formula_truth: ?[]const u8 = null,
+    formula_json_truth: ?[]const u8 = null,
+    form_json_truth: ?[]const u8 = null,
     generate: *const fn (std.mem.Allocator) anyerror![]u8,
 };
 
@@ -66,6 +73,7 @@ const fixtures = [_]Fixture{
         .category = "scientific_math",
         .doc_id = "math-notation",
         .pdf_name = "math-notation.pdf",
+        .expected_formula_regions = 3,
         .truth =
         \\Formula 1.
         \\E=mc^2++++////^^^^____
@@ -80,12 +88,21 @@ const fixtures = [_]Fixture{
         \\sum(x_i^2)>=delta++++
         \\
         ,
+        .formula_json_truth =
+        \\[
+        \\  {"page":0,"text":"E=mc^2++++////^^^^____"},
+        \\  {"page":0,"text":"alpha+beta/gamma===="},
+        \\  {"page":0,"text":"sum(x_i^2)>=delta++++"}
+        \\]
+        \\
+        ,
         .generate = testpdf.generateFormulaPdf,
     },
     .{
         .category = "scanned_typewritten",
         .doc_id = "image-only-page",
         .pdf_name = "image-only-page.pdf",
+        .expected_ocr_pages = 1,
         .truth =
         \\SCANNED TYPEWRITTEN
         \\
@@ -96,6 +113,7 @@ const fixtures = [_]Fixture{
         .category = "financial_tables",
         .doc_id = "aligned-financials",
         .pdf_name = "aligned-financials.pdf",
+        .expected_table_regions = 4,
         .truth =
         \\Table 1.
         \\Year Revenue Margin
@@ -139,11 +157,13 @@ const fixtures = [_]Fixture{
         .category = "financial_tables",
         .doc_id = "complex-financials",
         .pdf_name = "complex-financials.pdf",
+        .expected_table_regions = 4,
         .truth =
         \\Table 2.
         \\Account Revenue Expense Net
         \\Total revenue 1,200 (950) 250
-        \\Services* * excludes setup fees -300 (450) (750)
+        \\Services* -300 (450) (750)
+        \\* excludes setup fees
         \\
         ,
         .table_truth =
@@ -151,22 +171,25 @@ const fixtures = [_]Fixture{
         \\  {
         \\    "rows": [
         \\      [
-        \\        { "text": "Account" },
-        \\        { "text": "Revenue" },
-        \\        { "text": "Expense" },
-        \\        { "text": "Net" }
+        \\        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Revenue", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Expense", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Net", "role": "header", "rowspan": 1, "colspan": 1 }
         \\      ],
         \\      [
-        \\        { "text": "Total revenue" },
-        \\        { "text": "1,200" },
-        \\        { "text": "(950)" },
-        \\        { "text": "250" }
+        \\        { "text": "Total revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "1,200", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(950)", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "250", "role": "data", "rowspan": 1, "colspan": 1 }
         \\      ],
         \\      [
-        \\        { "text": "Services* * excludes setup fees" },
-        \\        { "text": "-300" },
-        \\        { "text": "(450)" },
-        \\        { "text": "(750)" }
+        \\        { "text": "Services*", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "-300", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(450)", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(750)", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "* excludes setup fees", "role": "note", "rowspan": 1, "colspan": 4 }
         \\      ]
         \\    ]
         \\  }
@@ -174,6 +197,221 @@ const fixtures = [_]Fixture{
         \\
         ,
         .generate = testpdf.generateComplexFinancialTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "ruled-financials",
+        .pdf_name = "ruled-financials.pdf",
+        .source_note = "reduced fixture modeling ruled statement tables found in filings and invoices",
+        .expected_table_regions = 3,
+        .truth =
+        \\Ruled Statement
+        \\Account Q1 Q2
+        \\Cash 1,000 (200)
+        \\Debt -50 (75)
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Q1", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Q2", "role": "header", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Cash", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "1,000", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(200)", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Debt", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "-50", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(75)", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateRuledFinancialTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "ruled-multiline-financials",
+        .pdf_name = "ruled-multiline-financials.pdf",
+        .source_note = "reduced fixture modeling a ruled statement row whose label wraps inside one cell",
+        .expected_table_regions = 4,
+        .truth =
+        \\Multiline Statement
+        \\Account Actual Variance
+        \\Deferred revenue 1,250 (300)
+        \\Support 400 -25
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Actual", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Variance", "role": "header", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Deferred revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "1,250", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(300)", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Support", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "400", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "-25", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateRuledMultilineFinancialTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "merged-cells-financials",
+        .pdf_name = "merged-cells-financials.pdf",
+        .source_note = "reduced fixture modeling merged statement headers with missing internal rulings",
+        .expected_table_regions = 2,
+        .truth =
+        \\Merged Header Statement
+        \\Operating metrics
+        \\Account Actual Budget
+        \\Revenue 1,200 1,050
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Operating metrics", "role": "header", "rowspan": 1, "colspan": 3 }
+        \\      ],
+        \\      [
+        \\        { "text": "Account", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Actual", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Budget", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "1,200", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "1,050", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateMergedCellFinancialTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "rowspan-financials",
+        .pdf_name = "rowspan-financials.pdf",
+        .source_note = "reduced fixture modeling a financial section label spanning multiple ruled rows",
+        .expected_table_regions = 3,
+        .truth =
+        \\Rowspan Statement
+        \\Category Q1 Q2
+        \\Assets 1,000 450
+        \\300 125
+        \\Liabilities (700) (200)
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Category", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Q1", "role": "header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "Q2", "role": "header", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Assets", "role": "row_header", "rowspan": 2, "colspan": 1 },
+        \\        { "text": "1,000", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "450", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "300", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "125", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Liabilities", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(700)", "role": "data", "rowspan": 1, "colspan": 1 },
+        \\        { "text": "(200)", "role": "data", "rowspan": 1, "colspan": 1 }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateRowspanFinancialTablePdf,
+    },
+    .{
+        .category = "financial_tables",
+        .doc_id = "multipage-statement",
+        .pdf_name = "multipage-statement.pdf",
+        .source_note = "reduced fixture modeling repeated financial statement headers across pages",
+        .expected_table_regions = 2,
+        .truth =
+        \\Statement page 1
+        \\Account Amount
+        \\Cash 1,000
+        \\Inventory 450
+        \\Statement page 2
+        \\Account Amount
+        \\Debt (300)
+        \\Equity 1,150
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Account", "role": "header", "page": 0 },
+        \\        { "text": "Amount", "role": "header", "page": 0 }
+        \\      ],
+        \\      [
+        \\        { "text": "Cash", "role": "row_header", "page": 0 },
+        \\        { "text": "1,000", "role": "data", "page": 0 }
+        \\      ],
+        \\      [
+        \\        { "text": "Inventory", "role": "row_header", "page": 0 },
+        \\        { "text": "450", "role": "data", "page": 0 }
+        \\      ]
+        \\    ]
+        \\  },
+        \\  {
+        \\    "rows": [
+        \\      [
+        \\        { "text": "Account", "role": "header", "page": 1 },
+        \\        { "text": "Amount", "role": "header", "page": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Debt", "role": "row_header", "page": 1 },
+        \\        { "text": "(300)", "role": "data", "page": 1 }
+        \\      ],
+        \\      [
+        \\        { "text": "Equity", "role": "row_header", "page": 1 },
+        \\        { "text": "1,150", "role": "data", "page": 1 }
+        \\      ]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateMultipageFinancialStatementPdf,
     },
     .{
         .category = "forms",
@@ -185,7 +423,75 @@ const fixtures = [_]Fixture{
         \\country USA
         \\
         ,
+        .form_json_truth =
+        \\[
+        \\  {"name":"email","type":"text","value":"user@example.com"},
+        \\  {"name":"country","type":"choice","value":"USA"}
+        \\]
+        \\
+        ,
         .generate = testpdf.generateAllFormFieldsPdf,
+    },
+    .{
+        .category = "forms",
+        .doc_id = "realistic-widget-fields",
+        .pdf_name = "realistic-widget-fields.pdf",
+        .source_note = "reduced fixture modeling nested AcroForm widgets with name-valued buttons",
+        .truth =
+        \\Profile Form
+        \\profile.first_name Ada
+        \\profile.email ada@example.com
+        \\subscribe Yes
+        \\cadence Quarterly
+        \\country USA
+        \\
+        ,
+        .form_json_truth =
+        \\[
+        \\  {"name":"profile.first_name","type":"text","value":"Ada"},
+        \\  {"name":"profile.email","type":"text","value":"ada@example.com"},
+        \\  {"name":"subscribe","type":"button","value":"Yes"},
+        \\  {"name":"cadence","type":"button","value":"Quarterly"},
+        \\  {"name":"country","type":"choice","value":"USA"}
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateRealisticWidgetFieldsPdf,
+    },
+    .{
+        .category = "forms",
+        .doc_id = "inherited-widget-fields",
+        .pdf_name = "inherited-widget-fields.pdf",
+        .source_note = "reduced fixture modeling AcroForm widgets inheriting field type and value from parent dictionaries",
+        .truth =
+        \\Inherited Widgets
+        \\consent.agree Yes
+        \\preferences.region EMEA
+        \\profile.phone 555-0100
+        \\
+        ,
+        .form_json_truth =
+        \\[
+        \\  {"name":"consent.agree","type":"button","value":"Yes"},
+        \\  {"name":"preferences.region","type":"choice","value":"EMEA"},
+        \\  {"name":"profile.phone","type":"text","value":"555-0100"}
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateInheritedWidgetFieldsPdf,
+    },
+    .{
+        .category = "scanned_typewritten",
+        .doc_id = "mixed-native-scan",
+        .pdf_name = "mixed-native-scan.pdf",
+        .source_note = "reduced fixture modeling a page with native text plus a dominant scanned region",
+        .expected_ocr_pages = 1,
+        .truth =
+        \\Native cover text
+        \\SCANNED TYPEWRITTEN
+        \\
+        ,
+        .generate = testpdf.generateMixedNativeScanPdf,
     },
     .{
         .category = "adversarial_corrupt",
@@ -209,7 +515,11 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(allocator);
     var manifest_writer = runtime.arrayListWriter(&manifest, allocator);
-    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\ttruth_table_json_path_optional\ttruth_reading_order_path_optional\ttruth_formula_path_optional\n");
+    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\ttruth_table_json_path_optional\ttruth_reading_order_path_optional\ttruth_formula_path_optional\ttruth_formula_json_path_optional\ttruth_form_json_path_optional\n");
+
+    var metadata: std.ArrayList(u8) = .empty;
+    defer metadata.deinit(allocator);
+    const metadata_writer = runtime.arrayListWriter(&metadata, allocator);
 
     for (fixtures) |fixture| {
         const corpus_dir = try std.fmt.allocPrint(
@@ -244,6 +554,7 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
         defer allocator.free(pdf);
         try writeFile(pdf_path, pdf);
         try writeFile(truth_path, fixture.truth);
+        try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, pdf);
 
         try manifest_writer.print("{s}\t{s}\t{s}\t{s}", .{
             fixture.category,
@@ -281,9 +592,29 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
             fixture.formula_truth,
         );
         defer if (formula_truth_path) |path| allocator.free(path);
+        const formula_json_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "formulas_json",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.formula_json_truth,
+        );
+        defer if (formula_json_truth_path) |path| allocator.free(path);
+        const form_json_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "form_fields",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.form_json_truth,
+        );
+        defer if (form_json_truth_path) |path| allocator.free(path);
         try writeOptionalManifestFields(
             manifest_writer,
-            &.{ table_truth_path, reading_order_truth_path, formula_truth_path },
+            &.{ table_truth_path, reading_order_truth_path, formula_truth_path, formula_json_truth_path, form_json_truth_path },
         );
         try manifest_writer.writeByte('\n');
     }
@@ -291,6 +622,64 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
     const manifest_path = try std.fmt.allocPrint(allocator, "{s}/corpus/manifest.tsv", .{root});
     defer allocator.free(manifest_path);
     try writeFile(manifest_path, manifest.items);
+
+    const metadata_path = try std.fmt.allocPrint(allocator, "{s}/corpus/metadata.jsonl", .{root});
+    defer allocator.free(metadata_path);
+    try writeFile(metadata_path, metadata.items);
+}
+
+fn writeFixtureMetadata(
+    writer: anytype,
+    fixture: Fixture,
+    pdf_path: []const u8,
+    truth_path: []const u8,
+    pdf: []const u8,
+) !void {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(pdf, &digest, .{});
+    var digest_hex: [64]u8 = undefined;
+    writeHexLower(&digest_hex, &digest);
+
+    try writer.writeAll("{\"category\":\"");
+    try writeJsonEscaped(writer, fixture.category);
+    try writer.writeAll("\",\"doc_id\":\"");
+    try writeJsonEscaped(writer, fixture.doc_id);
+    try writer.writeAll("\",\"pdf_path\":\"");
+    try writeJsonEscaped(writer, pdf_path);
+    try writer.writeAll("\",\"truth_text_path\":\"");
+    try writeJsonEscaped(writer, truth_path);
+    try writer.writeAll("\",\"source_note\":\"");
+    try writeJsonEscaped(writer, fixture.source_note);
+    try writer.writeAll("\",\"license_status\":\"");
+    try writeJsonEscaped(writer, fixture.license_status);
+    try writer.writeAll("\",\"sha256\":\"");
+    try writer.writeAll(&digest_hex);
+    try writer.print("\",\"expected_ocr_pages\":{},\"expected_table_regions\":{},\"expected_formula_regions\":{}}}\n", .{
+        fixture.expected_ocr_pages,
+        fixture.expected_table_regions,
+        fixture.expected_formula_regions,
+    });
+}
+
+fn writeHexLower(out: *[64]u8, bytes: *const [32]u8) void {
+    const alphabet = "0123456789abcdef";
+    for (bytes.*, 0..) |byte, index| {
+        out[index * 2] = alphabet[byte >> 4];
+        out[index * 2 + 1] = alphabet[byte & 0x0f];
+    }
+}
+
+fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
+    for (text) |byte| {
+        switch (byte) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(byte),
+        }
+    }
 }
 
 fn writeOptionalManifestFields(writer: anytype, fields: []const ?[]const u8) !void {

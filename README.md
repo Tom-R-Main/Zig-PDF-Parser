@@ -15,9 +15,14 @@ kernel into a hybrid, adaptive parser.
 - Geometric (Y→X) reading order for non-tagged PDFs
 - Markdown export for structured PDFs
 - Adaptive extraction orchestration with native/layout/complexity/reconciler stages
+- Local Tesseract OCR adapter for pages or regions routed as scanned content
+- AcroForm field extraction, including nested/inherited widget values
+- Geometry-aware table reconstruction for aligned, ruled, merged-cell, rowspan,
+  footnote, and multi-page financial table fixtures
+- JSON/JSONL/RAG/hOCR/ALTO/debug-SVG output surfaces with span provenance
 - JSON inspection and trace output for page and region routing decisions
 
-## Benchmark
+## Performance Benchmark
 
 Text extraction performance on Apple M4 Pro (reading order):
 
@@ -30,9 +35,37 @@ Text extraction performance on Apple M4 Pro (reading order):
 
 *Build with `zig build -Doptimize=ReleaseFast` for best performance.*
 
+## Evaluation Corpus
+
+The checked-in evaluation corpus is intentionally small and deterministic, with
+manifest metadata for source notes, redistribution status, SHA256, expected route
+counts, and optional ground-truth labels.
+
+```bash
+zig build eval-corpus
+zig build eval -- --adaptive \
+  --ocr-executable tesseract \
+  --ocr-rasterizer pdftoppm \
+  --manifest benchmark/eval/corpus/manifest.tsv
+.venv/bin/python benchmark/eval/compare.py \
+  --pdf-parser-adaptive \
+  --tools pdf-parser,pymupdf,pypdfium2,pdfplumber \
+  --manifest benchmark/eval/corpus/manifest.tsv
+```
+
+Current fixture classes include clean born-digital text, academic two-column
+layout, scientific formulas, image-only scans, mixed native/scan pages,
+financial tables, AcroForms, and corrupt/adversarial PDFs. Financial table truth
+can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and bbox-aware
+provenance. Form truth asserts field name/type/value sequences. Formula truth
+can assert both text and simple structure records.
+
 ## Requirements
 
 - Zig 0.16.0
+- Optional: `tesseract` and `pdftoppm` for OCR eval routes
+- Optional: Python virtualenv with PyMuPDF, pypdfium2, and pdfplumber for
+  cross-parser comparison
 
 ## Building
 
@@ -73,6 +106,11 @@ pdf-parser extract document.pdf              # Extract all pages (uses structure
 pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
 pdf-parser extract -o out.txt document.pdf   # Output to file
 pdf-parser extract --adaptive -f json doc.pdf
+pdf-parser extract --adaptive -f jsonl doc.pdf
+pdf-parser extract --adaptive -f rag-jsonl doc.pdf
+pdf-parser extract --adaptive -f hocr doc.pdf
+pdf-parser extract --adaptive -f alto doc.pdf
+pdf-parser extract --adaptive -f debug-svg doc.pdf
 pdf-parser extract --adaptive --trace doc.pdf
 pdf-parser inspect complexity doc.pdf --format json
 pdf-parser info document.pdf                 # Show document info
@@ -86,6 +124,12 @@ include `use_native`, `queue_ocr`, `candidate_layout`, `candidate_table`,
 index, region index, span count, route, confidence, signal scores, and reasons
 such as `image_dominant`, `missing_tounicode`, `table_alignment`,
 `formula_density`, and `low_reading_order_confidence`.
+
+Adaptive JSON includes reconciled spans, blocks, RAG chunks, and form fields.
+Table JSON includes page-aware cell geometry plus `rowspan`, `colspan`, `role`,
+and provenance-derived confidence. OCR remains local and deterministic: when a
+page or region is routed to OCR, the adapter invokes Tesseract and reconciles the
+fresh OCR spans with native PDF spans rather than replacing the whole page.
 
 ### Python
 
@@ -142,10 +186,14 @@ src/
 ├── adaptive.zig     # Adaptive extraction orchestration and trace records
 ├── reconcile.zig    # Provenance-preserving span/block/chunk outputs
 ├── specialists.zig  # Table/formula heuristics and adapter stubs
-├── ocr.zig          # OCR routing adapter interface
+├── ocr.zig          # OCR routing adapter and Tesseract subprocess/C-FFI hooks
+├── eval.zig         # Evaluation metrics
+├── eval_runner.zig  # Eval CLI
+├── eval_corpus_writer.zig # Deterministic fixture writer
 └── simd.zig         # SIMD-accelerated parsing
 
 python/zpdf/         # Python bindings (cffi, legacy package name)
+benchmark/eval/      # Tiny eval corpus, truth labels, and comparator
 examples/            # Usage examples
 ```
 
@@ -165,33 +213,47 @@ pdf-parser extracts text in logical reading order using a three-tier approach:
 | Geometric sort | Works on any PDF, respects visual layout | May fail on complex multi-column layouts |
 | Stream order | Always works | May not match visual order |
 
+Adaptive mode adds a fourth reconstruction layer for harder pages: it scores
+page/region complexity, reconstructs table rows and cells from layout geometry
+and ruling lines, invokes OCR only for scanned routes, then reconciles native,
+OCR, table, formula, and form spans with provenance.
+
 ## Comparison
 
-| Feature | pdf-parser | pdfium | MuPDF |
-|---------|------|--------|-------|
+| Feature | pdf-parser | pdfium | MuPDF | pdfplumber |
+|---------|------|--------|-------|------------|
 | **Text Extraction** | | | |
-| Stream order | Yes | Yes | Yes |
-| Tagged/structure tree | Yes | No | Yes |
-| Visual reading order | No | No | Yes |
-| Word bounding boxes | Yes | Yes | Yes |
+| Stream order | Yes | Yes | Yes | Yes |
+| Tagged/structure tree | Yes | No | Yes | No |
+| Visual/layout reading order | Yes | No | Yes | Yes |
+| Word bounding boxes | Yes | Yes | Yes | Yes |
+| Local OCR route | Yes | No | No | No |
+| AcroForm value extraction | Yes | Partial | Partial | Partial |
+| Ruled table cell geometry | Yes | No | No | Yes |
+| Rowspan/colspan/role output | Yes | No | No | Partial |
 | **Font Support** | | | |
-| WinAnsi/MacRoman | Yes | Yes | Yes |
-| ToUnicode CMap | Yes | Yes | Yes |
-| CID fonts (Type0) | Partial* | Yes | Yes |
+| WinAnsi/MacRoman | Yes | Yes | Yes | Yes |
+| ToUnicode CMap | Yes | Yes | Yes | Yes |
+| CID fonts (Type0) | Partial* | Yes | Yes | Yes |
 | **Compression** | | | |
-| FlateDecode, LZW, ASCII85/Hex | Yes | Yes | Yes |
-| JBIG2, JPEG2000 | No | Yes | Yes |
+| FlateDecode, LZW, ASCII85/Hex | Yes | Yes | Yes | Yes |
+| JBIG2, JPEG2000 | No | Yes | Yes | Via dependencies |
 | **Other** | | | |
-| Encrypted PDFs | No | Yes | Yes |
-| Rendering | No | Yes | Yes |
+| Encrypted PDFs | No | Yes | Yes | Via dependencies |
+| Rendering | No | Yes | Yes | No |
 
 *\*CID fonts: Works when CMap is embedded directly.*
 
-**Use pdf-parser when:** Batch processing, tagged PDFs (PDF/UA), simple text extraction, Zig integration.
+**Use pdf-parser when:** Batch extraction, deterministic Zig-native pipelines,
+PDF/UA/tagged PDFs, local OCR fallback, financial table provenance, form values,
+or RAG/debug outputs matter.
 
 **Use pdfium when:** Browser integration, full PDF support, proven stability.
 
 **Use MuPDF when:** Complex visual layouts, rendering needed.
+
+**Use pdfplumber when:** Python table-extraction workflows and interactive
+layout debugging matter more than a native Zig pipeline.
 
 ## License
 

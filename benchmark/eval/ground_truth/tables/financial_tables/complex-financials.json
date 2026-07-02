@@ -2,22 +2,25 @@
   {
     "rows": [
       [
-        { "text": "Account" },
-        { "text": "Revenue" },
-        { "text": "Expense" },
-        { "text": "Net" }
+        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Revenue", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Expense", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Net", "role": "header", "rowspan": 1, "colspan": 1 }
       ],
       [
-        { "text": "Total revenue" },
-        { "text": "1,200" },
-        { "text": "(950)" },
-        { "text": "250" }
+        { "text": "Total revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "1,200", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(950)", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "250", "role": "data", "rowspan": 1, "colspan": 1 }
       ],
       [
-        { "text": "Services* * excludes setup fees" },
-        { "text": "-300" },
-        { "text": "(450)" },
-        { "text": "(750)" }
+        { "text": "Services*", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "-300", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(450)", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(750)", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "* excludes setup fees", "role": "note", "rowspan": 1, "colspan": 4 }
       ]
     ]
   }

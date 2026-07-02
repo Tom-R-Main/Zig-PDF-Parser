@@ -1,0 +1,34 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "page": 0 },
+        { "text": "Amount", "role": "header", "page": 0 }
+      ],
+      [
+        { "text": "Cash", "role": "row_header", "page": 0 },
+        { "text": "1,000", "role": "data", "page": 0 }
+      ],
+      [
+        { "text": "Inventory", "role": "row_header", "page": 0 },
+        { "text": "450", "role": "data", "page": 0 }
+      ]
+    ]
+  },
+  {
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "page": 1 },
+        { "text": "Amount", "role": "header", "page": 1 }
+      ],
+      [
+        { "text": "Debt", "role": "row_header", "page": 1 },
+        { "text": "(300)", "role": "data", "page": 1 }
+      ],
+      [
+        { "text": "Equity", "role": "row_header", "page": 1 },
+        { "text": "1,150", "role": "data", "page": 1 }
+      ]
+    ]
+  }
+]

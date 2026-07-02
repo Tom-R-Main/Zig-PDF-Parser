@@ -576,10 +576,8 @@ fn copySpan(
     copied.text = try allocator.dupe(u8, span.text);
     errdefer allocator.free(@constCast(copied.text));
 
-    copied.font.name = if (span.font.name) |name| try allocator.dupe(u8, name) else null;
-    errdefer if (copied.font.name) |name| allocator.free(@constCast(name));
-    copied.font.encoding = if (span.font.encoding) |encoding| try allocator.dupe(u8, encoding) else null;
-    errdefer if (copied.font.encoding) |encoding| allocator.free(@constCast(encoding));
+    copied.font.name = null;
+    copied.font.encoding = null;
 
     const confidence = @min(1.0, copied.confidence * trust);
     copied.confidence = confidence;

@@ -11,16 +11,8 @@ const runtime = @import("runtime.zig");
 pub const BBox = layout.BBox;
 pub const TextSpan = layout.TextSpan;
 
-pub const RulingOrientation = enum {
-    horizontal,
-    vertical,
-};
-
-pub const RulingLine = struct {
-    bbox: BBox,
-    orientation: RulingOrientation,
-    stroke_width: f64 = 1,
-};
+pub const RulingOrientation = layout.RulingOrientation;
+pub const RulingLine = layout.RulingLine;
 
 pub const RegionInput = struct {
     page_index: u32 = 0,
@@ -338,6 +330,7 @@ fn scoreSymbolDensity(spans: []const TextSpan) f32 {
             if (isAsciiMathByte(byte)) math_count += 1;
         }
         math_count += countUnicodeMathSequences(span.text) * 2;
+        math_count += countAsciiMathWords(span.text) * 2;
     }
     return ratioScore(math_count, char_count, 0.10, 0.38);
 }
@@ -490,13 +483,26 @@ fn ratioScore(numerator: usize, denominator: usize, low: f64, high: f64) f32 {
 
 fn isAsciiMathByte(byte: u8) bool {
     return switch (byte) {
-        '+', '-', '*', '/', '=', '<', '>', '^', '_', '|', '~', '(', ')', '[', ']' => true,
+        '+', '-', '*', '/', '=', '<', '>', '^', '_', '|', '~' => true,
         else => false,
     };
 }
 
 fn countUnicodeMathSequences(text: []const u8) usize {
     const needles = [_][]const u8{ "∑", "∫", "√", "≤", "≥", "≈", "∞", "π", "α", "β", "γ", "Δ" };
+    var total: usize = 0;
+    for (needles) |needle| {
+        var rest = text;
+        while (std.mem.indexOf(u8, rest, needle)) |index| {
+            total += 1;
+            rest = rest[index + needle.len ..];
+        }
+    }
+    return total;
+}
+
+fn countAsciiMathWords(text: []const u8) usize {
+    const needles = [_][]const u8{ "sqrt", "sin", "cos", "tan", "log", "lim" };
     var total: usize = 0;
     for (needles) |needle| {
         var rest = text;
@@ -602,6 +608,21 @@ test "formula heuristics score symbols and super/subscript offsets" {
     try std.testing.expect(score.signals.symbol_density >= 0.50);
     try std.testing.expect(score.signals.superscript_subscript_offsets >= 0.40);
     try std.testing.expect(score.needsSpecialist());
+}
+
+test "formula heuristics ignore accounting parentheses" {
+    const spans = [_]TextSpan{
+        testSpan("Cash", 84, 680, 118, 694),
+        testSpan("1,000", 190, 680, 230, 694),
+        testSpan("(200)", 286, 680, 326, 694),
+    };
+    const score = scoreFormula(.{
+        .bbox = .{ .x0 = 80, .y0 = 672, .x1 = 340, .y1 = 704 },
+        .spans = &spans,
+    });
+
+    try std.testing.expect(score.signals.symbol_density < 0.10);
+    try std.testing.expect(!score.needsSpecialist());
 }
 
 test "prose region stays below specialist thresholds" {

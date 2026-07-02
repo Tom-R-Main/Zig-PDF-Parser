@@ -1,0 +1,19 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Operating metrics", "role": "header", "rowspan": 1, "colspan": 3 }
+      ],
+      [
+        { "text": "Account", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "Actual", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "Budget", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "1,200", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "1,050", "role": "data", "rowspan": 1, "colspan": 1 }
+      ]
+    ]
+  }
+]

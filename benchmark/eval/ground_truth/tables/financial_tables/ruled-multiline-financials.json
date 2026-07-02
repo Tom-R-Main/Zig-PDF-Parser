@@ -1,0 +1,21 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Actual", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Variance", "role": "header", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Deferred revenue", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "1,250", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(300)", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Support", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "400", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "-25", "role": "data", "rowspan": 1, "colspan": 1 }
+      ]
+    ]
+  }
+]

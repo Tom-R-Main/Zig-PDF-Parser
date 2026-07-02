@@ -42,7 +42,7 @@ pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 
     // Build content stream
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(allocator);
-    var cw = runtime.arrayListWriter(&content, allocator);
+    const cw = runtime.arrayListWriter(&content, allocator);
 
     try cw.writeAll("BT\n");
     try cw.writeAll("/F1 12 Tf\n");
@@ -108,7 +108,7 @@ pub fn generateRulingLinesPdf(allocator: std.mem.Allocator) ![]u8 {
 
     var content: std.ArrayList(u8) = .empty;
     defer content.deinit(allocator);
-    var cw = runtime.arrayListWriter(&content, allocator);
+    const cw = runtime.arrayListWriter(&content, allocator);
     try cw.writeAll("1 w\n");
     try cw.writeAll("100 600 200 80 re\n");
     try cw.writeAll("S\n");
@@ -1411,6 +1411,141 @@ pub fn generateAllFormFieldsPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate nested AcroForm fields with text, button, radio-like, and choice
+/// values. Values are intentionally stored in field dictionaries rather than
+/// rendered appearances so extraction must read AcroForm state.
+pub fn generateRealisticWidgetFieldsPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R ");
+    try writer.writeAll("/AcroForm << /Fields [6 0 R 9 0 R 10 0 R 11 0 R] >> >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 12 Tf\n72 720 Td\n(Profile Form) Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const obj6_offset = pdf.items.len;
+    try writer.writeAll("6 0 obj\n<< /T (profile) /Kids [7 0 R 8 0 R] >>\nendobj\n");
+
+    const obj7_offset = pdf.items.len;
+    try writer.writeAll("7 0 obj\n<< /FT /Tx /T (first_name) /V (Ada) /Rect [100 650 260 670] >>\nendobj\n");
+
+    const obj8_offset = pdf.items.len;
+    try writer.writeAll("8 0 obj\n<< /FT /Tx /T (email) /V (ada@example.com) /Rect [100 620 300 640] >>\nendobj\n");
+
+    const obj9_offset = pdf.items.len;
+    try writer.writeAll("9 0 obj\n<< /FT /Btn /T (subscribe) /V /Yes /Rect [100 590 120 610] >>\nendobj\n");
+
+    const obj10_offset = pdf.items.len;
+    try writer.writeAll("10 0 obj\n<< /FT /Btn /T (cadence) /V /Quarterly /Rect [100 560 200 580] >>\nendobj\n");
+
+    const obj11_offset = pdf.items.len;
+    try writer.writeAll("11 0 obj\n<< /FT /Ch /T (country) /V (USA) /Rect [100 530 220 550] >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 12\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj8_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj9_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj10_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj11_offset});
+
+    try writer.writeAll("trailer\n<< /Size 12 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate AcroForm fields whose terminal widget dictionaries inherit /FT and
+/// /V from parent field dictionaries.
+pub fn generateInheritedWidgetFieldsPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R ");
+    try writer.writeAll("/AcroForm << /Fields [6 0 R 8 0 R 10 0 R] >> >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 12 Tf\n72 720 Td\n(Inherited Widgets) Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const obj6_offset = pdf.items.len;
+    try writer.writeAll("6 0 obj\n<< /FT /Btn /T (consent) /V /Yes /Kids [7 0 R] >>\nendobj\n");
+
+    const obj7_offset = pdf.items.len;
+    try writer.writeAll("7 0 obj\n<< /Subtype /Widget /T (agree) /Rect [100 650 120 670] >>\nendobj\n");
+
+    const obj8_offset = pdf.items.len;
+    try writer.writeAll("8 0 obj\n<< /FT /Ch /T (preferences) /Kids [9 0 R] >>\nendobj\n");
+
+    const obj9_offset = pdf.items.len;
+    try writer.writeAll("9 0 obj\n<< /Subtype /Widget /T (region) /V (EMEA) /Rect [100 620 240 640] >>\nendobj\n");
+
+    const obj10_offset = pdf.items.len;
+    try writer.writeAll("10 0 obj\n<< /FT /Tx /T (profile.phone) /V (555-0100) /Kids [11 0 R] >>\nendobj\n");
+
+    const obj11_offset = pdf.items.len;
+    try writer.writeAll("11 0 obj\n<< /Subtype /Widget /Rect [100 590 240 610] >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 12\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj8_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj9_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj10_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj11_offset});
+
+    try writer.writeAll("trailer\n<< /Size 12 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with page labels: uppercase roman, alpha, prefix, custom start
 pub fn generateExtendedPageLabelPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
@@ -1585,6 +1720,57 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate a mixed page with native text plus a dominant scanned image region.
+pub fn generateMixedNativeScanPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+    const image = try generateOcrFixtureImage(allocator);
+    defer allocator.free(image.pixels);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Im1 6 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 12 Tf\n72 740 Td\n(Native cover text) Tj\nET\n520 0 0 690 46 30 cm\n/Im1 Do\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} ", .{ image.width, image.height });
+    try writer.print("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\n", .{image.pixels.len});
+    try writer.writeAll("stream\n");
+    try writer.writeAll(image.pixels);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 7\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+
+    try writer.writeAll("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 const RasterImage = struct {
     width: u32,
     height: u32,
@@ -1711,6 +1897,13 @@ const PositionedText = struct {
     y: u32,
 };
 
+const RulingSegment = struct {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+};
+
 /// Generate a born-digital two-column page with header and footer furniture.
 pub fn generateTwoColumnPdf(allocator: std.mem.Allocator) ![]u8 {
     const cells = [_]PositionedText{
@@ -1770,6 +1963,152 @@ pub fn generateComplexFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
         .{ .text = "fees", .x = 214, .y = 666 },
     };
     return generatePositionedTextPdf(allocator, &cells);
+}
+
+/// Generate a ruled financial table where cell geometry should come from
+/// stroked grid lines rather than text anchors alone.
+pub fn generateRuledFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Ruled Statement", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "Q1", .x = 208, .y = 708 },
+        .{ .text = "Q2", .x = 288, .y = 708 },
+        .{ .text = "Cash", .x = 84, .y = 680 },
+        .{ .text = "1,000", .x = 208, .y = 680 },
+        .{ .text = "(200)", .x = 288, .y = 680 },
+        .{ .text = "Debt", .x = 84, .y = 652 },
+        .{ .text = "-50", .x = 208, .y = 652 },
+        .{ .text = "(75)", .x = 288, .y = 652 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 372, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 372, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 668, .x1 = 372, .y1 = 668 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 372, .y1 = 640 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 192, .y0 = 640, .x1 = 192, .y1 = 724 },
+        .{ .x0 = 272, .y0 = 640, .x1 = 272, .y1 = 724 },
+        .{ .x0 = 372, .y0 = 640, .x1 = 372, .y1 = 724 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a ruled financial table with a cell whose label is split across
+/// physical text lines inside one ruled row.
+pub fn generateRuledMultilineFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Multiline Statement", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "Actual", .x = 208, .y = 708 },
+        .{ .text = "Variance", .x = 288, .y = 708 },
+        .{ .text = "Deferred", .x = 84, .y = 682 },
+        .{ .text = "revenue", .x = 84, .y = 666 },
+        .{ .text = "1,250", .x = 208, .y = 674 },
+        .{ .text = "(300)", .x = 288, .y = 674 },
+        .{ .text = "Support", .x = 84, .y = 636 },
+        .{ .text = "400", .x = 208, .y = 636 },
+        .{ .text = "-25", .x = 288, .y = 636 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 392, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 392, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 652, .x1 = 392, .y1 = 652 },
+        .{ .x0 = 72, .y0 = 624, .x1 = 392, .y1 = 624 },
+        .{ .x0 = 72, .y0 = 624, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 192, .y0 = 624, .x1 = 192, .y1 = 724 },
+        .{ .x0 = 272, .y0 = 624, .x1 = 272, .y1 = 724 },
+        .{ .x0 = 392, .y0 = 624, .x1 = 392, .y1 = 724 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a ruled table with a merged header cell: internal vertical rules
+/// begin below the first row, so the first header should report colspan=3.
+pub fn generateMergedCellFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Merged Header Statement", .x = 72, .y = 742 },
+        .{ .text = "Operating metrics", .x = 84, .y = 708 },
+        .{ .text = "Account", .x = 84, .y = 680 },
+        .{ .text = "Actual", .x = 208, .y = 680 },
+        .{ .text = "Budget", .x = 288, .y = 680 },
+        .{ .text = "Revenue", .x = 84, .y = 652 },
+        .{ .text = "1,200", .x = 208, .y = 652 },
+        .{ .text = "1,050", .x = 288, .y = 652 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 372, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 372, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 668, .x1 = 372, .y1 = 668 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 372, .y1 = 640 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 192, .y0 = 640, .x1 = 192, .y1 = 696 },
+        .{ .x0 = 272, .y0 = 640, .x1 = 272, .y1 = 696 },
+        .{ .x0 = 372, .y0 = 640, .x1 = 372, .y1 = 724 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a ruled table with a row-spanning section label: the horizontal
+/// rule between two detail rows is absent only in the first column.
+pub fn generateRowspanFinancialTablePdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Rowspan Statement", .x = 72, .y = 742 },
+        .{ .text = "Category", .x = 84, .y = 708 },
+        .{ .text = "Q1", .x = 208, .y = 708 },
+        .{ .text = "Q2", .x = 288, .y = 708 },
+        .{ .text = "Assets", .x = 84, .y = 680 },
+        .{ .text = "1,000", .x = 208, .y = 680 },
+        .{ .text = "450", .x = 288, .y = 680 },
+        .{ .text = "300", .x = 208, .y = 652 },
+        .{ .text = "125", .x = 288, .y = 652 },
+        .{ .text = "Liabilities", .x = 84, .y = 624 },
+        .{ .text = "(700)", .x = 208, .y = 624 },
+        .{ .text = "(200)", .x = 288, .y = 624 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 372, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 372, .y1 = 696 },
+        .{ .x0 = 192, .y0 = 668, .x1 = 372, .y1 = 668 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 372, .y1 = 640 },
+        .{ .x0 = 72, .y0 = 612, .x1 = 372, .y1 = 612 },
+        .{ .x0 = 72, .y0 = 612, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 192, .y0 = 612, .x1 = 192, .y1 = 724 },
+        .{ .x0 = 272, .y0 = 612, .x1 = 272, .y1 = 724 },
+        .{ .x0 = 372, .y0 = 612, .x1 = 372, .y1 = 724 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a two-page financial statement with repeated headers.
+pub fn generateMultipageFinancialStatementPdf(allocator: std.mem.Allocator) ![]u8 {
+    const page1 = [_]PositionedText{
+        .{ .text = "Statement page 1", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "Amount", .x = 220, .y = 708 },
+        .{ .text = "Cash", .x = 84, .y = 680 },
+        .{ .text = "1,000", .x = 220, .y = 680 },
+        .{ .text = "Inventory", .x = 84, .y = 652 },
+        .{ .text = "450", .x = 220, .y = 652 },
+    };
+    const page2 = [_]PositionedText{
+        .{ .text = "Statement page 2", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "Amount", .x = 220, .y = 708 },
+        .{ .text = "Debt", .x = 84, .y = 680 },
+        .{ .text = "(300)", .x = 220, .y = 680 },
+        .{ .text = "Equity", .x = 84, .y = 652 },
+        .{ .text = "1,150", .x = 220, .y = 652 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 302, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 302, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 668, .x1 = 302, .y1 = 668 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 302, .y1 = 640 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 192, .y0 = 640, .x1 = 192, .y1 = 724 },
+        .{ .x0 = 302, .y0 = 640, .x1 = 302, .y1 = 724 },
+    };
+    return generateTwoPagePositionedTextAndRulingsPdf(allocator, &page1, &rulings, &page2, &rulings);
 }
 
 /// Generate a formula-like page with compact math-heavy notation.
@@ -1836,6 +2175,215 @@ fn generatePositionedTextPdf(allocator: std.mem.Allocator, cells: []const Positi
     try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
 
     return pdf.toOwnedSlice(allocator);
+}
+
+fn generatePositionedTextAndRulingsPdf(
+    allocator: std.mem.Allocator,
+    cells: []const PositionedText,
+    rulings: []const RulingSegment,
+) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    const cw = runtime.arrayListWriter(&content, allocator);
+    try appendPositionedTextContent(cw, cells);
+    try appendRulingContent(cw, rulings);
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+fn generateTwoPagePositionedTextPdf(
+    allocator: std.mem.Allocator,
+    page1: []const PositionedText,
+    page2: []const PositionedText,
+) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n");
+
+    var content1: std.ArrayList(u8) = .empty;
+    defer content1.deinit(allocator);
+    const c1 = runtime.arrayListWriter(&content1, allocator);
+    try appendPositionedTextContent(c1, page1);
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content1.items.len});
+    try writer.writeAll(content1.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n");
+
+    var content2: std.ArrayList(u8) = .empty;
+    defer content2.deinit(allocator);
+    const c2 = runtime.arrayListWriter(&content2, allocator);
+    try appendPositionedTextContent(c2, page2);
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Length {} >>\nstream\n", .{content2.items.len});
+    try writer.writeAll(content2.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj7_offset = pdf.items.len;
+    try writer.writeAll("7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 8\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
+    try writer.writeAll("trailer\n<< /Size 8 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+fn generateTwoPagePositionedTextAndRulingsPdf(
+    allocator: std.mem.Allocator,
+    page1: []const PositionedText,
+    page1_rulings: []const RulingSegment,
+    page2: []const PositionedText,
+    page2_rulings: []const RulingSegment,
+) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n");
+
+    var content1: std.ArrayList(u8) = .empty;
+    defer content1.deinit(allocator);
+    const c1 = runtime.arrayListWriter(&content1, allocator);
+    try appendPositionedTextContent(c1, page1);
+    try appendRulingContent(c1, page1_rulings);
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content1.items.len});
+    try writer.writeAll(content1.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n");
+
+    var content2: std.ArrayList(u8) = .empty;
+    defer content2.deinit(allocator);
+    const c2 = runtime.arrayListWriter(&content2, allocator);
+    try appendPositionedTextContent(c2, page2);
+    try appendRulingContent(c2, page2_rulings);
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Length {} >>\nstream\n", .{content2.items.len});
+    try writer.writeAll(content2.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj7_offset = pdf.items.len;
+    try writer.writeAll("7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ");
+    try writer.writeAll("/Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 8\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj6_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj7_offset});
+    try writer.writeAll("trailer\n<< /Size 8 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+fn appendPositionedTextContent(writer: anytype, cells: []const PositionedText) !void {
+    try writer.writeAll("BT\n/F1 12 Tf\n");
+    for (cells) |cell| {
+        try writer.print("1 0 0 1 {} {} Tm\n(", .{ cell.x, cell.y });
+        try writePdfStringEscaped(writer, cell.text);
+        try writer.writeAll(") Tj\n");
+    }
+    try writer.writeAll("ET\n");
+}
+
+fn appendRulingContent(writer: anytype, rulings: []const RulingSegment) !void {
+    try writer.writeAll("1 w\n");
+    for (rulings) |line| {
+        try writer.print("{} {} m {} {} l\nS\n", .{ line.x0, line.y0, line.x1, line.y1 });
+    }
+}
+
+fn writePdfStringEscaped(writer: anytype, text: []const u8) !void {
+    for (text) |byte| {
+        switch (byte) {
+            '(', ')', '\\' => {
+                try writer.writeByte('\\');
+                try writer.writeByte(byte);
+            },
+            else => try writer.writeByte(byte),
+        }
+    }
 }
 
 /// Generate a page with aligned numeric columns and formula-heavy notation.

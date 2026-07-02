@@ -1,0 +1,21 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Q1", "role": "header", "rowspan": 1, "colspan": 1 },
+        { "text": "Q2", "role": "header", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Cash", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "1,000", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(200)", "role": "data", "rowspan": 1, "colspan": 1 }
+      ],
+      [
+        { "text": "Debt", "role": "row_header", "rowspan": 1, "colspan": 1 },
+        { "text": "-50", "role": "data", "rowspan": 1, "colspan": 1 },
+        { "text": "(75)", "role": "data", "rowspan": 1, "colspan": 1 }
+      ]
+    ]
+  }
+]

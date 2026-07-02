@@ -1,0 +1,5 @@
+[
+  {"name":"consent.agree","type":"button","value":"Yes"},
+  {"name":"preferences.region","type":"choice","value":"EMEA"},
+  {"name":"profile.phone","type":"text","value":"555-0100"}
+]

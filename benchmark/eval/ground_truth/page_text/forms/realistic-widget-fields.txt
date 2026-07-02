@@ -1,0 +1,6 @@
+Profile Form
+profile.first_name Ada
+profile.email ada@example.com
+subscribe Yes
+cadence Quarterly
+country USA

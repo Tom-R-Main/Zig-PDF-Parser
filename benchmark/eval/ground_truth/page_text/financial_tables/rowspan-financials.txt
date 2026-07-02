@@ -1,0 +1,5 @@
+Rowspan Statement
+Category Q1 Q2
+Assets 1,000 450
+300 125
+Liabilities (700) (200)

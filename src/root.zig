@@ -621,7 +621,9 @@ pub const Document = struct {
         const spans = try self.extractTextWithBounds(page_num, allocator);
         const page = self.pages.items[page_num];
         const page_width = page.media_box[2] - page.media_box[0];
-        return layout.analyzeLayout(allocator, spans, page_width);
+        const ruling_lines = try self.getPageRulingLines(page_num, allocator);
+        defer allocator.free(ruling_lines);
+        return layout.analyzeLayoutWithRulings(allocator, spans, page_width, ruling_lines);
     }
 
     /// Run the Sprint 2 adaptive native pipeline:
@@ -900,7 +902,11 @@ pub const Document = struct {
         };
         if (spans.len == 0) return null;
 
-        var page_layout = layout.analyzeLayout(scratch_allocator, spans, page_width) catch |err| {
+        const ruling_lines = self.getPageRulingLines(page_num, scratch_allocator) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return null;
+        };
+        var page_layout = layout.analyzeLayoutWithRulings(scratch_allocator, spans, page_width, ruling_lines) catch |err| {
             if (err == error.OutOfMemory) return err;
             return null;
         };
@@ -1089,7 +1095,9 @@ pub const Document = struct {
         const spans = try self.extractTextWithBounds(page_num, allocator);
         defer Document.freeTextSpans(allocator, spans);
 
-        var page_layout = try layout.analyzeLayout(allocator, spans, page_width);
+        const ruling_lines = try self.getPageRulingLines(page_num, allocator);
+        defer allocator.free(ruling_lines);
+        var page_layout = try layout.analyzeLayoutWithRulings(allocator, spans, page_width, ruling_lines);
         defer page_layout.deinit();
         try page_layout.writeTablesJson(writer);
     }
@@ -2111,7 +2119,7 @@ pub const Document = struct {
 
         // Walk fields (may have /Kids for hierarchical fields)
         for (fields_arr) |field_obj| {
-            try self.collectFormFields(allocator, arena, field_obj, "", &results);
+            try self.collectFormFields(allocator, arena, field_obj, "", null, null, &results);
         }
 
         return results.toOwnedSlice(allocator);
@@ -2123,6 +2131,8 @@ pub const Document = struct {
         arena: std.mem.Allocator,
         field_obj: Object,
         parent_name: []const u8,
+        inherited_type: ?FieldType,
+        inherited_value: ?[]const u8,
         results: *std.ArrayList(FormField),
     ) !void {
         const field_dict = switch (field_obj) {
@@ -2150,6 +2160,9 @@ pub const Document = struct {
         else
             try allocator.dupe(u8, parent_name);
 
+        const effective_type = fieldTypeFromDict(field_dict) orelse inherited_type;
+        const effective_value = fieldValueFromDict(field_dict) orelse inherited_value;
+
         // Check for /Kids (hierarchical field)
         if (field_dict.get("Kids")) |kids_obj| {
             const kids_arr = switch (kids_obj) {
@@ -2174,29 +2187,24 @@ pub const Document = struct {
             };
 
             for (kids_arr) |kid| {
-                try self.collectFormFields(allocator, arena, kid, full_name, results);
+                try self.collectFormFields(
+                    allocator,
+                    arena,
+                    kid,
+                    full_name,
+                    effective_type,
+                    effective_value,
+                    results,
+                );
             }
             allocator.free(full_name);
             return;
         }
 
         // Leaf field: extract type, value, rect
-        const ft_name = field_dict.getName("FT");
-        const field_type: FieldType = if (ft_name) |ft|
-            if (std.mem.eql(u8, ft, "Tx"))
-                .text
-            else if (std.mem.eql(u8, ft, "Btn"))
-                .button
-            else if (std.mem.eql(u8, ft, "Ch"))
-                .choice
-            else if (std.mem.eql(u8, ft, "Sig"))
-                .signature
-            else
-                .unknown
-        else
-            .unknown;
+        const field_type = effective_type orelse .unknown;
 
-        const value = if (field_dict.getString("V")) |v|
+        const value = if (effective_value) |v|
             try allocator.dupe(u8, v)
         else
             null;
@@ -2209,6 +2217,21 @@ pub const Document = struct {
             .field_type = field_type,
             .rect = rect,
         });
+    }
+
+    fn fieldTypeFromDict(field_dict: anytype) ?FieldType {
+        const ft_name = field_dict.getName("FT") orelse return null;
+        if (std.mem.eql(u8, ft_name, "Tx")) return .text;
+        if (std.mem.eql(u8, ft_name, "Btn")) return .button;
+        if (std.mem.eql(u8, ft_name, "Ch")) return .choice;
+        if (std.mem.eql(u8, ft_name, "Sig")) return .signature;
+        return .unknown;
+    }
+
+    fn fieldValueFromDict(field_dict: anytype) ?[]const u8 {
+        if (field_dict.getString("V")) |value| return value;
+        if (field_dict.getName("V")) |value| return value;
+        return null;
     }
 
     pub fn freeFormFields(allocator: std.mem.Allocator, fields: []FormField) void {

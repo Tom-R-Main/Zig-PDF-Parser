@@ -1,0 +1,7 @@
+[
+  {"name":"profile.first_name","type":"text","value":"Ada"},
+  {"name":"profile.email","type":"text","value":"ada@example.com"},
+  {"name":"subscribe","type":"button","value":"Yes"},
+  {"name":"cadence","type":"button","value":"Quarterly"},
+  {"name":"country","type":"choice","value":"USA"}
+]

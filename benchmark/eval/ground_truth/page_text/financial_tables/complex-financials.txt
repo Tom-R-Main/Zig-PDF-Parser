@@ -1,4 +1,5 @@
 Table 2.
 Account Revenue Expense Net
 Total revenue 1,200 (950) 250
-Services* * excludes setup fees -300 (450) (750)
+Services* -300 (450) (750)
+* excludes setup fees

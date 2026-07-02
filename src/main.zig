@@ -1207,6 +1207,29 @@ test "extract CLI includes AcroForm field values in text and structured JSON" {
     try std.testing.expect(std.mem.indexOf(u8, json_output, "\"type\": \"choice\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_output, "\"value\": \"USA\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_output, "\"text\": \"All Fields\\nemail user@example.com\\ncountry USA\"") != null);
+
+    var adaptive_text_buf: [112]u8 = undefined;
+    const adaptive_text_path = try std.fmt.bufPrint(&adaptive_text_buf, "pdf-parser-form-cli-{x}-adaptive.txt", .{std.testing.random_seed});
+    runtime.deleteFileCwd(adaptive_text_path);
+    defer runtime.deleteFileCwd(adaptive_text_path);
+    try runExtract(allocator, &.{ "--adaptive", "-o", adaptive_text_path, input_path });
+    const adaptive_text_output = try runtime.readFileAllocAlignedCwd(allocator, adaptive_text_path, .fromByteUnits(1));
+    defer allocator.free(adaptive_text_output);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_text_output, "email user@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_text_output, "country USA") != null);
+
+    var adaptive_json_buf: [112]u8 = undefined;
+    const adaptive_json_path = try std.fmt.bufPrint(&adaptive_json_buf, "pdf-parser-form-cli-{x}-adaptive.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(adaptive_json_path);
+    defer runtime.deleteFileCwd(adaptive_json_path);
+    try runExtract(allocator, &.{ "--adaptive", "--format", "json", "-o", adaptive_json_path, input_path });
+    const adaptive_json_output = try runtime.readFileAllocAlignedCwd(allocator, adaptive_json_path, .fromByteUnits(1));
+    defer allocator.free(adaptive_json_output);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_json_output, "\"form_fields\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_json_output, "\"name\":\"email\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_json_output, "\"type\":\"choice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_json_output, "\"value\":\"USA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, adaptive_json_output, "\"chosen_source\":\"manual\"") != null);
 }
 
 test "adaptive debug svg shows formula candidates" {

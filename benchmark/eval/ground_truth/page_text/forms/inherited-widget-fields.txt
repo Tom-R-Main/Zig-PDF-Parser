@@ -1,0 +1,4 @@
+Inherited Widgets
+consent.agree Yes
+preferences.region EMEA
+profile.phone 555-0100

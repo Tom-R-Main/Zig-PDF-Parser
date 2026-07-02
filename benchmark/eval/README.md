@@ -35,6 +35,14 @@ clean born-digital text, academic two-column layout, scientific math notation,
 scanned/typewritten image-only input, financial tables, forms, and adversarial
 page-tree recovery.
 
+`benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
+checked-in corpus. Each row records the fixture id, source note, redistribution
+status, PDF SHA256, and expected OCR/table/formula route counts. Manifest eval
+loads this sidecar automatically when it sits next to `manifest.tsv` and fails
+if the adaptive counters differ from those expectations. Large or raw third-party
+corpora should live under `benchmark/eval/raw_cache/`, which is ignored by git;
+checked-in PDFs should stay small, redistributable reductions.
+
 The runner emits one JSONL record per document with text, layout-adjacent,
 table/formula, latency, RSS, and provenance counters. Missing specialist ground
 truth is represented as `null`, so the same schema works for native text-only
@@ -43,10 +51,17 @@ fixtures and richer labeled corpora.
 Manifest rows have four required TSV columns:
 `category`, `doc_id`, `pdf_path`, and `truth_text_path`. Three optional columns
 can follow: `truth_table_json_path`, `truth_reading_order_path`, and
-`truth_formula_path`. Empty optional columns are allowed when a later specialist
+`truth_formula_path`. An eighth optional column, `truth_formula_json_path`, can
+carry structured formula labels, and a ninth optional column,
+`truth_form_json_path`, can carry value-bearing AcroForm labels. Empty optional columns are allowed when a later specialist
 truth file is present. Table truth emits `table_cell_accuracy`; reading-order
 truth emits `reading_order_score`; formula truth emits `formula_bleu` and
-`formula_edit_distance`.
+`formula_edit_distance`; formula JSON truth emits `formula_structure_accuracy`
+over formula page/text sequence; form JSON truth emits `form_field_accuracy`
+over field name/type/value sequence. Richer table truth may include `rowspan`, `colspan`,
+`role`, `bbox`, and `page`; when span fields are present the runner also emits
+`table_span_accuracy`, and when role fields are present it emits
+`table_role_accuracy`.
 
 External task evaluators can feed their scores into the same record:
 
@@ -56,6 +71,8 @@ zig build eval -- corpus/scientific_math/example.pdf \
   --truth-table-json ground_truth/tables/example.json \
   --truth-reading-order ground_truth/reading_order/example.txt \
   --truth-formula ground_truth/formulas/example.txt \
+  --truth-formula-json ground_truth/formulas_json/example.json \
+  --truth-form-json ground_truth/form_fields/example.json \
   --category scientific_math \
   --adaptive \
   --reading-order-score 0.88 \
@@ -89,6 +106,8 @@ benchmark/eval/
     spans/
     tables/
     formulas/
+    formulas_json/
+    form_fields/
     reading_order/
   outputs/
     pdf-parser/
@@ -107,7 +126,10 @@ The Zig harness currently computes CER, WER, token precision/recall/F1,
 normalized edit distance, BLEU-4, local alignment, latency summaries, peak RSS,
 reading-order text alignment when order labels are supplied, table cell
 accuracy when table JSON labels are supplied, and formula BLEU/edit distance
-when formula labels are supplied. The result schema also has slots for table
+when formula text labels are supplied. Formula JSON labels add formula structure
+accuracy for page/text sequence. Form JSON labels add field accuracy for
+value-bearing AcroForm name/type/value sequence. Table JSON labels with role
+fields add role accuracy for header/row-header/data/note semantics. The result schema also has slots for table
 detection F1, TEDS, GriTS, and formula CDM so local specialist adapters can
 report into the same records as they come online.
 
