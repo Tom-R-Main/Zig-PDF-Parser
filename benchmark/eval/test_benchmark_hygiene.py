@@ -116,11 +116,14 @@ class BenchmarkHygieneTests(unittest.TestCase):
             Path("/tmp/out.jsonl"),
             "tesseract",
             "pdftoppm",
+            "1-10",
         )
 
         self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract-adaptive"], cmd[:2])
         self.assertIn("stream-jsonl", cmd)
         self.assertIn("--password", cmd)
+        self.assertIn("--pages", cmd)
+        self.assertIn("1-10", cmd)
 
     def test_profile_output_jsonl_parses_line_by_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -234,6 +237,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
             self.assertIn("Manifest Readiness", table)
             self.assertIn("Comparator By Parser", table)
             self.assertIn("Optimization Candidates", table)
+            self.assertIn("candidate | scope | max_wall_ms | median_wall_ms", table)
 
     def test_run_baseline_dry_run_prints_pipeline_commands(self) -> None:
         stdout = io.StringIO()
@@ -298,6 +302,41 @@ class BenchmarkHygieneTests(unittest.TestCase):
 
             self.assertEqual(1, exit_code)
             self.assertIn("Large manifest inputs are missing", stderr.getvalue())
+
+    def test_analyze_baseline_candidates_prioritize_large_outliers(self) -> None:
+        records = [
+            {
+                "category": "financial_tables",
+                "doc_id": f"tiny-{index}",
+                "lane": "adaptive-artifact-jsonl",
+                "status": "ok",
+                "wall_ms": 5.0,
+            }
+            for index in range(20)
+        ]
+        records.append(
+            {
+                "category": "financial_tables",
+                "doc_id": "large-sec",
+                "lane": "adaptive-artifact-jsonl",
+                "status": "ok",
+                "wall_ms": 59000.0,
+            }
+        )
+        records.append(
+            {
+                "category": "manuals",
+                "doc_id": "reference",
+                "lane": "adaptive-artifact-jsonl",
+                "status": "ok",
+                "wall_ms": 17000.0,
+            }
+        )
+
+        candidates = analyze_baseline.optimization_candidates(records, {"ready": True}, 2)
+
+        self.assertEqual("candidate-financial-tables-adaptive-artifact-jsonl", candidates[0]["candidate_id"])
+        self.assertEqual(59000.0, candidates[0]["max_wall_ms"])
 
 
 if __name__ == "__main__":

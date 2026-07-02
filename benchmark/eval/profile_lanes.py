@@ -47,6 +47,9 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--doc-id", action="append", default=[], help="Only profile matching doc id; repeatable")
     parser.add_argument("--category", action="append", default=[], help="Only profile matching category; repeatable")
+    parser.add_argument("--exclude-doc-id", action="append", default=[], help="Skip matching doc id; repeatable")
+    parser.add_argument("--exclude-category", action="append", default=[], help="Skip matching category; repeatable")
+    parser.add_argument("--pages", help="Optional page range passed through to pdf-parser commands")
     parser.add_argument("--pdf-parser-command", default="zig-out/bin/pdf-parser")
     parser.add_argument("--ensure-releasefast", dest="ensure_releasefast", action="store_true")
     parser.add_argument("--no-ensure-releasefast", dest="ensure_releasefast", action="store_false")
@@ -64,14 +67,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         load_manifest(repo_root / args.manifest, repo_root),
         set(args.doc_id),
         set(args.category),
+        set(args.exclude_doc_id),
+        set(args.exclude_category),
     )
     lanes = tuple(lane.strip() for lane in args.lanes.split(",") if lane.strip())
-    rows: list[dict[str, object]] = []
-    for entry in entries:
-        for lane in lanes:
-            for repeat_index in range(args.repeat):
-                rows.append(
-                    run_lane(
+    output_handle = None
+    failure_count = 0
+    if args.output:
+        path = repo_root / args.output if not Path(args.output).is_absolute() else Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        output_handle = path.open("w", encoding="utf-8")
+    try:
+        for entry in entries:
+            for lane in lanes:
+                for repeat_index in range(args.repeat):
+                    row = run_lane(
                         repo_root=repo_root,
                         parser_command=parser_command,
                         entry=entry,
@@ -80,16 +90,24 @@ def run_cli(argv: list[str] | None = None) -> int:
                         require_tools=args.require_tools,
                         ocr_executable=args.ocr_executable,
                         ocr_rasterizer=args.ocr_rasterizer,
+                        pages=args.pages,
                     )
-                )
-    output = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
-    if args.output:
-        path = repo_root / args.output if not Path(args.output).is_absolute() else Path(args.output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(output, encoding="utf-8")
+                    if row["status"] != "ok":
+                        failure_count += 1
+                    write_row(output_handle, row)
+    finally:
+        if output_handle is not None:
+            output_handle.close()
+    return 1 if args.require_tools and failure_count else 0
+
+
+def write_row(output_handle, row: dict[str, object]) -> None:
+    line = json.dumps(row, sort_keys=True) + "\n"
+    if output_handle is None:
+        print(line, end="", flush=True)
     else:
-        print(output, end="")
-    return 1 if args.require_tools and any(row["status"] != "ok" for row in rows) else 0
+        output_handle.write(line)
+        output_handle.flush()
 
 
 def resolve_command_path(repo_root: Path, value: str) -> Path:
@@ -142,11 +160,20 @@ def is_truth_path(value: str) -> bool:
     return value.endswith(".txt") or value.endswith(".json")
 
 
-def filter_entries(entries: list[Entry], doc_ids: set[str], categories: set[str]) -> list[Entry]:
+def filter_entries(
+    entries: list[Entry],
+    doc_ids: set[str],
+    categories: set[str],
+    excluded_doc_ids: set[str],
+    excluded_categories: set[str],
+) -> list[Entry]:
     return [
         entry
         for entry in entries
-        if (not doc_ids or entry.doc_id in doc_ids) and (not categories or entry.category in categories)
+        if (not doc_ids or entry.doc_id in doc_ids)
+        and (not categories or entry.category in categories)
+        and entry.doc_id not in excluded_doc_ids
+        and entry.category not in excluded_categories
     ]
 
 
@@ -160,6 +187,7 @@ def run_lane(
     require_tools: bool,
     ocr_executable: str,
     ocr_rasterizer: str,
+    pages: str | None,
 ) -> dict[str, object]:
     if not entry.pdf_path.exists():
         return skipped(entry, lane, repeat_index, f"missing input: {entry.pdf_path}")
@@ -175,7 +203,7 @@ def run_lane(
     with tempfile.NamedTemporaryFile(prefix=f"pdf-parser-{lane}-", suffix=".out", delete=False) as handle:
         output_path = Path(handle.name)
     try:
-        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer)
+        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, pages)
         started = time.perf_counter()
         proc = run_timed(cmd, cwd=repo_root)
         wall_ms = (time.perf_counter() - started) * 1000.0
@@ -194,6 +222,7 @@ def run_lane(
             "reason": reason,
             "input_sha256": input_sha256,
             "pages": entry.page_count,
+            "page_range": pages,
             "wall_ms": wall_ms,
             "parser_latency_ms": parser_latency_ms,
             "peak_rss_mb": proc.peak_rss_mb,
@@ -218,6 +247,7 @@ def build_lane_command(
     output_path: Path,
     ocr_executable: str,
     ocr_rasterizer: str,
+    pages: str | None,
 ) -> list[str]:
     base = [str(parser_command)]
     if lane == "native-text":
@@ -260,6 +290,8 @@ def build_lane_command(
         raise SystemExit(f"Unknown profile lane: {lane}")
     if entry.password:
         cmd.extend(["--password", entry.password])
+    if pages:
+        cmd.extend(["--pages", pages])
     return cmd
 
 
@@ -342,6 +374,7 @@ def base_record(entry: Entry, lane: str, repeat_index: int) -> dict[str, object]
         "lane": lane,
         "repeat_index": repeat_index,
         "pages": entry.page_count,
+        "page_range": None,
         "wall_ms": None,
         "parser_latency_ms": None,
         "peak_rss_mb": None,

@@ -411,8 +411,9 @@ def optimization_candidates(
         candidates.append(candidate)
     candidates.sort(
         key=lambda record: (
-            as_float(record.get("median_wall_ms")) or 0.0,
             as_float(record.get("max_wall_ms")) or 0.0,
+            as_float(record.get("median_wall_ms")) or 0.0,
+            as_float(record.get("total_wall_ms")) or 0.0,
         ),
         reverse=True,
     )
@@ -437,12 +438,12 @@ def slug(value: str) -> str:
 def suggested_focus(category: str, lane: str) -> str:
     if category == "scanned_typewritten" or lane == "ocr-routed":
         return "OCR rasterization/subprocess overhead and page/region routing"
+    if category == "financial_tables":
+        return "table reconstruction, cell assignment, and provenance matching"
     if "stream-jsonl" in lane:
         return "streaming renderer latency, document_finished timing, and per-page buffering"
     if "artifact-jsonl" in lane:
         return "schema JSON rendering allocations and full-result buffering"
-    if category == "financial_tables":
-        return "table reconstruction, cell assignment, and provenance matching"
     if category == "forms":
         return "form field extraction and widget/value serialization"
     if category == "clean_born_digital":
@@ -578,7 +579,7 @@ def render_optimization_candidates(candidates: list[object]) -> list[str]:
     if not candidates:
         return []
     lines = ["## Optimization Candidates", ""]
-    lines.append("candidate | scope | median_wall_ms | max_wall_ms | rss_mb max | focus")
+    lines.append("candidate | scope | max_wall_ms | median_wall_ms | rss_mb max | focus")
     lines.append("--- | --- | ---: | ---: | ---: | ---")
     for candidate in candidates:
         if not isinstance(candidate, dict):
@@ -588,8 +589,8 @@ def render_optimization_candidates(candidates: list[object]) -> list[str]:
                 [
                     str(candidate.get("candidate_id")),
                     str(candidate.get("evidence_scope")),
-                    fmt(candidate.get("median_wall_ms")),
                     fmt(candidate.get("max_wall_ms")),
+                    fmt(candidate.get("median_wall_ms")),
                     fmt(candidate.get("max_peak_rss_mb")),
                     str(candidate.get("suggested_focus")),
                 ]

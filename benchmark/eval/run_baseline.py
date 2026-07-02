@@ -14,6 +14,7 @@ DEFAULT_COMPARE_OUTPUT = "benchmark/eval/outputs/comparison/baseline.jsonl"
 DEFAULT_TINY_PROFILE_OUTPUT = "benchmark/eval/outputs/profile/baseline-tiny.jsonl"
 DEFAULT_OCR_PROFILE_OUTPUT = "benchmark/eval/outputs/profile/baseline-tiny-ocr.jsonl"
 DEFAULT_LARGE_PROFILE_OUTPUT = "benchmark/eval/outputs/profile/baseline-large.jsonl"
+DEFAULT_LARGE_OCR_PROFILE_OUTPUT = "benchmark/eval/outputs/profile/baseline-large-ocr-sample.jsonl"
 DEFAULT_REPORT_JSON = "benchmark/eval/outputs/profile/baseline-report.json"
 DEFAULT_REPORT_MD = "benchmark/eval/outputs/profile/baseline-report.md"
 
@@ -34,6 +35,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--tiny-profile-output", default=DEFAULT_TINY_PROFILE_OUTPUT)
     parser.add_argument("--ocr-profile-output", default=DEFAULT_OCR_PROFILE_OUTPUT)
     parser.add_argument("--large-profile-output", default=DEFAULT_LARGE_PROFILE_OUTPUT)
+    parser.add_argument("--large-ocr-profile-output", default=DEFAULT_LARGE_OCR_PROFILE_OUTPUT)
+    parser.add_argument("--large-ocr-pages", default="1-10", help="Bounded page range for image-heavy OCR sampling")
     parser.add_argument("--report-json", default=DEFAULT_REPORT_JSON)
     parser.add_argument("--report-md", default=DEFAULT_REPORT_MD)
     parser.add_argument("--repeat", type=int, default=3)
@@ -111,13 +114,34 @@ def run_cli(argv: list[str] | None = None) -> int:
                 "--manifest",
                 args.large_manifest,
                 "--lanes",
-                "native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed",
+                "native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl",
+                "--exclude-category",
+                "scanned_typewritten",
                 "--repeat",
                 str(args.repeat),
                 "--output",
                 args.large_profile_output,
             ]
         )
+        if args.large_ocr_pages:
+            commands.append(
+                [
+                    python,
+                    "benchmark/eval/profile_lanes.py",
+                    "--manifest",
+                    args.large_manifest,
+                    "--lanes",
+                    "adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed",
+                    "--category",
+                    "scanned_typewritten",
+                    "--pages",
+                    args.large_ocr_pages,
+                    "--repeat",
+                    "1",
+                    "--output",
+                    args.large_ocr_profile_output,
+                ]
+            )
     elif args.large:
         message = f"Large manifest inputs are missing; run fetch_large_corpus.py --download --derive first: {args.large_manifest}"
         if args.require_large:
@@ -139,6 +163,13 @@ def run_cli(argv: list[str] | None = None) -> int:
     add_existing_jsonl(repo_root, analyze_cmd, "--profile-jsonl", args.tiny_profile_output, planned=not args.skip_tiny_profile)
     add_existing_jsonl(repo_root, analyze_cmd, "--profile-jsonl", args.ocr_profile_output, planned=not args.skip_ocr_profile)
     add_existing_jsonl(repo_root, analyze_cmd, "--profile-jsonl", args.large_profile_output, planned=args.large and large_ready)
+    add_existing_jsonl(
+        repo_root,
+        analyze_cmd,
+        "--profile-jsonl",
+        args.large_ocr_profile_output,
+        planned=args.large and large_ready and bool(args.large_ocr_pages),
+    )
     commands.append(analyze_cmd)
 
     for cmd in commands:

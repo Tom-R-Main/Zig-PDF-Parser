@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 DEFAULT_SOURCES = "benchmark/eval/large/sources.tsv"
+DOWNLOAD_USER_AGENT = "pdf-parser-benchmark/0.1 contact local-benchmark@example.invalid"
 
 
 @dataclass(frozen=True)
@@ -123,8 +124,20 @@ def download_sources(rows: list[SourceRow], *, force: bool, dry_run: bool) -> in
         if dry_run:
             continue
         row.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(row.url, row.cache_path)
+        download_url(row.url, row.cache_path)
     return status
+
+
+def download_url(url: str, dest: Path) -> None:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DOWNLOAD_USER_AGENT,
+            "Accept": "application/pdf,*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=120) as response, dest.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
 
 
 def derive_sources(rows: list[SourceRow], *, force: bool, dry_run: bool) -> int:

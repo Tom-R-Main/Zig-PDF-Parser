@@ -267,9 +267,12 @@ For the full baseline workflow, use the wrapper:
 It builds ReleaseFast, runs the tiny comparator, profiles tiny native/adaptive
 lanes, profiles the OCR lane when `tesseract` and `pdftoppm` are present, and
 writes the grouped JSON/Markdown report. `--large` profiles
-`benchmark/eval/large/manifest.tsv` only when every referenced PDF exists; add
-`--require-large` when CI should fail instead of skipping missing local cache
-inputs.
+`benchmark/eval/large/manifest.tsv` only when every referenced PDF exists. The
+large native/adaptive profile excludes the scanned corpus class by default, then
+adds a bounded scanned OCR sample with `--large-ocr-pages 1-10`; this keeps the
+baseline representative without OCRing a 295-page scanned book multiple times.
+Add `--require-large` when CI should fail instead of skipping missing local
+cache inputs.
 
 Summarize comparator and profiler output before choosing an optimization target:
 
