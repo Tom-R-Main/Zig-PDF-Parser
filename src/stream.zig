@@ -64,7 +64,7 @@ pub fn extractAdaptiveStreaming(
         const page_index: u32 = @intCast(page_idx);
         const page_bbox = pageBBox(page);
 
-        try schema.writePageStartedRecord(writer, manifest_options.document_id, page_index, page_bbox, event_index);
+        try schema.writePageStartedRecord(writer, manifest_options.document_id, manifest_options.input_sha256, page_index, page_bbox, event_index);
         event_index += 1;
         try writer.writeByte('\n');
 
@@ -78,6 +78,7 @@ pub fn extractAdaptiveStreaming(
         const page_counts = try writePageArtifacts(
             writer,
             manifest_options.document_id,
+            manifest_options.input_sha256,
             page_index,
             &page_result,
             summary.artifact_counts,
@@ -95,6 +96,7 @@ pub fn extractAdaptiveStreaming(
         try schema.writePageFinishedRecord(
             writer,
             manifest_options.document_id,
+            manifest_options.input_sha256,
             page_index,
             page_bbox,
             page_counts,
@@ -106,7 +108,7 @@ pub fn extractAdaptiveStreaming(
     }
 
     if (options.include_debug_asset_refs) {
-        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, &event_index);
+        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, manifest_options.input_sha256, &event_index);
     }
 
     const elapsed_ns = runtime.nanoTimestamp() - started_ns;
@@ -114,6 +116,7 @@ pub fn extractAdaptiveStreaming(
     try schema.writeDocumentFinishedRecord(
         writer,
         manifest_options.document_id,
+        manifest_options.input_sha256,
         summary.artifact_counts,
         summary.route_counts,
         summary.elapsed_ms,
@@ -129,6 +132,7 @@ pub fn extractAdaptiveStreaming(
 fn writePageArtifacts(
     writer: anytype,
     document_id: []const u8,
+    input_sha256: ?[]const u8,
     page_index: u32,
     result: anytype,
     global_counts: schema.StreamCounts,
@@ -143,11 +147,11 @@ fn writePageArtifacts(
         .route_base = @intCast(global_counts.route_traces),
     };
 
-    counts.route_traces = try schema.writeRouteTraceStreamRecords(writer, document_id, result, offsets, event_index);
+    counts.route_traces = try schema.writeRouteTraceStreamRecords(writer, document_id, input_sha256, result, offsets, event_index);
 
     for (result.reconciled.spans, 0..) |span, local_index| {
         if (span.span.page_index != page_index) continue;
-        try schema.writeSpanStreamRecord(writer, document_id, span, offsets.span_base + @as(u32, @intCast(local_index)), .{
+        try schema.writeSpanStreamRecord(writer, result, document_id, input_sha256, span, offsets.span_base + @as(u32, @intCast(local_index)), offsets, .{
             .event_type = "span",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -160,7 +164,7 @@ fn writePageArtifacts(
 
     for (result.reconciled.blocks) |block| {
         if (block.page_index != page_index) continue;
-        try schema.writeBlockStreamRecord(writer, document_id, block, offsets.block_base, .{
+        try schema.writeBlockStreamRecord(writer, result, document_id, input_sha256, block, offsets, .{
             .event_type = "block",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -173,7 +177,7 @@ fn writePageArtifacts(
 
     for (result.tables, 0..) |table, local_index| {
         if (table.page_index != page_index) continue;
-        try schema.writeTableStreamRecord(writer, document_id, result, table, offsets.table_base + @as(u32, @intCast(local_index)), offsets, .{
+        try schema.writeTableStreamRecord(writer, document_id, input_sha256, result, table, offsets.table_base + @as(u32, @intCast(local_index)), offsets, .{
             .event_type = "table",
             .event_index = event_index.*,
             .page_index = page_index,
@@ -186,7 +190,7 @@ fn writePageArtifacts(
 
     for (result.reconciled.chunks) |chunk| {
         if (chunk.page_start > page_index or chunk.page_end < page_index) continue;
-        try schema.writeRagChunkStreamRecord(writer, document_id, chunk, offsets.chunk_base, offsets.block_base, .{
+        try schema.writeRagChunkStreamRecord(writer, result, document_id, input_sha256, chunk, offsets, .{
             .event_type = "rag_chunk",
             .event_index = event_index.*,
             .page_index = page_index,

@@ -19,7 +19,7 @@ kernel into a hybrid, adaptive parser.
 - AcroForm field extraction, including nested/inherited widget values
 - Geometry-aware table reconstruction for aligned, ruled, merged-cell, rowspan,
   footnote, and multi-page financial table fixtures
-- JSON/JSONL/RAG/hOCR/ALTO/debug-SVG output surfaces with span provenance
+- JSON/JSONL/RAG/hOCR/ALTO/debug-SVG output surfaces with typed provenance
 - JSON inspection and trace output for page and region routing decisions
 
 ## Performance Benchmark
@@ -137,6 +137,12 @@ artifacts, `page_finished`, optional debug assets, then `document_finished`.
 `jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
 The schema is documented in [docs/output-schema.md](docs/output-schema.md).
 
+The document manifest is the top-level intelligence summary: input SHA256,
+parser/schema versions, page count, encrypted/corrupt flags, route counts,
+OCR/table/form/formula extraction counts, output artifact hashes or stream hash
+slots, warnings/errors, and capability coverage. That makes it suitable as the
+stable run record for general pipelines, not just this CLI.
+
 For Siftable-style ingestion, `stream-jsonl` maps naturally to durable
 processing records: `document_manifest` as a manifest artifact,
 `page_started`/`page_finished`/`document_finished` as status artifacts,
@@ -236,7 +242,14 @@ pdf-parser extracts text in logical reading order using a three-tier approach:
 Adaptive mode adds a fourth reconstruction layer for harder pages: it scores
 page/region complexity, reconstructs table rows and cells from layout geometry
 and ruling lines, invokes OCR only for scanned routes, then reconciles native,
-OCR, table, formula, and form spans with provenance.
+OCR, table, formula, and form spans with typed provenance.
+
+The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
+`0.3.0`. Every emitted record carries a `provenance` envelope with document and
+input hash context, artifact id, page/bbox, source kind, confidence, related
+span/block/chunk ids, route trace ids, and route reasons. This makes parser
+outputs usable as reviewable evidence in Siftable-style pipelines without
+removing the older top-level compatibility fields.
 
 ## Comparison
 

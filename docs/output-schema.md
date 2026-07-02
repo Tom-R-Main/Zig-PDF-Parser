@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.2.0`
+Current schema version: `0.3.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -21,6 +21,7 @@ Every public JSON object includes:
 - `schema_name`
 - `schema_version`
 - `record_type`
+- `provenance`
 
 JSON output is a `document_manifest` object with arrays of typed records.
 `artifact-jsonl` emits one typed record per line and always starts with the
@@ -28,13 +29,54 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
+## Provenance Envelope
+
+Every top-level record carries a shared `provenance` object. Table cells also
+carry the same envelope because they are reviewable extraction artifacts.
+Existing top-level fields remain for compatibility, but new consumers should
+prefer provenance for evidence and routing context.
+
+`provenance` contains:
+
+- `document_id`
+- `input_sha256`, or `null` when the caller did not provide one
+- `artifact_id`
+- `page_index`, or `null` for document-scoped records
+- `bbox`, or `null` for document-scoped records
+- `source_kind`: `native`, `embedded_ocr`, `fresh_ocr`, `table_model`, `form`,
+  `formula`, `debug`, `lifecycle`, `mixed`, or `unknown`
+- `confidence`
+- `span_ids`
+- `block_ids`
+- `chunk_ids`
+- `route_trace_ids`
+- `route_reasons`
+
+Route provenance is matched to the most specific known extraction route:
+intersecting region route first, then page route, then stage trace fallback.
+
 ## Records
 
 ### `document_manifest`
 
 Document/run summary with `document_id`, parser version, optional input SHA256,
-source path, page count, encryption state, extraction options, route counts,
-artifact counts, warnings, and available output formats.
+source path, page count, encryption and corrupt flags, extraction options,
+route counts, OCR/table/form/formula extraction counts, artifact counts,
+output artifact hashes, capability coverage, warnings, errors, and available
+output formats.
+
+The manifest is intended to be a durable document-intelligence run record. Batch
+JSON and `artifact-jsonl` include `output_artifacts` entries with SHA256 hashes
+over canonical record payloads for each artifact family. Streaming manifests
+open before page artifacts exist, so they include the same artifact slots with
+`sha256:null`; the final `document_finished` event carries final counts.
+
+`capability_coverage` reports implemented and advertised parser capabilities
+such as native text, span modeling, layout reconstruction, complexity routing,
+reconciliation, table reconstruction, form fields, OCR adapter support, formula
+routing, debug assets, and streaming. Formula recognition is currently marked
+false because formulas are routed but not yet recognized by a specialist in the
+default path.
 
 ### `span`
 
@@ -85,7 +127,9 @@ URI when materialized, page/region scope, and producing stage.
 - `page_finished`: page index, page bbox, per-page artifact counts, route
   counts, warnings, and completed status.
 - `document_finished`: final artifact counts, route totals, elapsed time, and
-  completed status.
+  completed status. It also repeats extraction counts and output artifact slots
+  with final stream counts; stream artifact hashes remain `null` because records
+  are emitted incrementally.
 
 Streamed artifact records keep their batch shapes and add `event_type`,
 `event_index`, and `sequence_scope`. Page-scoped records already carry
@@ -113,7 +157,10 @@ The page block repeats for each requested page.
 `stream-jsonl` is designed to map cleanly onto Siftable-style
 `processing_runs` and `stage_artifacts`:
 
-- `document_manifest` -> `manifest`
+- `document_manifest` -> `manifest` or run summary, including input hash,
+  parser version, page count, encryption/corruption flags, route totals,
+  extraction counts, output artifact hash slots, diagnostics, and capability
+  coverage
 - `page_started`, `page_finished`, `document_finished` -> `status`
 - `span`, `block`, `table` -> `extracted_text_ref`
 - `route_trace` -> `metadata` or `ocr_ref`

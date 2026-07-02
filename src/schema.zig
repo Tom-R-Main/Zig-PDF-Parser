@@ -8,7 +8,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.2.0";
+pub const schema_version = "0.3.0";
 pub const parser_version = "0.1.0-alpha";
 
 pub const RenderOptions = struct {
@@ -17,7 +17,16 @@ pub const RenderOptions = struct {
     source_path: ?[]const u8 = null,
     page_count: ?usize = null,
     encrypted: ?bool = null,
+    corrupt: ?bool = null,
+    warnings: []const ManifestDiagnostic = &.{},
+    errors: []const ManifestDiagnostic = &.{},
     include_debug_asset_refs: bool = true,
+};
+
+pub const ManifestDiagnostic = struct {
+    code: []const u8,
+    message: []const u8,
+    offset: ?u64 = null,
 };
 
 pub const RecordOffsets = struct {
@@ -62,32 +71,32 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
     try writer.writeAll(",\"spans\":[");
     for (result.reconciled.spans, 0..) |span, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeSpanRecord(writer, options.document_id, span, @intCast(index), null);
+        try writeSpanRecord(writer, result, options.document_id, options.input_sha256, span, @intCast(index), .{}, null);
     }
     try writer.writeAll("],\"blocks\":[");
     for (result.reconciled.blocks, 0..) |block, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeBlockRecord(writer, options.document_id, block, 0, null);
+        try writeBlockRecord(writer, result, options.document_id, options.input_sha256, block, 0, .{}, null);
     }
     try writer.writeAll("],\"tables\":[");
     for (result.tables, 0..) |table, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeTableRecord(writer, options.document_id, result, table, @intCast(index), .{}, null);
+        try writeTableRecord(writer, options.document_id, options.input_sha256, result, table, @intCast(index), .{}, null);
     }
     try writer.writeAll("],\"form_fields\":[");
     for (result.form_fields, 0..) |field, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeFormFieldRecord(writer, options.document_id, result, field, @intCast(index));
+        try writeFormFieldRecord(writer, options.document_id, options.input_sha256, result, field, @intCast(index));
     }
     try writer.writeAll("],\"route_traces\":[");
-    try writeRouteTraceRecords(writer, options.document_id, result, false, .{}, null);
+    try writeRouteTraceRecords(writer, options.document_id, options.input_sha256, result, false, .{}, null);
     try writer.writeAll("],\"rag_chunks\":[");
     for (result.reconciled.chunks, 0..) |chunk, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeRagChunkRecord(writer, options.document_id, chunk, 0, 0, null);
+        try writeRagChunkRecord(writer, result, options.document_id, options.input_sha256, chunk, 0, 0, .{}, null);
     }
     try writer.writeAll("],\"debug_assets\":[");
-    if (options.include_debug_asset_refs) try writeDebugAssetRecords(writer, options.document_id, false, null);
+    if (options.include_debug_asset_refs) try writeDebugAssetRecords(writer, options.document_id, options.input_sha256, false, null);
     try writer.writeAll("]}");
 
     return output.toOwnedSlice(allocator);
@@ -101,28 +110,28 @@ pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, option
     try writeDocumentManifestRecord(writer, result, options);
     try writer.writeByte('\n');
     for (result.reconciled.spans, 0..) |span, index| {
-        try writeSpanRecord(writer, options.document_id, span, @intCast(index), null);
+        try writeSpanRecord(writer, result, options.document_id, options.input_sha256, span, @intCast(index), .{}, null);
         try writer.writeByte('\n');
     }
     for (result.reconciled.blocks) |block| {
-        try writeBlockRecord(writer, options.document_id, block, 0, null);
+        try writeBlockRecord(writer, result, options.document_id, options.input_sha256, block, 0, .{}, null);
         try writer.writeByte('\n');
     }
     for (result.tables, 0..) |table, index| {
-        try writeTableRecord(writer, options.document_id, result, table, @intCast(index), .{}, null);
+        try writeTableRecord(writer, options.document_id, options.input_sha256, result, table, @intCast(index), .{}, null);
         try writer.writeByte('\n');
     }
     for (result.form_fields, 0..) |field, index| {
-        try writeFormFieldRecord(writer, options.document_id, result, field, @intCast(index));
+        try writeFormFieldRecord(writer, options.document_id, options.input_sha256, result, field, @intCast(index));
         try writer.writeByte('\n');
     }
-    try writeRouteTraceRecords(writer, options.document_id, result, true, .{}, null);
+    try writeRouteTraceRecords(writer, options.document_id, options.input_sha256, result, true, .{}, null);
     for (result.reconciled.chunks) |chunk| {
-        try writeRagChunkRecord(writer, options.document_id, chunk, 0, 0, null);
+        try writeRagChunkRecord(writer, result, options.document_id, options.input_sha256, chunk, 0, 0, .{}, null);
         try writer.writeByte('\n');
     }
     if (options.include_debug_asset_refs) {
-        try writeDebugAssetRecords(writer, options.document_id, true, null);
+        try writeDebugAssetRecords(writer, options.document_id, options.input_sha256, true, null);
     }
 
     return output.toOwnedSlice(allocator);
@@ -140,12 +149,12 @@ pub fn renderComplexityJson(allocator: std.mem.Allocator, result: anytype, docum
     try writer.writeAll("\",\"pages\":[");
     for (result.page_routes, 0..) |route, index| {
         if (index > 0) try writer.writeByte(',');
-        try writePageRouteRecord(writer, document_id, route, @intCast(index), null);
+        try writePageRouteRecord(writer, document_id, null, route, @intCast(index), null);
     }
     try writer.writeAll("],\"regions\":[");
     for (result.region_routes, 0..) |route, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeRegionRouteRecord(writer, document_id, route, @intCast(result.page_routes.len + index), null);
+        try writeRegionRouteRecord(writer, document_id, null, route, @intCast(result.page_routes.len + index), null);
     }
     try writer.writeAll("]}");
     return output.toOwnedSlice(allocator);
@@ -163,17 +172,17 @@ pub fn renderTraceJson(allocator: std.mem.Allocator, result: anytype, document_i
     try writer.writeAll("\",\"pages\":[");
     for (result.page_routes, 0..) |route, index| {
         if (index > 0) try writer.writeByte(',');
-        try writePageRouteRecord(writer, document_id, route, @intCast(index), null);
+        try writePageRouteRecord(writer, document_id, null, route, @intCast(index), null);
     }
     try writer.writeAll("],\"regions\":[");
     for (result.region_routes, 0..) |route, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeRegionRouteRecord(writer, document_id, route, @intCast(result.page_routes.len + index), null);
+        try writeRegionRouteRecord(writer, document_id, null, route, @intCast(result.page_routes.len + index), null);
     }
     try writer.writeAll("],\"trace\":[");
     for (result.trace_records, 0..) |record, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeTraceRecord(writer, document_id, result, record, @intCast(result.page_routes.len + result.region_routes.len + index), null);
+        try writeTraceRecord(writer, document_id, null, result, record, @intCast(result.page_routes.len + result.region_routes.len + index), null);
     }
     try writer.writeAll("]}");
     return output.toOwnedSlice(allocator);
@@ -207,6 +216,8 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"corrupt\":");
+    try writer.print("{}", .{options.corrupt orelse (options.errors.len > 0)});
     try writer.writeAll(",\"input_sha256\":");
     try writeOptionalString(writer, options.input_sha256);
     try writer.writeAll(",\"source_path\":");
@@ -216,8 +227,24 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
     try writeRouteCounts(writer, result);
     try writer.writeAll(",\"artifact_counts\":");
     try writeArtifactCounts(writer, result, options);
-    try writer.writeAll(",\"warnings\":[]");
+    try writer.writeAll(",\"extraction_counts\":");
+    try writeExtractionCounts(writer, result);
+    try writer.writeAll(",\"output_artifacts\":");
+    try writeBatchOutputArtifacts(writer, result, options);
+    try writer.writeAll(",\"capability_coverage\":");
+    try writeCapabilityCoverage(writer, false, options.include_debug_asset_refs);
+    try writer.writeAll(",\"warnings\":");
+    try writeDiagnostics(writer, options.warnings);
+    try writer.writeAll(",\"errors\":");
+    try writeDiagnostics(writer, options.errors);
     try writer.writeAll(",\"available_outputs\":[\"json\",\"artifact-jsonl\",\"stream-jsonl\",\"jsonl\",\"rag-jsonl\",\"hocr\",\"alto\",\"debug-svg\"]");
+    try writeProvenance(writer, .{
+        .document_id = options.document_id,
+        .input_sha256 = options.input_sha256,
+        .artifact_id = "document_manifest",
+        .source_kind = "lifecycle",
+        .confidence = 1.0,
+    });
 }
 
 fn writeRouteCounts(writer: anytype, result: anytype) !void {
@@ -254,6 +281,303 @@ fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions)
     );
 }
 
+fn writeExtractionCounts(writer: anytype, result: anytype) !void {
+    var ocr_spans: usize = 0;
+    var table_spans: usize = 0;
+    var formula_spans: usize = 0;
+    for (result.reconciled.spans) |span| {
+        if (span.chosen_source == .fresh_ocr or span.chosen_source == .embedded_ocr or
+            span.span.source == .fresh_ocr or span.span.source == .embedded_ocr)
+        {
+            ocr_spans += 1;
+        }
+        if (span.chosen_source == .table_model or span.span.source == .table_model) table_spans += 1;
+        if (span.chosen_source == .formula_model or span.span.source == .formula_model) formula_spans += 1;
+    }
+
+    var table_cells: usize = 0;
+    for (result.tables) |table| {
+        for (table.rows) |row| table_cells += row.cells.len;
+    }
+
+    const routes = routeTotalsFromResult(result);
+    try writer.print(
+        "{{\"ocr_spans\":{},\"ocr_regions\":{},\"tables\":{},\"table_cells\":{},\"table_spans\":{},\"form_fields\":{},\"formula_regions\":{},\"formula_spans\":{}}}",
+        .{
+            ocr_spans,
+            routes.ocr_regions,
+            result.tables.len,
+            table_cells,
+            table_spans,
+            result.form_fields.len,
+            routes.formula_regions,
+            formula_spans,
+        },
+    );
+}
+
+fn writeStreamExtractionCounts(writer: anytype, counts: StreamCounts, routes: RouteTotals) !void {
+    try writer.print(
+        "{{\"ocr_spans\":null,\"ocr_regions\":{},\"tables\":{},\"table_cells\":null,\"table_spans\":null,\"form_fields\":0,\"formula_regions\":{},\"formula_spans\":null}}",
+        .{
+            routes.ocr_regions,
+            counts.tables,
+            routes.formula_regions,
+        },
+    );
+}
+
+fn routeTotalsFromResult(result: anytype) RouteTotals {
+    var totals = RouteTotals{
+        .page_routes = result.page_routes.len,
+        .region_routes = result.region_routes.len,
+    };
+    for (result.page_routes) |route| {
+        if (route.route.native_fast_path) totals.native_pages += 1;
+    }
+    for (result.region_routes) |route| {
+        if (route.route.needs_ocr) totals.ocr_regions += 1;
+        if (route.route.needs_table_model) totals.table_regions += 1;
+        if (route.route.needs_formula_model) totals.formula_regions += 1;
+    }
+    return totals;
+}
+
+const ArtifactHashKind = enum {
+    spans,
+    blocks,
+    tables,
+    form_fields,
+    route_traces,
+    rag_chunks,
+    debug_assets,
+};
+
+const OutputArtifactSpec = struct {
+    name: []const u8,
+    record_type: []const u8,
+    kind: ArtifactHashKind,
+};
+
+const output_artifact_specs = [_]OutputArtifactSpec{
+    .{ .name = "spans", .record_type = "span", .kind = .spans },
+    .{ .name = "blocks", .record_type = "block", .kind = .blocks },
+    .{ .name = "tables", .record_type = "table", .kind = .tables },
+    .{ .name = "form_fields", .record_type = "form_field", .kind = .form_fields },
+    .{ .name = "route_traces", .record_type = "route_trace", .kind = .route_traces },
+    .{ .name = "rag_chunks", .record_type = "rag_chunk", .kind = .rag_chunks },
+    .{ .name = "debug_assets", .record_type = "debug_asset", .kind = .debug_assets },
+};
+
+fn writeBatchOutputArtifacts(writer: anytype, result: anytype, options: RenderOptions) !void {
+    try writer.writeByte('[');
+    for (output_artifact_specs, 0..) |spec, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeOutputArtifactOpen(writer, spec.name, spec.record_type);
+        const count = outputArtifactCount(result, spec.kind, options);
+        try writer.print(",\"count\":{},\"hash_scope\":\"record_payloads\",\"sha256\":\"", .{count});
+        const digest = artifactDigest(result, spec.kind, options);
+        try writer.writeAll(&digest);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeStreamingOutputArtifacts(writer: anytype, counts: ?StreamCounts) !void {
+    try writer.writeByte('[');
+    for (output_artifact_specs, 0..) |spec, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writeOutputArtifactOpen(writer, spec.name, spec.record_type);
+        try writer.writeAll(",\"count\":");
+        if (counts) |stream_counts| {
+            try writer.print("{}", .{streamOutputArtifactCount(stream_counts, spec.kind)});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"hash_scope\":\"stream_payloads\",\"sha256\":null}");
+    }
+    try writer.writeByte(']');
+}
+
+fn writeOutputArtifactOpen(writer: anytype, name: []const u8, record_type: []const u8) !void {
+    try writer.writeAll("{\"artifact_name\":\"");
+    try writeJsonEscaped(writer, name);
+    try writer.writeAll("\",\"record_type\":\"");
+    try writeJsonEscaped(writer, record_type);
+    try writer.writeByte('"');
+}
+
+fn outputArtifactCount(result: anytype, kind: ArtifactHashKind, options: RenderOptions) usize {
+    return switch (kind) {
+        .spans => result.reconciled.spans.len,
+        .blocks => result.reconciled.blocks.len,
+        .tables => result.tables.len,
+        .form_fields => result.form_fields.len,
+        .route_traces => routeTraceCount(result),
+        .rag_chunks => result.reconciled.chunks.len,
+        .debug_assets => if (options.include_debug_asset_refs) debug_asset_specs.len else 0,
+    };
+}
+
+fn streamOutputArtifactCount(counts: StreamCounts, kind: ArtifactHashKind) usize {
+    return switch (kind) {
+        .spans => counts.spans,
+        .blocks => counts.blocks,
+        .tables => counts.tables,
+        .form_fields => 0,
+        .route_traces => counts.route_traces,
+        .rag_chunks => counts.rag_chunks,
+        .debug_assets => counts.debug_assets,
+    };
+}
+
+fn artifactDigest(result: anytype, kind: ArtifactHashKind, options: RenderOptions) [64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(schema_version);
+    hashText(&hasher, @tagName(kind));
+    switch (kind) {
+        .spans => hashSpans(&hasher, result),
+        .blocks => hashBlocks(&hasher, result),
+        .tables => hashTables(&hasher, result),
+        .form_fields => hashFormFields(&hasher, result),
+        .route_traces => hashRouteTraces(&hasher, result),
+        .rag_chunks => hashRagChunks(&hasher, result),
+        .debug_assets => hashDebugAssets(&hasher, options.include_debug_asset_refs),
+    }
+    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn hashSpans(hasher: anytype, result: anytype) void {
+    for (result.reconciled.spans) |span| {
+        hashPrint(hasher, "{d}|{d:.2}|{d:.2}|{d:.2}|{d:.2}|", .{
+            span.span.page_index,
+            span.span.bbox.x0,
+            span.span.bbox.y0,
+            span.span.bbox.x1,
+            span.span.bbox.y1,
+        });
+        hashText(hasher, span.span.text);
+        hashPrint(hasher, "{s}|{s}|{d:.3};", .{ sourceKindName(span.span.source), sourceKindName(span.chosen_source), span.confidence });
+    }
+}
+
+fn hashBlocks(hasher: anytype, result: anytype) void {
+    for (result.reconciled.blocks) |block| {
+        hashPrint(hasher, "{d}|{d}|{s}|", .{
+            block.page_index,
+            block.id,
+            blockKindName(block.kind),
+        });
+        hashText(hasher, block.text);
+        hashPrint(hasher, "{d:.3}|{d}|{d};", .{
+            block.confidence,
+            block.span_start,
+            block.span_count,
+        });
+    }
+}
+
+fn hashTables(hasher: anytype, result: anytype) void {
+    for (result.tables) |table| {
+        hashPrint(hasher, "{d}|{d}|{d}|{d:.3};", .{ table.page_index, table.block_index, table.rows.len, table.confidence });
+        for (table.rows) |row| {
+            hashPrint(hasher, "r{d}|", .{row.row_index});
+            for (row.cells) |cell| {
+                hashPrint(hasher, "c{d},{d},{d},{d},{s},", .{
+                    cell.row_index,
+                    cell.column_index,
+                    cell.rowspan,
+                    cell.colspan,
+                    tableCellRoleName(cell.role),
+                });
+                hashText(hasher, cell.text);
+            }
+        }
+    }
+}
+
+fn hashFormFields(hasher: anytype, result: anytype) void {
+    for (result.form_fields) |field| {
+        hashText(hasher, field.name);
+        hashText(hasher, field.field_type);
+        if (field.value) |value| hashText(hasher, value);
+        if (field.rect) |rect| hashPrint(hasher, "{d:.2},{d:.2},{d:.2},{d:.2};", .{ rect[0], rect[1], rect[2], rect[3] });
+    }
+}
+
+fn hashRouteTraces(hasher: anytype, result: anytype) void {
+    for (result.page_routes) |route| hashRoute(hasher, "page", route.page_index, null, route.route, route.reason_mask);
+    for (result.region_routes) |route| hashRoute(hasher, "region", route.page_index, route.region_index, route.route, route.reason_mask);
+    for (result.trace_records) |record| hashRoute(hasher, @tagName(record.stage), record.page_index, record.region_index, record.route, record.reason_mask);
+}
+
+fn hashRoute(hasher: anytype, kind: []const u8, page_index: u32, region_index: ?u32, route: anytype, reason_mask: u32) void {
+    hashPrint(hasher, "{s}|{d}|", .{ kind, page_index });
+    if (region_index) |region| hashPrint(hasher, "{d}|", .{region}) else hashText(hasher, "null|");
+    hashPrint(hasher, "{s}|{d};", .{ routeName(route), reason_mask });
+}
+
+fn hashRagChunks(hasher: anytype, result: anytype) void {
+    for (result.reconciled.chunks) |chunk| {
+        hashPrint(hasher, "{d}|{d}|{d}|{d}|", .{
+            chunk.chunk_index,
+            chunk.block_start,
+            chunk.block_count,
+            chunk.page_start,
+        });
+        hashText(hasher, chunk.content);
+    }
+}
+
+fn hashDebugAssets(hasher: anytype, include_debug_asset_refs: bool) void {
+    if (!include_debug_asset_refs) return;
+    for (debug_asset_specs) |asset| {
+        hashText(hasher, asset.id);
+        hashText(hasher, asset.kind);
+        hashText(hasher, asset.media_type);
+        hashText(hasher, asset.output_format);
+    }
+}
+
+fn hashText(hasher: anytype, text: []const u8) void {
+    hasher.update(text);
+    hasher.update("\x1f");
+}
+
+fn hashPrint(hasher: anytype, comptime fmt: []const u8, args: anytype) void {
+    var buffer: [512]u8 = undefined;
+    const text = std.fmt.bufPrint(&buffer, fmt, args) catch unreachable;
+    hasher.update(text);
+}
+
+fn writeCapabilityCoverage(writer: anytype, streaming: bool, include_debug_asset_refs: bool) !void {
+    try writer.print(
+        "{{\"native_text\":true,\"span_model\":true,\"layout_reconstruction\":true,\"complexity_routing\":true,\"reconciliation\":true,\"table_reconstruction\":true,\"form_fields\":true,\"ocr_adapter\":true,\"formula_routing\":true,\"formula_recognition\":false,\"debug_assets\":{},\"streaming\":{}}}",
+        .{ include_debug_asset_refs, streaming },
+    );
+}
+
+fn writeDiagnostics(writer: anytype, diagnostics: []const ManifestDiagnostic) !void {
+    try writer.writeByte('[');
+    for (diagnostics, 0..) |diagnostic, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"code\":\"");
+        try writeJsonEscaped(writer, diagnostic.code);
+        try writer.writeAll("\",\"message\":\"");
+        try writeJsonEscaped(writer, diagnostic.message);
+        try writer.writeAll("\",\"offset\":");
+        if (diagnostic.offset) |offset| {
+            try writer.print("{}", .{offset});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeByte('}');
+    }
+    try writer.writeByte(']');
+}
+
 pub fn writeStreamManifestRecord(writer: anytype, options: RenderOptions, event_index: u64) !void {
     try writeRecordHeader(writer, "document_manifest");
     try writeStreamMeta(writer, .{
@@ -276,16 +600,34 @@ pub fn writeStreamManifestRecord(writer: anytype, options: RenderOptions, event_
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"corrupt\":");
+    try writer.print("{}", .{options.corrupt orelse (options.errors.len > 0)});
     try writer.writeAll(",\"input_sha256\":");
     try writeOptionalString(writer, options.input_sha256);
     try writer.writeAll(",\"source_path\":");
     try writeOptionalString(writer, options.source_path);
     try writer.writeAll(",\"extraction_options\":{\"adaptive\":true,\"streaming\":true}");
-    try writer.writeAll(",\"route_counts\":null,\"artifact_counts\":null,\"warnings\":[]");
-    try writer.writeAll(",\"available_outputs\":[\"stream-jsonl\",\"json\",\"artifact-jsonl\",\"jsonl\",\"rag-jsonl\",\"hocr\",\"alto\",\"debug-svg\"]}");
+    try writer.writeAll(",\"route_counts\":null,\"artifact_counts\":null,\"extraction_counts\":null");
+    try writer.writeAll(",\"output_artifacts\":");
+    try writeStreamingOutputArtifacts(writer, null);
+    try writer.writeAll(",\"capability_coverage\":");
+    try writeCapabilityCoverage(writer, true, options.include_debug_asset_refs);
+    try writer.writeAll(",\"warnings\":");
+    try writeDiagnostics(writer, options.warnings);
+    try writer.writeAll(",\"errors\":");
+    try writeDiagnostics(writer, options.errors);
+    try writer.writeAll(",\"available_outputs\":[\"stream-jsonl\",\"json\",\"artifact-jsonl\",\"jsonl\",\"rag-jsonl\",\"hocr\",\"alto\",\"debug-svg\"]");
+    try writeProvenance(writer, .{
+        .document_id = options.document_id,
+        .input_sha256 = options.input_sha256,
+        .artifact_id = "document_manifest",
+        .source_kind = "lifecycle",
+        .confidence = 1.0,
+    });
+    try writer.writeByte('}');
 }
 
-pub fn writePageStartedRecord(writer: anytype, document_id: []const u8, page_index: u32, bbox: layout.BBox, event_index: u64) !void {
+pub fn writePageStartedRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, page_index: u32, bbox: layout.BBox, event_index: u64) !void {
     try writeRecordHeader(writer, "page_started");
     try writeStreamMeta(writer, .{
         .event_type = "page_started",
@@ -296,12 +638,27 @@ pub fn writePageStartedRecord(writer: anytype, document_id: []const u8, page_ind
     try writeDocumentId(writer, document_id);
     try writer.print(",\"page_index\":{},\"bbox\":", .{page_index});
     try writeBBoxJson(writer, bbox);
-    try writer.writeAll(",\"status\":\"running\"}");
+    try writer.writeAll(",\"status\":\"running\"");
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "page-started",
+        .artifact_index = page_index,
+        .page_index = page_index,
+        .bbox = bbox,
+        .source_kind = "lifecycle",
+        .confidence = 1.0,
+    });
+    try writer.writeAll("[],\"block_ids\":[],\"chunk_ids\":[]");
+    try writeEmptyRouteProvenance(writer);
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
 pub fn writePageFinishedRecord(
     writer: anytype,
     document_id: []const u8,
+    input_sha256: ?[]const u8,
     page_index: u32,
     bbox: layout.BBox,
     counts: StreamCounts,
@@ -322,12 +679,27 @@ pub fn writePageFinishedRecord(
     try writeStreamCounts(writer, counts);
     try writer.writeAll(",\"route_counts\":");
     try writeRouteTotals(writer, routes);
-    try writer.writeAll(",\"warnings\":[]}");
+    try writer.writeAll(",\"warnings\":[]");
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "page-finished",
+        .artifact_index = page_index,
+        .page_index = page_index,
+        .bbox = bbox,
+        .source_kind = "lifecycle",
+        .confidence = 1.0,
+    });
+    try writer.writeAll("[],\"block_ids\":[],\"chunk_ids\":[]");
+    try writeEmptyRouteProvenance(writer);
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
 pub fn writeDocumentFinishedRecord(
     writer: anytype,
     document_id: []const u8,
+    input_sha256: ?[]const u8,
     counts: StreamCounts,
     routes: RouteTotals,
     elapsed_ms: u64,
@@ -344,38 +716,50 @@ pub fn writeDocumentFinishedRecord(
     try writeStreamCounts(writer, counts);
     try writer.writeAll(",\"route_counts\":");
     try writeRouteTotals(writer, routes);
-    try writer.print(",\"elapsed_ms\":{},\"warnings\":[]}}", .{elapsed_ms});
+    try writer.writeAll(",\"extraction_counts\":");
+    try writeStreamExtractionCounts(writer, counts, routes);
+    try writer.writeAll(",\"output_artifacts\":");
+    try writeStreamingOutputArtifacts(writer, counts);
+    try writer.print(",\"elapsed_ms\":{},\"warnings\":[],\"errors\":[]", .{elapsed_ms});
+    try writeProvenance(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id = "document_finished",
+        .source_kind = "lifecycle",
+        .confidence = 1.0,
+    });
+    try writer.writeByte('}');
 }
 
-pub fn writeSpanStreamRecord(writer: anytype, document_id: []const u8, span: anytype, span_index: u32, meta: StreamRecordMeta) !void {
-    try writeSpanRecord(writer, document_id, span, span_index, meta);
+pub fn writeSpanStreamRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, span: anytype, span_index: u32, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
+    try writeSpanRecord(writer, result, document_id, input_sha256, span, span_index, offsets, meta);
 }
 
-pub fn writeBlockStreamRecord(writer: anytype, document_id: []const u8, block: anytype, block_base: u32, meta: StreamRecordMeta) !void {
-    try writeBlockRecord(writer, document_id, block, block_base, meta);
+pub fn writeBlockStreamRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, block: anytype, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
+    try writeBlockRecord(writer, result, document_id, input_sha256, block, offsets.block_base, offsets, meta);
 }
 
-pub fn writeTableStreamRecord(writer: anytype, document_id: []const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
-    try writeTableRecord(writer, document_id, result, table, table_index, offsets, meta);
+pub fn writeTableStreamRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
+    try writeTableRecord(writer, document_id, input_sha256, result, table, table_index, offsets, meta);
 }
 
-pub fn writeRouteTraceStreamRecords(writer: anytype, document_id: []const u8, result: anytype, offsets: RecordOffsets, event_index: *u64) !usize {
+pub fn writeRouteTraceStreamRecords(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, offsets: RecordOffsets, event_index: *u64) !usize {
     const before = event_index.*;
-    try writeRouteTraceRecords(writer, document_id, result, true, offsets, event_index);
+    try writeRouteTraceRecords(writer, document_id, input_sha256, result, true, offsets, event_index);
     return @intCast(event_index.* - before);
 }
 
-pub fn writeRagChunkStreamRecord(writer: anytype, document_id: []const u8, chunk: anytype, chunk_base: u32, block_base: u32, meta: StreamRecordMeta) !void {
-    try writeRagChunkRecord(writer, document_id, chunk, chunk_base, block_base, meta);
+pub fn writeRagChunkStreamRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, chunk: anytype, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
+    try writeRagChunkRecord(writer, result, document_id, input_sha256, chunk, offsets.chunk_base, offsets.block_base, offsets, meta);
 }
 
-pub fn writeDebugAssetStreamRecords(writer: anytype, document_id: []const u8, event_index: *u64) !usize {
+pub fn writeDebugAssetStreamRecords(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, event_index: *u64) !usize {
     const before = event_index.*;
-    try writeDebugAssetRecords(writer, document_id, true, event_index);
+    try writeDebugAssetRecords(writer, document_id, input_sha256, true, event_index);
     return @intCast(event_index.* - before);
 }
 
-fn writeSpanRecord(writer: anytype, document_id: []const u8, span: anytype, span_index: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeSpanRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, span: anytype, span_index: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "span");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -408,10 +792,30 @@ fn writeSpanRecord(writer: anytype, document_id: []const u8, span: anytype, span
     try writeOptionalU32(writer, span.span.line_id);
     try writer.writeAll(",\"mcid\":");
     try writeOptionalI32(writer, span.span.mcid);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "span",
+        .artifact_index = span_index,
+        .page_index = span.span.page_index,
+        .bbox = span.span.bbox,
+        .source_kind = provenanceSourceKind(span.chosen_source),
+        .confidence = span.confidence,
+    });
+    try writeSingleId(writer, "span", span_index);
+    try writer.writeAll(",\"block_ids\":");
+    if (span.span.block_id) |block_id| {
+        try writeSingleId(writer, "block", block_id);
+    } else {
+        try writer.writeAll("[]");
+    }
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writeMatchedRouteProvenance(writer, result, span.span.page_index, span.span.bbox, offsets, stream_meta != null);
+    try writer.writeByte('}');
     try writer.writeByte('}');
 }
 
-fn writeBlockRecord(writer: anytype, document_id: []const u8, block: anytype, block_base: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeBlockRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, block: anytype, block_base: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "block");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -435,10 +839,26 @@ fn writeBlockRecord(writer: anytype, document_id: []const u8, block: anytype, bl
     });
     try writer.writeAll(",\"candidate_kind\":");
     try writeCandidateKind(writer, block.kind);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "block",
+        .artifact_index = block_base + block.id,
+        .page_index = block.page_index,
+        .bbox = block.bbox,
+        .source_kind = provenanceSourceKindFromMask(block.source_mask),
+        .confidence = block.confidence,
+    });
+    try writeIdRange(writer, "span", block.span_start, block.span_count);
+    try writer.writeAll(",\"block_ids\":");
+    try writeSingleId(writer, "block", block_base + block.id);
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writeMatchedRouteProvenance(writer, result, block.page_index, block.bbox, offsets, stream_meta != null);
+    try writer.writeByte('}');
     try writer.writeByte('}');
 }
 
-fn writeTableRecord(writer: anytype, document_id: []const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
+fn writeTableRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "table");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -456,14 +876,31 @@ fn writeTableRecord(writer: anytype, document_id: []const u8, result: anytype, t
         try writer.writeAll(",\"cells\":[");
         for (row.cells, 0..) |cell, cell_index| {
             if (cell_index > 0) try writer.writeByte(',');
-            try writeCellJson(writer, result, cell, offsets.span_base);
+            try writeCellJson(writer, document_id, input_sha256, result, table_index, cell, offsets, stream_meta != null);
         }
         try writer.writeAll("]}");
     }
-    try writer.writeAll("]}");
+    try writer.writeAll("]");
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "table",
+        .artifact_index = table_index,
+        .page_index = table.page_index,
+        .bbox = table.bounds.bbox,
+        .source_kind = "table_model",
+        .confidence = table.confidence,
+    });
+    try writer.writeAll("[]");
+    try writer.writeAll(",\"block_ids\":");
+    try writeIdRange(writer, "block", offsets.block_base + table.block_index, @intCast(table.block_count));
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writeMatchedRouteProvenance(writer, result, table.page_index, table.bounds.bbox, offsets, stream_meta != null);
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
-fn writeCellJson(writer: anytype, result: anytype, cell: layout.TableCell, span_base: u32) !void {
+fn writeCellJson(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, table_index: u32, cell: layout.TableCell, offsets: RecordOffsets, stream: bool) !void {
     try writer.print(
         "{{\"page_index\":{},\"row\":{},\"column\":{},\"rowspan\":{},\"colspan\":{},\"role\":\"{s}\",\"confidence\":{d:.3},\"text\":\"",
         .{
@@ -479,19 +916,27 @@ fn writeCellJson(writer: anytype, result: anytype, cell: layout.TableCell, span_
     try writeJsonEscaped(writer, cell.text);
     try writer.writeAll("\",\"bbox\":");
     try writeBBoxJson(writer, cell.bounds.bbox);
-    try writer.writeAll(",\"source_span_ids\":[");
-    var first = true;
-    for (result.reconciled.spans, 0..) |span, span_index| {
-        if (span.span.page_index != cell.bounds.page_index) continue;
-        if (!centerInside(span.span.bbox, cell.bounds.bbox)) continue;
-        if (!first) try writer.writeByte(',');
-        try writer.print("\"span-{d}\"", .{span_base + @as(u32, @intCast(span_index))});
-        first = false;
-    }
-    try writer.writeAll("]}");
+    try writer.writeAll(",\"source_span_ids\":");
+    try writeCellSpanIdArray(writer, result, cell, offsets.span_base);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "table-cell",
+        .artifact_index = table_index * 1_000_000 + cell.row_index * 1000 + cell.column_index,
+        .page_index = cell.bounds.page_index,
+        .bbox = cell.bounds.bbox,
+        .source_kind = "table_model",
+        .confidence = cell.confidence,
+    });
+    try writeCellSpanIdArray(writer, result, cell, offsets.span_base);
+    try writer.writeAll(",\"block_ids\":[]");
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writeMatchedRouteProvenance(writer, result, cell.bounds.page_index, cell.bounds.bbox, offsets, stream);
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
-fn writeFormFieldRecord(writer: anytype, document_id: []const u8, result: anytype, field: anytype, field_index: u32) !void {
+fn writeFormFieldRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, field: anytype, field_index: u32) !void {
     try writeRecordHeader(writer, "form_field");
     try writeDocumentId(writer, document_id);
     try writer.print(",\"form_field_id\":\"form-field-{d}\",\"field_index\":{},\"name\":\"", .{ field_index, field_index });
@@ -514,17 +959,42 @@ fn writeFormFieldRecord(writer: anytype, document_id: []const u8, result: anytyp
     } else {
         try writer.writeAll("null");
     }
-    try writer.writeAll(",\"visible_value_mismatch\":false,\"missing_appearance\":false}");
+    try writer.writeAll(",\"visible_value_mismatch\":false,\"missing_appearance\":false");
+    const field_bbox = if (field.rect) |rect| rectToBBox(rect) else null;
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "form-field",
+        .artifact_index = field_index,
+        .page_index = if (field.rect == null) null else 0,
+        .bbox = field_bbox,
+        .source_kind = "form",
+        .confidence = 1.0,
+    });
+    if (findManualSpanForField(result, field)) |span_index| {
+        try writeSingleId(writer, "span", @intCast(span_index));
+    } else {
+        try writer.writeAll("[]");
+    }
+    try writer.writeAll(",\"block_ids\":[]");
+    try writer.writeAll(",\"chunk_ids\":[]");
+    if (field_bbox) |box| {
+        try writeMatchedRouteProvenance(writer, result, 0, box, .{}, false);
+    } else {
+        try writeEmptyRouteProvenance(writer);
+    }
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
-fn writeRouteTraceRecords(writer: anytype, document_id: []const u8, result: anytype, jsonl: bool, offsets: RecordOffsets, stream_event_index: ?*u64) !void {
+fn writeRouteTraceRecords(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, jsonl: bool, offsets: RecordOffsets, stream_event_index: ?*u64) !void {
     var wrote = false;
     for (result.page_routes, 0..) |route, local_index| {
         if (wrote) {
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
         }
         const stream_meta = nextRouteStreamMeta(stream_event_index, route.page_index);
-        try writePageRouteRecord(writer, document_id, route, offsets.route_base + @as(u32, @intCast(local_index)), stream_meta);
+        try writePageRouteRecord(writer, document_id, input_sha256, route, offsets.route_base + @as(u32, @intCast(local_index)), stream_meta);
         wrote = true;
     }
     const region_base = offsets.route_base + @as(u32, @intCast(result.page_routes.len));
@@ -533,7 +1003,7 @@ fn writeRouteTraceRecords(writer: anytype, document_id: []const u8, result: anyt
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
         }
         const stream_meta = nextRouteStreamMeta(stream_event_index, route.page_index);
-        try writeRegionRouteRecord(writer, document_id, route, region_base + @as(u32, @intCast(local_index)), stream_meta);
+        try writeRegionRouteRecord(writer, document_id, input_sha256, route, region_base + @as(u32, @intCast(local_index)), stream_meta);
         wrote = true;
     }
     const trace_base = region_base + @as(u32, @intCast(result.region_routes.len));
@@ -542,13 +1012,13 @@ fn writeRouteTraceRecords(writer: anytype, document_id: []const u8, result: anyt
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
         }
         const stream_meta = nextRouteStreamMeta(stream_event_index, record.page_index);
-        try writeTraceRecord(writer, document_id, result, record, trace_base + @as(u32, @intCast(index)), stream_meta);
+        try writeTraceRecord(writer, document_id, input_sha256, result, record, trace_base + @as(u32, @intCast(index)), stream_meta);
         wrote = true;
     }
     if (jsonl and wrote) try writer.writeByte('\n');
 }
 
-fn writePageRouteRecord(writer: anytype, document_id: []const u8, route: anytype, route_index: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writePageRouteRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, route: anytype, route_index: u32, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "route_trace");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -559,10 +1029,28 @@ fn writePageRouteRecord(writer: anytype, document_id: []const u8, route: anytype
     }
     try writer.print(",\"trace_kind\":\"page_route\",\"page_index\":{},\"region_index\":null,\"stage\":\"route_decision\"", .{route.page_index});
     try writeRouteFields(writer, route.route, route.reason_mask, route.span_count, 0, route.image_count, route.char_count, route.signals, route.bbox);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = if (stream_meta != null) "route" else "route-page",
+        .artifact_index = if (stream_meta != null) route_index else route.page_index,
+        .page_index = route.page_index,
+        .bbox = route.bbox,
+        .source_kind = "lifecycle",
+        .confidence = routeConfidence(route.route),
+    });
+    try writer.writeAll("[]");
+    try writer.writeAll(",\"block_ids\":[]");
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writer.writeAll(",\"route_trace_ids\":");
+    if (stream_meta != null) try writeSingleId(writer, "route", route_index) else try writeSingleId(writer, "route-page", route.page_index);
+    try writer.writeAll(",\"route_reasons\":");
+    try writeReasonArray(writer, route.reason_mask);
+    try writer.writeByte('}');
     try writer.writeByte('}');
 }
 
-fn writeRegionRouteRecord(writer: anytype, document_id: []const u8, route: anytype, route_index: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeRegionRouteRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, route: anytype, route_index: u32, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "route_trace");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -585,10 +1073,28 @@ fn writeRegionRouteRecord(writer: anytype, document_id: []const u8, route: anyty
     try writeRouteFields(writer, route.route, route.reason_mask, route.span_count, 0, route.image_count, route.char_count, route.signals, route.bbox);
     try writer.writeAll(",\"specialist\":");
     try writeSpecialistJson(writer, route);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = if (stream_meta != null) "route" else "route-region",
+        .artifact_index = if (stream_meta != null) route_index else route.region_index,
+        .page_index = route.page_index,
+        .bbox = route.bbox,
+        .source_kind = "lifecycle",
+        .confidence = routeConfidence(route.route),
+    });
+    try writer.writeAll("[]");
+    try writer.writeAll(",\"block_ids\":[]");
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writer.writeAll(",\"route_trace_ids\":");
+    if (stream_meta != null) try writeSingleId(writer, "route", route_index) else try writeSingleId(writer, "route-region", route.region_index);
+    try writer.writeAll(",\"route_reasons\":");
+    try writeReasonArray(writer, route.reason_mask);
+    try writer.writeByte('}');
     try writer.writeByte('}');
 }
 
-fn writeTraceRecord(writer: anytype, document_id: []const u8, result: anytype, record: anytype, trace_index: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeTraceRecord(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, result: anytype, record: anytype, trace_index: u32, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "route_trace");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -604,6 +1110,24 @@ fn writeTraceRecord(writer: anytype, document_id: []const u8, result: anytype, r
     try writer.writeByte('"');
     const bbox = traceBBox(result, record);
     try writeRouteFields(writer, record.route, record.reason_mask, record.span_count, record.block_count, 0, 0, null, bbox);
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = if (stream_meta != null) "route" else "trace",
+        .artifact_index = trace_index,
+        .page_index = record.page_index,
+        .bbox = bbox,
+        .source_kind = "lifecycle",
+        .confidence = routeConfidence(record.route),
+    });
+    try writer.writeAll("[]");
+    try writer.writeAll(",\"block_ids\":[]");
+    try writer.writeAll(",\"chunk_ids\":[]");
+    try writer.writeAll(",\"route_trace_ids\":");
+    if (stream_meta != null) try writeSingleId(writer, "route", trace_index) else try writeSingleId(writer, "trace", trace_index);
+    try writer.writeAll(",\"route_reasons\":");
+    try writeReasonArray(writer, record.reason_mask);
+    try writer.writeByte('}');
     try writer.writeByte('}');
 }
 
@@ -642,7 +1166,7 @@ fn writeRouteFields(
     }
 }
 
-fn writeRagChunkRecord(writer: anytype, document_id: []const u8, chunk: anytype, chunk_base: u32, block_base: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeRagChunkRecord(writer: anytype, result: anytype, document_id: []const u8, input_sha256: ?[]const u8, chunk: anytype, chunk_base: u32, block_base: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
     try writeRecordHeader(writer, "rag_chunk");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -665,7 +1189,25 @@ fn writeRagChunkRecord(writer: anytype, document_id: []const u8, chunk: anytype,
         if (offset > 0) try writer.writeByte(',');
         try writer.print("\"block-{d}\"", .{block_base + chunk.block_start + @as(u32, @intCast(offset))});
     }
-    try writer.writeAll("],\"source_span_ids\":[]}");
+    try writer.writeAll("],\"source_span_ids\":[]");
+    try writeProvenancePrefix(writer, .{
+        .document_id = document_id,
+        .input_sha256 = input_sha256,
+        .artifact_id_prefix = "chunk",
+        .artifact_index = chunk_base + chunk.chunk_index,
+        .page_index = chunk.page_start,
+        .bbox = chunk.bbox,
+        .source_kind = provenanceSourceKindFromMask(chunk.source_mask),
+        .confidence = chunk.confidence,
+    });
+    try writer.writeAll("[]");
+    try writer.writeAll(",\"block_ids\":");
+    try writeIdRange(writer, "block", block_base + chunk.block_start, chunk.block_count);
+    try writer.writeAll(",\"chunk_ids\":");
+    try writeSingleId(writer, "chunk", chunk_base + chunk.chunk_index);
+    try writeMatchedRouteProvenance(writer, result, chunk.page_start, chunk.bbox, offsets, stream_meta != null);
+    try writer.writeByte('}');
+    try writer.writeByte('}');
 }
 
 const DebugAssetSpec = struct {
@@ -682,7 +1224,7 @@ const debug_asset_specs = [_]DebugAssetSpec{
     .{ .id = "alto", .kind = "coordinate_text", .media_type = "application/xml", .output_format = "alto" },
 };
 
-fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, jsonl: bool, stream_event_index: ?*u64) !void {
+fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, input_sha256: ?[]const u8, jsonl: bool, stream_event_index: ?*u64) !void {
     for (debug_asset_specs, 0..) |asset, index| {
         if (index > 0) {
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
@@ -705,9 +1247,241 @@ fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, jsonl: bool,
         try writeJsonEscaped(writer, asset.media_type);
         try writer.writeAll("\",\"output_format\":\"");
         try writeJsonEscaped(writer, asset.output_format);
-        try writer.writeAll("\",\"uri\":null,\"page_index\":null,\"region_index\":null,\"stage\":\"output_ready\"}");
+        try writer.writeAll("\",\"uri\":null,\"page_index\":null,\"region_index\":null,\"stage\":\"output_ready\"");
+        try writeProvenance(writer, .{
+            .document_id = document_id,
+            .input_sha256 = input_sha256,
+            .artifact_id = asset.id,
+            .source_kind = "debug",
+            .confidence = 1.0,
+        });
+        try writer.writeByte('}');
     }
     if (jsonl and debug_asset_specs.len > 0) try writer.writeByte('\n');
+}
+
+const ProvenanceArgs = struct {
+    document_id: []const u8,
+    input_sha256: ?[]const u8 = null,
+    artifact_id: []const u8,
+    page_index: ?u32 = null,
+    bbox: ?layout.BBox = null,
+    source_kind: []const u8,
+    confidence: ?f32 = null,
+};
+
+const ProvenancePrefixArgs = struct {
+    document_id: []const u8,
+    input_sha256: ?[]const u8 = null,
+    artifact_id_prefix: []const u8,
+    artifact_index: u32,
+    page_index: ?u32 = null,
+    bbox: ?layout.BBox = null,
+    source_kind: []const u8,
+    confidence: ?f32 = null,
+};
+
+const MatchedRoute = struct {
+    id_prefix: []const u8,
+    id_index: u32,
+    reason_mask: u32,
+};
+
+fn writeProvenance(writer: anytype, args: ProvenanceArgs) !void {
+    try writer.writeAll(",\"provenance\":");
+    try writeProvenanceBodyStart(writer, .{
+        .document_id = args.document_id,
+        .input_sha256 = args.input_sha256,
+        .artifact_id = args.artifact_id,
+        .page_index = args.page_index,
+        .bbox = args.bbox,
+        .source_kind = args.source_kind,
+        .confidence = args.confidence,
+    });
+    try writer.writeAll(",\"span_ids\":[],\"block_ids\":[],\"chunk_ids\":[],\"route_trace_ids\":[],\"route_reasons\":[]}");
+}
+
+fn writeProvenancePrefix(writer: anytype, args: ProvenancePrefixArgs) !void {
+    try writer.writeAll(",\"provenance\":");
+    try writer.writeAll("{\"document_id\":\"");
+    try writeJsonEscaped(writer, args.document_id);
+    try writer.writeAll("\",\"input_sha256\":");
+    try writeOptionalString(writer, args.input_sha256);
+    try writer.writeAll(",\"artifact_id\":\"");
+    try writeJsonEscaped(writer, args.artifact_id_prefix);
+    try writer.print("-{d}\",\"page_index\":", .{args.artifact_index});
+    try writeOptionalU32(writer, args.page_index);
+    try writer.writeAll(",\"bbox\":");
+    try writeOptionalBBoxJson(writer, args.bbox);
+    try writer.writeAll(",\"source_kind\":\"");
+    try writeJsonEscaped(writer, args.source_kind);
+    try writer.writeAll("\",\"confidence\":");
+    try writeOptionalF32(writer, args.confidence);
+    try writer.writeAll(",\"span_ids\":");
+}
+
+fn writeProvenanceBodyStart(writer: anytype, args: struct {
+    document_id: []const u8,
+    input_sha256: ?[]const u8,
+    artifact_id: []const u8,
+    page_index: ?u32,
+    bbox: ?layout.BBox,
+    source_kind: []const u8,
+    confidence: ?f32,
+}) !void {
+    try writer.writeAll("{\"document_id\":\"");
+    try writeJsonEscaped(writer, args.document_id);
+    try writer.writeAll("\",\"input_sha256\":");
+    try writeOptionalString(writer, args.input_sha256);
+    try writer.writeAll(",\"artifact_id\":\"");
+    try writeJsonEscaped(writer, args.artifact_id);
+    try writer.writeAll("\",\"page_index\":");
+    try writeOptionalU32(writer, args.page_index);
+    try writer.writeAll(",\"bbox\":");
+    try writeOptionalBBoxJson(writer, args.bbox);
+    try writer.writeAll(",\"source_kind\":\"");
+    try writeJsonEscaped(writer, args.source_kind);
+    try writer.writeAll("\",\"confidence\":");
+    try writeOptionalF32(writer, args.confidence);
+}
+
+fn writeSingleId(writer: anytype, prefix: []const u8, index: u32) !void {
+    try writer.writeByte('[');
+    try writer.writeByte('"');
+    try writeJsonEscaped(writer, prefix);
+    try writer.print("-{d}\"]", .{index});
+}
+
+fn writeIdRange(writer: anytype, prefix: []const u8, start: u32, count: u32) !void {
+    try writer.writeByte('[');
+    for (0..count) |offset| {
+        if (offset > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try writeJsonEscaped(writer, prefix);
+        try writer.print("-{d}\"", .{start + @as(u32, @intCast(offset))});
+    }
+    try writer.writeByte(']');
+}
+
+fn writeCellSpanIdArray(writer: anytype, result: anytype, cell: layout.TableCell, span_base: u32) !void {
+    try writer.writeByte('[');
+    var first = true;
+    for (result.reconciled.spans, 0..) |span, span_index| {
+        if (span.span.page_index != cell.bounds.page_index) continue;
+        if (!centerInside(span.span.bbox, cell.bounds.bbox)) continue;
+        if (!first) try writer.writeByte(',');
+        try writer.print("\"span-{d}\"", .{span_base + @as(u32, @intCast(span_index))});
+        first = false;
+    }
+    try writer.writeByte(']');
+}
+
+fn writeMatchedRouteProvenance(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, offsets: RecordOffsets, stream: bool) !void {
+    if (findMatchedRoute(result, page_index, bbox, offsets, stream)) |route| {
+        try writer.writeAll(",\"route_trace_ids\":");
+        try writeSingleId(writer, route.id_prefix, route.id_index);
+        try writer.writeAll(",\"route_reasons\":");
+        try writeReasonArray(writer, route.reason_mask);
+    } else {
+        try writeEmptyRouteProvenance(writer);
+    }
+}
+
+fn writeEmptyRouteProvenance(writer: anytype) !void {
+    try writer.writeAll(",\"route_trace_ids\":[],\"route_reasons\":[]");
+}
+
+fn findMatchedRoute(result: anytype, page_index: u32, bbox: layout.BBox, offsets: RecordOffsets, stream: bool) ?MatchedRoute {
+    const region_base = offsets.route_base + @as(u32, @intCast(result.page_routes.len));
+    var best_region: ?MatchedRoute = null;
+    var best_area = std.math.inf(f64);
+    for (result.region_routes, 0..) |route, index| {
+        if (route.page_index != page_index) continue;
+        if (!boxesIntersect(route.bbox, bbox)) continue;
+        const area = boxArea(route.bbox);
+        if (area >= best_area) continue;
+        best_area = area;
+        best_region = .{
+            .id_prefix = if (stream) "route" else "route-region",
+            .id_index = if (stream) region_base + @as(u32, @intCast(index)) else route.region_index,
+            .reason_mask = route.reason_mask,
+        };
+    }
+    if (best_region) |route| return route;
+
+    for (result.page_routes, 0..) |route, index| {
+        if (route.page_index != page_index) continue;
+        return .{
+            .id_prefix = if (stream) "route" else "route-page",
+            .id_index = if (stream) offsets.route_base + @as(u32, @intCast(index)) else route.page_index,
+            .reason_mask = route.reason_mask,
+        };
+    }
+
+    const trace_base = region_base + @as(u32, @intCast(result.region_routes.len));
+    for (result.trace_records, 0..) |record, index| {
+        if (record.page_index != page_index) continue;
+        if (traceBBox(result, record)) |box| {
+            if (!boxesIntersect(box, bbox)) continue;
+        }
+        return .{
+            .id_prefix = if (stream) "route" else "trace",
+            .id_index = trace_base + @as(u32, @intCast(index)),
+            .reason_mask = record.reason_mask,
+        };
+    }
+    return null;
+}
+
+fn provenanceSourceKind(source: layout.SourceKind) []const u8 {
+    return switch (source) {
+        .native_pdf => "native",
+        .embedded_ocr => "embedded_ocr",
+        .fresh_ocr => "fresh_ocr",
+        .table_model => "table_model",
+        .formula_model => "formula",
+        .manual => "form",
+    };
+}
+
+fn provenanceSourceKindFromMask(mask: u32) []const u8 {
+    if (mask == 0) return "unknown";
+    if (countSourceBits(mask) != 1) return "mixed";
+    if (hasSource(mask, .native_pdf)) return provenanceSourceKind(.native_pdf);
+    if (hasSource(mask, .embedded_ocr)) return provenanceSourceKind(.embedded_ocr);
+    if (hasSource(mask, .fresh_ocr)) return provenanceSourceKind(.fresh_ocr);
+    if (hasSource(mask, .table_model)) return provenanceSourceKind(.table_model);
+    if (hasSource(mask, .formula_model)) return provenanceSourceKind(.formula_model);
+    if (hasSource(mask, .manual)) return provenanceSourceKind(.manual);
+    return "unknown";
+}
+
+fn writeOptionalBBoxJson(writer: anytype, bbox: ?layout.BBox) !void {
+    if (bbox) |box| {
+        try writeBBoxJson(writer, box);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writeOptionalF32(writer: anytype, value: ?f32) !void {
+    if (value) |number| {
+        try writer.print("{d:.3}", .{number});
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn rectToBBox(rect: [4]f64) layout.BBox {
+    return .{ .x0 = rect[0], .y0 = rect[1], .x1 = rect[2], .y1 = rect[3] };
+}
+
+fn boxesIntersect(a: layout.BBox, b: layout.BBox) bool {
+    return a.x0 <= b.x1 and a.x1 >= b.x0 and a.y0 <= b.y1 and a.y1 >= b.y0;
+}
+
+fn boxArea(box: layout.BBox) f64 {
+    return @max(0.0, box.x1 - box.x0) * @max(0.0, box.y1 - box.y0);
 }
 
 fn writeRecordHeader(writer: anytype, name: []const u8) !void {

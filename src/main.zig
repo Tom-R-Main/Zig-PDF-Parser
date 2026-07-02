@@ -468,12 +468,24 @@ fn doAdaptiveExtract(
     };
     defer allocator.free(input_sha256);
 
+    const parser_errors = try allocator.alloc(zpdf.schema.ManifestDiagnostic, doc.errors.items.len);
+    defer allocator.free(parser_errors);
+    for (doc.errors.items, 0..) |parse_error, index| {
+        parser_errors[index] = .{
+            .code = @tagName(parse_error.kind),
+            .message = parse_error.message,
+            .offset = parse_error.offset,
+        };
+    }
+
     const schema_options = zpdf.schema.RenderOptions{
         .document_id = doc.source_path orelse "document",
         .input_sha256 = input_sha256,
         .source_path = doc.source_path,
         .page_count = doc.pageCount(),
         .encrypted = doc.isEncrypted(),
+        .corrupt = doc.errors.items.len > 0,
+        .errors = parser_errors,
     };
 
     if (!trace and output_format == .stream_jsonl) {
