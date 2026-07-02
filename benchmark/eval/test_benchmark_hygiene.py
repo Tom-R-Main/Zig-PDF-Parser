@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -24,6 +26,8 @@ def load_module(name: str, path: Path):
 compare = load_module("compare", EVAL_DIR / "compare.py")
 fetch_large_corpus = load_module("fetch_large_corpus", EVAL_DIR / "fetch_large_corpus.py")
 profile_lanes = load_module("profile_lanes", EVAL_DIR / "profile_lanes.py")
+analyze_baseline = load_module("analyze_baseline", EVAL_DIR / "analyze_baseline.py")
+run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
@@ -143,6 +147,157 @@ class BenchmarkHygieneTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual("profile_lane_result", records[0]["record_type"])
+
+    def test_analyze_baseline_summarizes_compare_and_profile_jsonl(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            compare_path = Path(temp_dir) / "compare.jsonl"
+            profile_path = Path(temp_dir) / "profile.jsonl"
+            manifest_path = Path(temp_dir) / "manifest.tsv"
+            present_pdf = Path(temp_dir) / "present.pdf"
+            output_path = Path(temp_dir) / "report.json"
+            table_path = Path(temp_dir) / "report.md"
+            present_pdf.write_bytes(b"%PDF placeholder\n")
+            manifest_path.write_text(
+                "\n".join(
+                    [
+                        "category\tdoc_id\tpdf_path",
+                        f"clean_born_digital\tpresent\t{present_pdf}",
+                        f"clean_born_digital\tmissing\t{Path(temp_dir) / 'missing.pdf'}",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            compare_path.write_text(
+                json.dumps(
+                    {
+                        "doc_id": "doc",
+                        "category": "clean_born_digital",
+                        "parser": "pdf-parser",
+                        "status": "ok",
+                        "metrics": {"cer": 0.0, "wer": 0.0, "token_f1": 1.0},
+                        "latency_ms": 3.0,
+                        "wall_ms": 7.0,
+                        "peak_rss_mb": 12.0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            profile_path.write_text(
+                json.dumps(
+                    {
+                        "record_type": "profile_lane_result",
+                        "doc_id": "doc",
+                        "category": "clean_born_digital",
+                        "lane": "native-text",
+                        "repeat_index": 0,
+                        "status": "ok",
+                        "wall_ms": 5.0,
+                        "parser_latency_ms": None,
+                        "peak_rss_mb": 10.0,
+                        "output_bytes": 1234,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            exit_code = analyze_baseline.main_with_args_for_test(
+                [
+                    "--compare-jsonl",
+                    str(compare_path),
+                    "--profile-jsonl",
+                    str(profile_path),
+                    "--manifest",
+                    str(manifest_path),
+                    "--output",
+                    str(output_path),
+                    "--table-output",
+                    str(table_path),
+                ]
+            )
+
+            self.assertEqual(0, exit_code)
+            report = json.loads(output_path.read_text(encoding="utf-8"))
+            self.assertEqual("baseline_report", report["record_type"])
+            self.assertFalse(report["manifest_readiness"]["ready"])
+            self.assertEqual(1, report["manifest_readiness"]["missing_count"])
+            self.assertEqual(1, report["compare"]["record_count"])
+            self.assertEqual(1, report["profile"]["record_count"])
+            self.assertEqual(1, len(report["optimization_candidates"]))
+            self.assertEqual("tiny-corpus-only", report["optimization_candidates"][0]["evidence_scope"])
+            self.assertEqual("populate-large-corpus", report["next_actions"][0]["action_id"])
+            self.assertIn("pdf-parser", report["compare"]["by_parser"])
+            self.assertIn("native-text", report["profile"]["by_lane"])
+            table = table_path.read_text(encoding="utf-8")
+            self.assertIn("Manifest Readiness", table)
+            self.assertIn("Comparator By Parser", table)
+            self.assertIn("Optimization Candidates", table)
+
+    def test_run_baseline_dry_run_prints_pipeline_commands(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = run_baseline.main_with_args_for_test(
+                [
+                    "--dry-run",
+                    "--skip-releasefast",
+                    "--skip-ocr-profile",
+                    "--repeat",
+                    "1",
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("benchmark/eval/compare.py", stdout.getvalue())
+
+    def test_run_baseline_manifest_inputs_present_detects_missing_large_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = Path(temp_dir) / "manifest.tsv"
+            present_pdf = Path(temp_dir) / "present.pdf"
+            present_pdf.write_bytes(b"%PDF placeholder\n")
+            manifest_path.write_text(
+                f"category\tdoc_id\tpdf_path\nclean_born_digital\tpresent\t{present_pdf}\n",
+                encoding="utf-8",
+            )
+
+            self.assertTrue(run_baseline.manifest_inputs_present(manifest_path, ROOT))
+
+            manifest_path.write_text(
+                f"category\tdoc_id\tpdf_path\nclean_born_digital\tmissing\t{Path(temp_dir) / 'missing.pdf'}\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(run_baseline.manifest_inputs_present(manifest_path, ROOT))
+
+    def test_run_baseline_require_large_fails_when_inputs_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest_path = Path(temp_dir) / "manifest.tsv"
+            manifest_path.write_text(
+                f"category\tdoc_id\tpdf_path\nclean_born_digital\tmissing\t{Path(temp_dir) / 'missing.pdf'}\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                exit_code = run_baseline.main_with_args_for_test(
+                    [
+                        "--large",
+                        "--require-large",
+                        "--large-manifest",
+                        str(manifest_path),
+                        "--dry-run",
+                        "--skip-releasefast",
+                        "--skip-compare",
+                        "--skip-tiny-profile",
+                        "--skip-ocr-profile",
+                    ]
+                )
+
+            self.assertEqual(1, exit_code)
+            self.assertIn("Large manifest inputs are missing", stderr.getvalue())
 
 
 if __name__ == "__main__":

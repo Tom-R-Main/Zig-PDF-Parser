@@ -67,10 +67,17 @@ pdf-parser benchmark \
   --ensure-releasefast \
   --manifest benchmark/eval/corpus/manifest.tsv
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
+.venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
   --manifest benchmark/eval/corpus/manifest.tsv \
   --lanes native-text,adaptive-artifact-jsonl \
   --output /tmp/pdf-parser-profile.jsonl
+.venv/bin/python benchmark/eval/analyze_baseline.py \
+  --compare-jsonl benchmark/eval/outputs/comparison/baseline.jsonl \
+  --profile-jsonl /tmp/pdf-parser-profile.jsonl \
+  --manifest benchmark/eval/large/manifest.tsv \
+  --output /tmp/pdf-parser-baseline-report.json \
+  --table-output /tmp/pdf-parser-baseline-report.md
 ```
 
 Current fixture classes include clean born-digital text, academic two-column
@@ -94,7 +101,13 @@ corpus. Large public or private PDFs belong under ignored
 `benchmark/eval/raw_cache/large`; use `benchmark/eval/fetch_large_corpus.py` to
 download/derive local performance fixtures and `benchmark/eval/profile_lanes.py`
 to measure native text, adaptive artifact JSONL, streaming JSONL, and OCR-routed
-lanes before doing parser optimization.
+lanes before doing parser optimization. `benchmark/eval/analyze_baseline.py`
+turns comparator and profiler JSONL into grouped JSON/Markdown reports and
+records whether manifest PDFs are locally present. It also ranks measured
+optimization candidates and next actions, so the next slice is chosen from
+evidence instead of hunches. `benchmark/eval/run_baseline.py --large` runs the
+whole ReleaseFast baseline workflow and skips large profiling until the ignored
+cache is populated.
 
 ## Requirements
 

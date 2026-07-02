@@ -258,6 +258,38 @@ stream parser latency when the lane emits a `document_finished` record. Use the
 tiny checked-in manifest for CI smoke tests and the large manifest after
 populating `raw_cache/large`.
 
+For the full baseline workflow, use the wrapper:
+
+```sh
+.venv/bin/python benchmark/eval/run_baseline.py --large
+```
+
+It builds ReleaseFast, runs the tiny comparator, profiles tiny native/adaptive
+lanes, profiles the OCR lane when `tesseract` and `pdftoppm` are present, and
+writes the grouped JSON/Markdown report. `--large` profiles
+`benchmark/eval/large/manifest.tsv` only when every referenced PDF exists; add
+`--require-large` when CI should fail instead of skipping missing local cache
+inputs.
+
+Summarize comparator and profiler output before choosing an optimization target:
+
+```sh
+.venv/bin/python benchmark/eval/analyze_baseline.py \
+  --compare-jsonl benchmark/eval/outputs/comparison/tiny-corpus.jsonl \
+  --profile-jsonl benchmark/eval/outputs/profile/large.jsonl \
+  --manifest benchmark/eval/large/manifest.tsv \
+  --output benchmark/eval/outputs/profile/baseline-report.json \
+  --table-output benchmark/eval/outputs/profile/baseline-report.md
+```
+
+The JSON report groups accuracy by parser/category and performance by
+lane/category, records whether manifest PDFs are locally present, ranks measured
+optimization candidates, and emits next-action commands for missing corpus or
+before/after tuning work. The Markdown table is intended for quick triage and
+PR notes; keep public claims conservative unless they cite these ReleaseFast
+artifacts. Files written under `benchmark/eval/outputs/` are ignored local run
+artifacts; commit scripts, manifests, and docs, not machine-specific timings.
+
 Install optional baselines in your own environment when you want strict
 side-by-side numbers:
 
