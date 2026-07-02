@@ -60,7 +60,7 @@ fn printUsage() !void {
         \\Extract options:
         \\  -o FILE         Output to file (default: stdout)
         \\  -p PAGES        Page range (e.g., "1-10" or "1,3,5")
-        \\  -f, --format    Output format: text, markdown, json, jsonl, rag-jsonl, hocr, alto, or debug-svg
+        \\  -f, --format    Output format: text, markdown, json, jsonl, artifact-jsonl, rag-jsonl, hocr, alto, or debug-svg
         \\  -m, --markdown  Shortcut for --format markdown
         \\  --adaptive      Use adaptive routing and reconciled outputs
         \\  --trace         Emit adaptive route trace JSON
@@ -77,6 +77,7 @@ fn printUsage() !void {
         \\  pdf-parser extract --markdown doc.pdf        # Export as Markdown
         \\  pdf-parser extract -f md -o out.md doc.pdf   # Markdown to file
         \\  pdf-parser extract --adaptive -f rag-jsonl doc.pdf
+        \\  pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f debug-svg doc.pdf
         \\  pdf-parser extract doc.pdf --adaptive --trace
         \\  pdf-parser inspect complexity doc.pdf --format json
@@ -97,6 +98,7 @@ const OutputFormat = enum {
     json, // JSON with positions
     jsonl, // JSON Lines with reconciled spans
     rag_jsonl, // JSON Lines with RAG chunks
+    artifact_jsonl, // Versioned JSON Lines artifact stream
     markdown, // Markdown with headings, lists, etc.
     hocr, // hOCR-like HTML coordinates
     alto, // ALTO-like XML coordinates
@@ -136,7 +138,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i < args.len) {
                 output_format = parseOutputFormat(args[i]) orelse {
-                    std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
+                    std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
                     return;
                 };
             }
@@ -436,7 +438,7 @@ fn doExtract(doc: *zpdf.Document, pages: []const usize, output_format: OutputFor
                     try writer.writeAll(text);
                 }
             },
-            .jsonl, .rag_jsonl, .hocr, .alto, .debug_svg => unreachable,
+            .jsonl, .rag_jsonl, .artifact_jsonl, .hocr, .alto, .debug_svg => unreachable,
         }
     }
 
@@ -467,9 +469,33 @@ fn doAdaptiveExtract(
     };
     defer result.deinit();
 
+    const input_sha256 = zpdf.schema.sha256Hex(allocator, doc.data) catch |err| {
+        std.debug.print("Error hashing input: {}\n", .{err});
+        return;
+    };
+    defer allocator.free(input_sha256);
+
+    const schema_options = zpdf.schema.RenderOptions{
+        .document_id = doc.source_path orelse "document",
+        .input_sha256 = input_sha256,
+        .source_path = doc.source_path,
+        .page_count = doc.pageCount(),
+        .encrypted = doc.isEncrypted(),
+    };
+
     const rendered = if (trace)
-        renderAdaptiveTraceJson(allocator, &result) catch |err| {
+        zpdf.schema.renderTraceJson(allocator, &result, schema_options.document_id) catch |err| {
             std.debug.print("Error rendering adaptive trace: {}\n", .{err});
+            return;
+        }
+    else if (output_format == .json)
+        zpdf.schema.renderArtifactJson(allocator, &result, schema_options) catch |err| {
+            std.debug.print("Error rendering adaptive output as json: {}\n", .{err});
+            return;
+        }
+    else if (output_format == .artifact_jsonl)
+        zpdf.schema.renderArtifactJsonl(allocator, &result, schema_options) catch |err| {
+            std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
             return;
         }
     else
@@ -567,7 +593,7 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer result.deinit();
 
-    const rendered = renderComplexityJson(allocator, &result) catch |err| {
+    const rendered = zpdf.schema.renderComplexityJson(allocator, &result, doc.source_path orelse "document") catch |err| {
         std.debug.print("Error rendering complexity JSON: {}\n", .{err});
         return;
     };
@@ -596,6 +622,7 @@ fn parseOutputFormat(fmt: []const u8) ?OutputFormat {
     if (std.mem.eql(u8, fmt, "json")) return .json;
     if (std.mem.eql(u8, fmt, "jsonl")) return .jsonl;
     if (std.mem.eql(u8, fmt, "rag-jsonl") or std.mem.eql(u8, fmt, "rag_jsonl")) return .rag_jsonl;
+    if (std.mem.eql(u8, fmt, "artifact-jsonl") or std.mem.eql(u8, fmt, "artifact_jsonl")) return .artifact_jsonl;
     if (std.mem.eql(u8, fmt, "markdown") or std.mem.eql(u8, fmt, "md")) return .markdown;
     if (std.mem.eql(u8, fmt, "hocr")) return .hocr;
     if (std.mem.eql(u8, fmt, "alto")) return .alto;
@@ -609,6 +636,7 @@ fn outputFormatName(output_format: OutputFormat) []const u8 {
         .json => "json",
         .jsonl => "jsonl",
         .rag_jsonl => "rag-jsonl",
+        .artifact_jsonl => "artifact-jsonl",
         .markdown => "markdown",
         .hocr => "hocr",
         .alto => "alto",
@@ -619,7 +647,7 @@ fn outputFormatName(output_format: OutputFormat) []const u8 {
 fn isLegacyOutputFormat(output_format: OutputFormat) bool {
     return switch (output_format) {
         .text, .json, .markdown => true,
-        .jsonl, .rag_jsonl, .hocr, .alto, .debug_svg => false,
+        .jsonl, .rag_jsonl, .artifact_jsonl, .hocr, .alto, .debug_svg => false,
     };
 }
 
@@ -629,256 +657,11 @@ fn toAdaptiveOutputFormat(output_format: OutputFormat) zpdf.AdaptiveOutputFormat
         .json => .json,
         .jsonl => .jsonl,
         .rag_jsonl => .rag_jsonl,
+        .artifact_jsonl => .artifact_jsonl,
         .markdown => .markdown,
         .hocr => .hocr,
         .alto => .alto,
         .debug_svg => .debug_svg,
-    };
-}
-
-fn renderComplexityJson(allocator: std.mem.Allocator, result: *const zpdf.AdaptiveResult) ![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    const writer = runtime.arrayListWriter(&output, allocator);
-
-    try writer.writeAll("{\n  \"pages\": [");
-    for (result.page_routes, 0..) |route, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.writeAll("\n    ");
-        try writePageRouteJson(writer, route);
-    }
-    if (result.page_routes.len > 0) try writer.writeAll("\n  ");
-    try writer.writeAll("],\n  \"regions\": [");
-    for (result.region_routes, 0..) |route, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.writeAll("\n    ");
-        try writeRegionRouteJson(writer, route);
-    }
-    if (result.region_routes.len > 0) try writer.writeAll("\n  ");
-    try writer.writeAll("]\n}\n");
-
-    return output.toOwnedSlice(allocator);
-}
-
-fn renderAdaptiveTraceJson(allocator: std.mem.Allocator, result: *const zpdf.AdaptiveResult) ![]u8 {
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    const writer = runtime.arrayListWriter(&output, allocator);
-
-    try writer.writeAll("{\n  \"pages\": [");
-    for (result.page_routes, 0..) |route, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.writeAll("\n    ");
-        try writePageRouteJson(writer, route);
-    }
-    if (result.page_routes.len > 0) try writer.writeAll("\n  ");
-
-    try writer.writeAll("],\n  \"regions\": [");
-    for (result.region_routes, 0..) |route, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.writeAll("\n    ");
-        try writeRegionRouteJson(writer, route);
-    }
-    if (result.region_routes.len > 0) try writer.writeAll("\n  ");
-
-    try writer.writeAll("],\n  \"trace\": [");
-    for (result.trace_records, 0..) |record, index| {
-        if (index > 0) try writer.writeAll(",");
-        try writer.writeAll("\n    ");
-        try writeTraceRecordJson(writer, record);
-    }
-    if (result.trace_records.len > 0) try writer.writeAll("\n  ");
-    try writer.writeAll("]\n}\n");
-
-    return output.toOwnedSlice(allocator);
-}
-
-fn writePageRouteJson(writer: anytype, route: zpdf.AdaptivePageRoute) !void {
-    try writer.writeAll("{");
-    try writer.print("\"page_index\":{},", .{route.page_index});
-    try writer.print("\"span_count\":{},\"image_count\":{},\"char_count\":{},", .{
-        route.span_count,
-        route.image_count,
-        route.char_count,
-    });
-    try writer.writeAll("\"route\":\"");
-    try writer.writeAll(routeName(route.route));
-    try writer.writeAll("\",");
-    try writer.print("\"confidence\":{d:.3},", .{routeConfidence(route.route)});
-    try writer.writeAll("\"reasons\":");
-    try writeReasonArray(writer, route.reason_mask);
-    try writer.writeAll(",\"signals\":");
-    try writeSignalsJson(writer, route.signals);
-    try writer.writeAll(",\"bbox\":");
-    try writeBBoxJson(writer, route.bbox);
-    try writer.writeAll("}");
-}
-
-fn writeRegionRouteJson(writer: anytype, route: zpdf.AdaptiveRegionRoute) !void {
-    try writer.writeAll("{");
-    try writer.print("\"page_index\":{},\"region_index\":{},", .{ route.page_index, route.region_index });
-    if (route.layout_block_index) |layout_block_index| {
-        try writer.print("\"layout_block_index\":{},", .{layout_block_index});
-    }
-    if (route.block_kind) |block_kind| {
-        try writer.writeAll("\"block_kind\":\"");
-        try writer.writeAll(blockKindName(block_kind));
-        try writer.writeAll("\",");
-    }
-    try writer.print("\"span_count\":{},\"image_count\":{},\"char_count\":{},", .{
-        route.span_count,
-        route.image_count,
-        route.char_count,
-    });
-    try writer.writeAll("\"route\":\"");
-    try writer.writeAll(routeName(route.route));
-    try writer.writeAll("\",");
-    try writer.print("\"confidence\":{d:.3},", .{routeConfidence(route.route)});
-    try writer.writeAll("\"reasons\":");
-    try writeReasonArray(writer, route.reason_mask);
-    try writer.writeAll(",\"signals\":");
-    try writeSignalsJson(writer, route.signals);
-    try writer.writeAll(",\"bbox\":");
-    try writeBBoxJson(writer, route.bbox);
-    try writer.writeAll("}");
-}
-
-fn writeTraceRecordJson(writer: anytype, record: zpdf.AdaptiveTraceRecord) !void {
-    try writer.writeAll("{");
-    try writer.print("\"page_index\":{},", .{record.page_index});
-    if (record.region_index) |region_index| {
-        try writer.print("\"region_index\":{},", .{region_index});
-    } else {
-        try writer.writeAll("\"region_index\":null,");
-    }
-    try writer.writeAll("\"stage\":\"");
-    try writer.writeAll(traceStageName(record.stage));
-    try writer.writeAll("\",");
-    try writer.print("\"span_count\":{},\"block_count\":{},", .{ record.span_count, record.block_count });
-    try writer.writeAll("\"route\":\"");
-    try writer.writeAll(routeName(record.route));
-    try writer.writeAll("\",");
-    try writer.print("\"confidence\":{d:.3},", .{routeConfidence(record.route)});
-    try writer.writeAll("\"reasons\":");
-    try writeReasonArray(writer, record.reason_mask);
-    try writer.writeAll("}");
-}
-
-fn writeSignalsJson(writer: anytype, signals: zpdf.adaptive.SignalScores) !void {
-    try writer.print(
-        "{{\"sparse_text\":{d:.3},\"image_dominant\":{d:.3},\"bad_unicode\":{d:.3},\"missing_tounicode\":{d:.3},\"hidden_ocr\":{d:.3},\"low_reading_order_confidence\":{d:.3},\"table_alignment\":{d:.3},\"formula_density\":{d:.3}}}",
-        .{
-            signals.sparse_text,
-            signals.image_dominance,
-            signals.bad_unicode,
-            signals.missing_tounicode,
-            signals.hidden_ocr,
-            signals.low_reading_order_confidence,
-            signals.table_alignment,
-            signals.formula_density,
-        },
-    );
-}
-
-fn writeBBoxJson(writer: anytype, bbox: zpdf.adaptive.BBox) !void {
-    try writer.print("{{\"x0\":{d:.2},\"y0\":{d:.2},\"x1\":{d:.2},\"y1\":{d:.2}}}", .{
-        bbox.x0,
-        bbox.y0,
-        bbox.x1,
-        bbox.y1,
-    });
-}
-
-fn writeReasonArray(writer: anytype, mask: zpdf.adaptive.RouteReasonMask) !void {
-    const reasons = [_]zpdf.adaptive.RouteReason{
-        .native_fast_path,
-        .sparse_text,
-        .image_dominance,
-        .bad_unicode,
-        .missing_tounicode,
-        .hidden_ocr,
-        .low_reading_order_confidence,
-        .table_alignment,
-        .formula_density,
-        .ocr_route_stub,
-        .layout_route_stub,
-        .table_route_stub,
-        .formula_route_stub,
-    };
-
-    try writer.writeByte('[');
-    var first = true;
-    for (reasons) |reason| {
-        if (!zpdf.adaptive.hasReason(mask, reason)) continue;
-        if (!first) try writer.writeByte(',');
-        try writer.writeByte('"');
-        try writer.writeAll(reasonName(reason));
-        try writer.writeByte('"');
-        first = false;
-    }
-    try writer.writeByte(']');
-}
-
-fn routeName(route: zpdf.adaptive.RouteDecision) []const u8 {
-    if (route.native_fast_path) return "use_native";
-    if (route.needs_ocr) return "queue_ocr";
-    if (route.needs_table_model and route.needs_formula_model) return "candidate_table_formula";
-    if (route.needs_table_model) return "candidate_table";
-    if (route.needs_formula_model) return "candidate_formula";
-    if (route.needs_layout_model) return "candidate_layout";
-    return "review";
-}
-
-fn routeConfidence(route: zpdf.adaptive.RouteDecision) f32 {
-    const signal = @max(0.0, @min(1.0, route.max_signal));
-    if (route.native_fast_path) return 1.0 - signal;
-    return signal;
-}
-
-fn reasonName(reason: zpdf.adaptive.RouteReason) []const u8 {
-    return switch (reason) {
-        .native_fast_path => "native_fast_path",
-        .sparse_text => "sparse_text",
-        .image_dominance => "image_dominant",
-        .bad_unicode => "bad_unicode",
-        .missing_tounicode => "missing_tounicode",
-        .hidden_ocr => "hidden_ocr",
-        .low_reading_order_confidence => "low_reading_order_confidence",
-        .table_alignment => "table_alignment",
-        .formula_density => "formula_density",
-        .ocr_route_stub => "ocr_route_stub",
-        .layout_route_stub => "layout_route_stub",
-        .table_route_stub => "table_route_stub",
-        .formula_route_stub => "formula_route_stub",
-    };
-}
-
-fn traceStageName(stage: zpdf.adaptive.TraceStage) []const u8 {
-    return switch (stage) {
-        .native_spans => "native_spans",
-        .layout_blocks => "layout_blocks",
-        .complexity_score => "complexity_score",
-        .route_decision => "route_decision",
-        .ocr_route_stub => "ocr_route_stub",
-        .ocr_recognize => "ocr_recognize",
-        .table_route_stub => "table_route_stub",
-        .formula_route_stub => "formula_route_stub",
-        .reconcile => "reconcile",
-        .output_ready => "output_ready",
-    };
-}
-
-fn blockKindName(kind: zpdf.BlockKind) []const u8 {
-    return switch (kind) {
-        .paragraph => "paragraph",
-        .heading => "heading",
-        .list_item => "list_item",
-        .header => "header",
-        .footer => "footer",
-        .caption => "caption",
-        .table_candidate => "table_candidate",
-        .formula_candidate => "formula_candidate",
-        .figure_candidate => "figure_candidate",
     };
 }
 
@@ -910,6 +693,8 @@ test "parse adaptive output formats" {
     try std.testing.expectEqual(OutputFormat.jsonl, parseOutputFormat("jsonl").?);
     try std.testing.expectEqual(OutputFormat.rag_jsonl, parseOutputFormat("rag-jsonl").?);
     try std.testing.expectEqual(OutputFormat.rag_jsonl, parseOutputFormat("rag_jsonl").?);
+    try std.testing.expectEqual(OutputFormat.artifact_jsonl, parseOutputFormat("artifact-jsonl").?);
+    try std.testing.expectEqual(OutputFormat.artifact_jsonl, parseOutputFormat("artifact_jsonl").?);
     try std.testing.expectEqual(OutputFormat.hocr, parseOutputFormat("hocr").?);
     try std.testing.expectEqual(OutputFormat.alto, parseOutputFormat("alto").?);
     try std.testing.expectEqual(OutputFormat.debug_svg, parseOutputFormat("debug-svg").?);
@@ -944,6 +729,7 @@ test "extract adaptive CLI supports reconciler formats" {
         .{ .format = "markdown", .needle = "CLI Adaptive" },
         .{ .format = "json", .needle = "\"spans\"" },
         .{ .format = "jsonl", .needle = "\"text\":\"CLI Adaptive\"" },
+        .{ .format = "artifact-jsonl", .needle = "\"record_type\":\"document_manifest\"" },
         .{ .format = "rag-jsonl", .needle = "\"source_id\":" },
         .{ .format = "hocr", .needle = "ocr_page" },
         .{ .format = "alto", .needle = "<alto>" },

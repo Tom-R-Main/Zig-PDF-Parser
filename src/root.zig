@@ -34,6 +34,7 @@ pub const ocr = @import("ocr.zig");
 pub const specialists = @import("specialists.zig");
 pub const reconcile = @import("reconcile.zig");
 pub const adaptive = @import("adaptive.zig");
+pub const schema = @import("schema.zig");
 pub const eval = @import("eval.zig");
 
 // Re-exports

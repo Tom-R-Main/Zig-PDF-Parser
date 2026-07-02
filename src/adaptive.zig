@@ -9,6 +9,7 @@ const complexity = @import("complexity.zig");
 const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
 const runtime = @import("runtime.zig");
+const schema = @import("schema.zig");
 const specialists = @import("specialists.zig");
 
 pub const BBox = layout.BBox;
@@ -33,6 +34,7 @@ pub const OutputFormat = enum {
     json,
     jsonl,
     rag_jsonl,
+    artifact_jsonl,
     hocr,
     alto,
     debug_svg,
@@ -188,6 +190,7 @@ pub const Result = struct {
     region_routes: []RegionRoute,
     trace_records: []TraceRecord,
     form_fields: []FormField,
+    tables: []layout.TableGrid,
 
     pub fn deinit(self: *Result) void {
         self.reconciled.deinit();
@@ -196,12 +199,14 @@ pub const Result = struct {
         self.allocator.free(self.region_routes);
         self.allocator.free(self.trace_records);
         freeFormFields(self.allocator, self.form_fields);
+        freeOwnedTables(self.allocator, self.tables);
     }
 
     pub fn render(self: *const Result, allocator: std.mem.Allocator, format: OutputFormat) ![]u8 {
         return switch (format) {
             .debug_svg => renderDebugSvg(allocator, self),
-            .json => renderJson(allocator, self),
+            .json => schema.renderArtifactJson(allocator, self, .{}),
+            .artifact_jsonl => schema.renderArtifactJsonl(allocator, self, .{}),
             else => renderOutput(allocator, &self.reconciled, format),
         };
     }
@@ -248,6 +253,10 @@ pub fn extractDocument(
 
     var trace_records: std.ArrayList(TraceRecord) = .empty;
     defer trace_records.deinit(allocator);
+
+    var tables: std.ArrayList(layout.TableGrid) = .empty;
+    defer tables.deinit(allocator);
+    errdefer freeOwnedTables(allocator, tables.items);
 
     const form_fields = try collectFormFields(allocator, document);
     errdefer freeFormFields(allocator, form_fields);
@@ -370,6 +379,10 @@ pub fn extractDocument(
         var page_layout = try layout.analyzeLayoutWithRulings(allocator, spans, page_width, ruling_lines);
         defer page_layout.deinit();
         reorderSpansToLayoutOrder(spans, page_layout.spans);
+
+        for (page_layout.tables) |table| {
+            try tables.append(allocator, try copyTableGrid(allocator, table));
+        }
 
         if (page_layout.tables.len > 0) {
             const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
@@ -508,6 +521,8 @@ pub fn extractDocument(
     errdefer allocator.free(owned_region_routes);
     const owned_trace_records = try trace_records.toOwnedSlice(allocator);
     errdefer allocator.free(owned_trace_records);
+    const owned_tables = try tables.toOwnedSlice(allocator);
+    errdefer freeOwnedTables(allocator, owned_tables);
 
     return .{
         .allocator = allocator,
@@ -517,6 +532,7 @@ pub fn extractDocument(
         .region_routes = owned_region_routes,
         .trace_records = owned_trace_records,
         .form_fields = form_fields,
+        .tables = owned_tables,
     };
 }
 
@@ -568,6 +584,58 @@ fn freeFormField(allocator: std.mem.Allocator, field: FormField) void {
     allocator.free(field.name);
     if (field.value) |value| allocator.free(value);
     allocator.free(field.field_type);
+}
+
+fn copyTableGrid(allocator: std.mem.Allocator, source: layout.TableGrid) !layout.TableGrid {
+    const rows = try allocator.alloc(layout.TableRow, source.rows.len);
+    var completed_rows: usize = 0;
+    errdefer {
+        for (rows[0..completed_rows]) |row| {
+            for (row.cells) |cell| allocator.free(@constCast(cell.text));
+            allocator.free(row.cells);
+        }
+        allocator.free(rows);
+    }
+
+    for (source.rows, 0..) |row, row_index| {
+        rows[row_index] = try copyTableRow(allocator, row);
+        completed_rows += 1;
+    }
+
+    var copied_table = source;
+    copied_table.rows = rows;
+    return copied_table;
+}
+
+fn copyTableRow(allocator: std.mem.Allocator, source: layout.TableRow) !layout.TableRow {
+    const cells = try allocator.alloc(layout.TableCell, source.cells.len);
+    var completed_cells: usize = 0;
+    errdefer {
+        for (cells[0..completed_cells]) |cell| allocator.free(@constCast(cell.text));
+        allocator.free(cells);
+    }
+
+    for (source.cells, 0..) |cell, cell_index| {
+        var copied = cell;
+        copied.text = try allocator.dupe(u8, cell.text);
+        cells[cell_index] = copied;
+        completed_cells += 1;
+    }
+
+    var copied_row = source;
+    copied_row.cells = cells;
+    return copied_row;
+}
+
+fn freeOwnedTables(allocator: std.mem.Allocator, tables: []layout.TableGrid) void {
+    for (tables) |table| {
+        for (table.rows) |row| {
+            for (row.cells) |cell| allocator.free(@constCast(cell.text));
+            allocator.free(row.cells);
+        }
+        allocator.free(table.rows);
+    }
+    allocator.free(tables);
 }
 
 fn formFieldsToSpans(allocator: std.mem.Allocator, fields: []const FormField) ![]layout.TextSpan {
@@ -945,54 +1013,11 @@ pub fn renderOutput(
         .json => reconcile.renderJson(allocator, doc),
         .jsonl => reconcile.renderJsonl(allocator, doc, .spans),
         .rag_jsonl => reconcile.renderRagJsonl(allocator, doc),
+        .artifact_jsonl => unreachable,
         .hocr => reconcile.renderHocr(allocator, doc),
         .alto => reconcile.renderAlto(allocator, doc),
         .debug_svg => reconcile.renderDebugSvg(allocator, doc),
     };
-}
-
-fn renderJson(allocator: std.mem.Allocator, result: *const Result) ![]u8 {
-    const base = try reconcile.renderJson(allocator, &result.reconciled);
-    defer allocator.free(base);
-
-    var output: std.ArrayList(u8) = .empty;
-    errdefer output.deinit(allocator);
-    const writer = runtime.arrayListWriter(&output, allocator);
-
-    if (base.len > 0 and base[base.len - 1] == '}') {
-        try writer.writeAll(base[0 .. base.len - 1]);
-    } else {
-        try writer.writeAll("{");
-    }
-    try writer.writeAll(",\"form_fields\":");
-    try writeFormFieldsJson(writer, result.form_fields);
-    try writer.writeByte('}');
-
-    return output.toOwnedSlice(allocator);
-}
-
-fn writeFormFieldsJson(writer: anytype, fields: []const FormField) !void {
-    try writer.writeByte('[');
-    for (fields, 0..) |field, index| {
-        if (index > 0) try writer.writeByte(',');
-        try writer.writeAll("{\"name\":\"");
-        try writeJsonEscaped(writer, field.name);
-        try writer.writeAll("\",\"type\":\"");
-        try writeJsonEscaped(writer, field.field_type);
-        try writer.writeAll("\",\"value\":");
-        if (field.value) |value| {
-            try writer.writeByte('"');
-            try writeJsonEscaped(writer, value);
-            try writer.writeByte('"');
-        } else {
-            try writer.writeAll("null");
-        }
-        if (field.rect) |rect| {
-            try writer.print(",\"rect\":[{d:.2},{d:.2},{d:.2},{d:.2}]", .{ rect[0], rect[1], rect[2], rect[3] });
-        }
-        try writer.writeByte('}');
-    }
-    try writer.writeByte(']');
 }
 
 pub fn renderDebugSvg(allocator: std.mem.Allocator, result: *const Result) ![]u8 {
@@ -1382,6 +1407,7 @@ test "debug svg marks low-confidence review regions" {
         .region_routes = &region_routes,
         .trace_records = &trace_records,
         .form_fields = &.{},
+        .tables = &.{},
     };
 
     const svg = try renderDebugSvg(std.testing.allocator, &result);

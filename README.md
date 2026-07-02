@@ -107,6 +107,7 @@ pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
 pdf-parser extract -o out.txt document.pdf   # Output to file
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f jsonl doc.pdf
+pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
 pdf-parser extract --adaptive -f hocr doc.pdf
 pdf-parser extract --adaptive -f alto doc.pdf
@@ -125,11 +126,18 @@ index, region index, span count, route, confidence, signal scores, and reasons
 such as `image_dominant`, `missing_tounicode`, `table_alignment`,
 `formula_density`, and `low_reading_order_confidence`.
 
-Adaptive JSON includes reconciled spans, blocks, RAG chunks, and form fields.
-Table JSON includes page-aware cell geometry plus `rowspan`, `colspan`, `role`,
-and provenance-derived confidence. OCR remains local and deterministic: when a
-page or region is routed to OCR, the adapter invokes Tesseract and reconciles the
-fresh OCR spans with native PDF spans rather than replacing the whole page.
+Adaptive `json` emits the versioned public schema: a `document_manifest` plus
+typed `span`, `block`, `table`, `form_field`, `route_trace`, `rag_chunk`, and
+`debug_asset` records. `artifact-jsonl` emits the same contract as a
+manifest-first JSONL stream for host applications and ingestion pipelines.
+`jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
+The schema is documented in [docs/output-schema.md](docs/output-schema.md).
+
+Table records include page-aware cell geometry plus `rowspan`, `colspan`,
+`role`, confidence, and source span ids when available. OCR remains local and
+deterministic: when a page or region is routed to OCR, the adapter invokes
+Tesseract and reconciles the fresh OCR spans with native PDF spans rather than
+replacing the whole page.
 
 ### Python
 

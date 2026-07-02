@@ -209,6 +209,132 @@ test "adaptive extraction renders reconstructed complex financial tables" {
     try std.testing.expect(saw_table_model);
 }
 
+test "versioned schema renders native document manifest spans blocks chunks and debug assets" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateCleanNativePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{
+        .document_id = "clean-native",
+        .input_sha256 = "fixture-hash",
+        .page_count = doc.pageCount(),
+        .encrypted = doc.isEncrypted(),
+    });
+    defer allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
+    try std.testing.expectEqualStrings("0.1.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"debug_asset\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bbox\":{\"x0\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"input_sha256\":\"fixture-hash\"") != null);
+}
+
+test "versioned artifact jsonl starts with manifest then typed records" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "Schema JSONL");
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const jsonl = try zpdf.schema.renderArtifactJsonl(allocator, &result, .{ .document_id = "jsonl-fixture" });
+    defer allocator.free(jsonl);
+
+    try std.testing.expect(std.mem.startsWith(u8, jsonl, "{\"schema_name\":\"document_manifest\""));
+    const first_newline = std.mem.indexOfScalar(u8, jsonl, '\n') orelse return error.MissingJsonlRecord;
+    const manifest = try std.json.parseFromSlice(std.json.Value, allocator, jsonl[0..first_newline], .{});
+    defer manifest.deinit();
+    try std.testing.expectEqualStrings("document_manifest", manifest.value.object.get("record_type").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
+}
+
+test "versioned schema exposes financial table cell span metadata" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "merged-cells" });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"table\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"text\":\"Operating metrics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"colspan\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_span_ids\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"bbox\":{\"x0\":") != null);
+}
+
+test "versioned schema exposes AcroForm field records" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateAllFormFieldsPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "forms" });
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"form_field\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"email\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"type\":\"choice\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"value\":\"USA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_span_id\":\"span-") != null);
+}
+
+test "versioned schema exposes mixed scan OCR route traces" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMixedNativeScanPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    const trace = try zpdf.schema.renderTraceJson(allocator, &result, "mixed-native-scan");
+    defer allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"record_type\":\"route_trace\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"route\":\"queue_ocr\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"image_dominant\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"stage\":\"ocr_recognize\"") != null);
+}
+
 test "parse multi-page PDF" {
     const allocator = std.testing.allocator;
 
