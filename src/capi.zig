@@ -2,12 +2,64 @@ const std = @import("std");
 const runtime = @import("runtime.zig");
 const builtin = @import("builtin");
 const zpdf = @import("root.zig");
+const testpdf = @import("testpdf.zig");
 
 const is_wasm = builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64;
+const pdf_parser_abi_version_value: u32 = 2;
 
 pub const ZpdfDocument = opaque {};
 
 var c_allocator: std.mem.Allocator = std.heap.page_allocator;
+
+pub const PdfParserAdaptiveFormat = enum(c_int) {
+    json = 0,
+    artifact_jsonl = 1,
+    stream_jsonl = 2,
+    trace_json = 3,
+};
+
+pub const PdfParserStatus = enum(c_int) {
+    ok = 0,
+    invalid_argument = 1,
+    open_error = 2,
+    extract_error = 3,
+};
+
+pub const PdfParserAdaptiveOptions = extern struct {
+    abi_version: u32 = pdf_parser_abi_version_value,
+    format: c_int = @intFromEnum(PdfParserAdaptiveFormat.artifact_jsonl),
+    input_path: ?[*:0]const u8 = null,
+    document_id: ?[*:0]const u8 = null,
+    source_id: ?[*:0]const u8 = null,
+    password: ?[*:0]const u8 = null,
+    password_file: ?[*:0]const u8 = null,
+    page_start: i64 = -1,
+    page_end: i64 = -1,
+    strict: u8 = 0,
+    permissive: u8 = 0,
+    debug_assets_dir: ?[*:0]const u8 = null,
+    emit_specialist_requests_path: ?[*:0]const u8 = null,
+    specialist_config_path: ?[*:0]const u8 = null,
+};
+
+pub const PdfParserAdaptiveResult = extern struct {
+    status: c_int = @intFromEnum(PdfParserStatus.ok),
+    output: ?[*]u8 = null,
+    output_len: usize = 0,
+    error_message: ?[*]u8 = null,
+    error_len: usize = 0,
+    schema_version: [*]const u8 = zpdf.schema.schema_version.ptr,
+    schema_version_len: usize = zpdf.schema.schema_version.len,
+    warning_count: u32 = 0,
+};
+
+export fn pdf_parser_version() [*:0]const u8 {
+    return zpdf.schema.parser_version;
+}
+
+export fn pdf_parser_abi_version() u32 {
+    return pdf_parser_abi_version_value;
+}
 
 export fn zpdf_open(path_ptr: [*:0]const u8) ?*ZpdfDocument {
     const path = std.mem.span(path_ptr);
@@ -93,6 +145,206 @@ export fn zpdf_free_buffer(ptr: ?[*]u8, len: usize) void {
     if (ptr) |p| {
         c_allocator.free(p[0..len]);
     }
+}
+
+export fn pdf_parser_free_buffer(ptr: ?[*]u8, len: usize) void {
+    zpdf_free_buffer(ptr, len);
+}
+
+export fn pdf_parser_result_clear(result: ?*PdfParserAdaptiveResult) void {
+    if (result) |out| {
+        if (out.output) |ptr| c_allocator.free(ptr[0..out.output_len]);
+        if (out.error_message) |ptr| c_allocator.free(ptr[0..out.error_len]);
+        out.* = .{};
+    }
+}
+
+export fn pdf_parser_extract_adaptive_file(options: ?*const PdfParserAdaptiveOptions, result: ?*PdfParserAdaptiveResult) c_int {
+    const out = result orelse return @intFromEnum(PdfParserStatus.invalid_argument);
+    pdf_parser_result_clear(out);
+    const opts = options orelse {
+        return setCError(out, .invalid_argument, "missing options");
+    };
+    if (opts.abi_version != pdf_parser_abi_version_value) {
+        return setCError(out, .invalid_argument, "unsupported ABI version");
+    }
+    const path_ptr = opts.input_path orelse {
+        return setCError(out, .invalid_argument, "missing input_path");
+    };
+
+    var threaded: std.Io.Threaded = .init(c_allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const path = std.mem.span(path_ptr);
+    var open_config = openConfigFromOptions(opts) catch |err| {
+        return setCErrorFmt(out, .invalid_argument, "password config failed: {s}", .{@errorName(err)});
+    };
+    defer open_config.deinit();
+
+    const doc = zpdf.Document.openWithConfig(c_allocator, path, open_config.config) catch |err| {
+        return setCErrorFmt(out, .open_error, "open failed: {s}", .{@errorName(err)});
+    };
+    defer doc.close();
+
+    return extractAdaptiveDocumentToC(doc, opts, out);
+}
+
+export fn pdf_parser_extract_adaptive_memory(
+    options: ?*const PdfParserAdaptiveOptions,
+    data: ?[*]const u8,
+    data_len: usize,
+    result: ?*PdfParserAdaptiveResult,
+) c_int {
+    const out = result orelse return @intFromEnum(PdfParserStatus.invalid_argument);
+    pdf_parser_result_clear(out);
+    const opts = options orelse {
+        return setCError(out, .invalid_argument, "missing options");
+    };
+    if (opts.abi_version != pdf_parser_abi_version_value) {
+        return setCError(out, .invalid_argument, "unsupported ABI version");
+    }
+    const data_ptr = data orelse {
+        return setCError(out, .invalid_argument, "missing data");
+    };
+    if (data_len == 0) {
+        return setCError(out, .invalid_argument, "empty data");
+    }
+
+    var threaded: std.Io.Threaded = .init(c_allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    var open_config = openConfigFromOptions(opts) catch |err| {
+        return setCErrorFmt(out, .invalid_argument, "password config failed: {s}", .{@errorName(err)});
+    };
+    defer open_config.deinit();
+
+    const doc = zpdf.Document.openFromMemoryUnsafe(c_allocator, data_ptr[0..data_len], open_config.config) catch |err| {
+        return setCErrorFmt(out, .open_error, "open failed: {s}", .{@errorName(err)});
+    };
+    defer doc.close();
+
+    return extractAdaptiveDocumentToC(doc, opts, out);
+}
+
+fn extractAdaptiveDocumentToC(doc: *zpdf.Document, opts: *const PdfParserAdaptiveOptions, out: *PdfParserAdaptiveResult) c_int {
+    var buffer: std.ArrayList(u8) = .empty;
+    errdefer buffer.deinit(c_allocator);
+
+    const writer = runtime.arrayListWriter(&buffer, c_allocator);
+    _ = zpdf.adapter.extractAdaptive(c_allocator, doc, writer, adapterOptionsFromC(opts)) catch |err| {
+        return setCErrorFmt(out, .extract_error, "extract failed: {s}", .{@errorName(err)});
+    };
+
+    const owned = buffer.toOwnedSlice(c_allocator) catch |err| {
+        return setCErrorFmt(out, .extract_error, "alloc failed: {s}", .{@errorName(err)});
+    };
+    out.* = .{
+        .status = @intFromEnum(PdfParserStatus.ok),
+        .output = owned.ptr,
+        .output_len = owned.len,
+        .schema_version = zpdf.schema.schema_version.ptr,
+        .schema_version_len = zpdf.schema.schema_version.len,
+        .warning_count = @intCast(doc.errors.items.len),
+    };
+    return out.status;
+}
+
+fn adapterOptionsFromC(opts: *const PdfParserAdaptiveOptions) zpdf.AdaptiveAdapterOptions {
+    var adaptive_options = zpdf.AdaptiveOptions{};
+    if (opts.page_start >= 0) adaptive_options.page_start = @intCast(opts.page_start);
+    if (opts.page_end >= 0) adaptive_options.page_end = @intCast(opts.page_end);
+
+    return .{
+        .document_id = optionalCStr(opts.document_id),
+        .source_id = optionalCStr(opts.source_id),
+        .format = formatFromC(opts.format),
+        .adaptive_options = adaptive_options,
+        .debug_assets_dir = optionalCStr(opts.debug_assets_dir),
+        .emit_specialist_requests_path = optionalCStr(opts.emit_specialist_requests_path),
+        .specialist_config_path = optionalCStr(opts.specialist_config_path),
+    };
+}
+
+fn formatFromC(format: c_int) zpdf.AdaptiveAdapterFormat {
+    return switch (format) {
+        @intFromEnum(PdfParserAdaptiveFormat.json) => .json,
+        @intFromEnum(PdfParserAdaptiveFormat.stream_jsonl) => .stream_jsonl,
+        @intFromEnum(PdfParserAdaptiveFormat.trace_json) => .trace_json,
+        else => .artifact_jsonl,
+    };
+}
+
+const COpenConfig = struct {
+    config: zpdf.ErrorConfig,
+    owned_password: ?[]align(1) u8 = null,
+
+    fn deinit(self: *COpenConfig) void {
+        if (self.owned_password) |password| c_allocator.free(password);
+        self.* = .{ .config = zpdf.ErrorConfig.default() };
+    }
+};
+
+fn openConfigFromOptions(opts: *const PdfParserAdaptiveOptions) !COpenConfig {
+    var config = if (opts.strict != 0)
+        zpdf.ErrorConfig.strict()
+    else if (opts.permissive != 0)
+        zpdf.ErrorConfig.permissive()
+    else
+        zpdf.ErrorConfig.default();
+
+    const direct_password = optionalCStr(opts.password);
+    const password_file = optionalCStr(opts.password_file);
+    if (direct_password != null and password_file != null) return error.DuplicatePasswordSource;
+    if (direct_password) |value| {
+        config.password = value;
+        return .{ .config = config };
+    }
+    if (password_file) |path| {
+        const data = try runtime.readFileAllocAlignedCwd(c_allocator, path, .fromByteUnits(1));
+        const trimmed = trimTrailingNewlines(data);
+        config.password = trimmed;
+        return .{ .config = config, .owned_password = data };
+    }
+    return .{ .config = config };
+}
+
+fn trimTrailingNewlines(bytes: []const u8) []const u8 {
+    var end = bytes.len;
+    while (end > 0 and (bytes[end - 1] == '\n' or bytes[end - 1] == '\r')) {
+        end -= 1;
+    }
+    return bytes[0..end];
+}
+
+fn optionalCStr(value: ?[*:0]const u8) ?[]const u8 {
+    return if (value) |ptr| std.mem.span(ptr) else null;
+}
+
+fn setCError(out: *PdfParserAdaptiveResult, status: PdfParserStatus, message: []const u8) c_int {
+    const copy = c_allocator.dupe(u8, message) catch {
+        out.* = .{
+            .status = @intFromEnum(status),
+            .schema_version = zpdf.schema.schema_version.ptr,
+            .schema_version_len = zpdf.schema.schema_version.len,
+        };
+        return out.status;
+    };
+    out.* = .{
+        .status = @intFromEnum(status),
+        .error_message = copy.ptr,
+        .error_len = copy.len,
+        .schema_version = zpdf.schema.schema_version.ptr,
+        .schema_version_len = zpdf.schema.schema_version.len,
+    };
+    return out.status;
+}
+
+fn setCErrorFmt(out: *PdfParserAdaptiveResult, status: PdfParserStatus, comptime fmt: []const u8, args: anytype) c_int {
+    const message = std.fmt.allocPrint(c_allocator, fmt, args) catch return setCError(out, status, "operation failed");
+    defer c_allocator.free(message);
+    return setCError(out, status, message);
 }
 
 export fn zpdf_get_page_info(handle: ?*ZpdfDocument, page_num: c_int, width: *f64, height: *f64, rotation: *c_int) c_int {
@@ -680,4 +932,53 @@ export fn zpdf_free_form_fields(ptr: ?[*]CFormField, count: usize) void {
         }
         c_allocator.free(p[0..count]);
     }
+}
+
+test "public header exposes adaptive C ABI constants" {
+    const c = @cImport({
+        @cInclude("pdf_parser.h");
+    });
+
+    try std.testing.expectEqual(@as(c_uint, pdf_parser_abi_version_value), c.PDF_PARSER_ABI_VERSION);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(PdfParserAdaptiveFormat.artifact_jsonl)), c.PDF_PARSER_FORMAT_ARTIFACT_JSONL);
+    try std.testing.expect(@sizeOf(c.PdfParserAdaptiveOptions) > 0);
+    try std.testing.expect(@sizeOf(c.PdfParserAdaptiveResult) > 0);
+}
+
+test "adaptive memory C ABI emits artifact JSONL and frees buffers" {
+    const pdf_data = try testpdf.generateMinimalPdf(std.testing.allocator, "ABI adaptive text");
+    defer std.testing.allocator.free(pdf_data);
+
+    var result: PdfParserAdaptiveResult = .{};
+    const options = PdfParserAdaptiveOptions{
+        .abi_version = pdf_parser_abi_version_value,
+        .format = @intFromEnum(PdfParserAdaptiveFormat.artifact_jsonl),
+        .document_id = "abi-memory",
+        .source_id = "external-abi-memory",
+        .permissive = 1,
+    };
+
+    const status = pdf_parser_extract_adaptive_memory(&options, pdf_data.ptr, pdf_data.len, &result);
+    defer pdf_parser_result_clear(&result);
+
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(PdfParserStatus.ok)), status);
+    try std.testing.expect(result.output != null);
+    const output = result.output.?[0..result.output_len];
+    const newline = std.mem.indexOfScalar(u8, output, '\n') orelse output.len;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output[0..newline], .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"source_id\":\"external-abi-memory\"") != null);
+}
+
+test "adaptive C ABI reports invalid memory input" {
+    var result: PdfParserAdaptiveResult = .{};
+    const options = PdfParserAdaptiveOptions{ .abi_version = pdf_parser_abi_version_value };
+
+    const status = pdf_parser_extract_adaptive_memory(&options, null, 0, &result);
+    defer pdf_parser_result_clear(&result);
+
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(PdfParserStatus.invalid_argument)), status);
+    try std.testing.expect(result.error_message != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_message.?[0..result.error_len], "missing data") != null);
 }

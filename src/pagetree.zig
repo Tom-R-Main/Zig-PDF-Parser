@@ -8,6 +8,7 @@
 const std = @import("std");
 const parser = @import("parser.zig");
 const xref_mod = @import("xref.zig");
+const encryption = @import("encryption.zig");
 
 const Object = parser.Object;
 const ObjRef = parser.ObjRef;
@@ -45,6 +46,19 @@ pub fn resolveRef(
     ref: ObjRef,
     resolved_cache: *std.AutoHashMap(u32, Object),
 ) !Object {
+    return resolveRefWithSecurity(allocator, data, xref, ref, resolved_cache, null);
+}
+
+/// Resolve object reference using XRef table, optionally decrypting the
+/// resulting indirect object with the document security handler.
+pub fn resolveRefWithSecurity(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    ref: ObjRef,
+    resolved_cache: *std.AutoHashMap(u32, Object),
+    security: ?*const encryption.SecurityHandler,
+) !Object {
     // Check cache first
     if (resolved_cache.get(ref.num)) |cached| {
         return cached;
@@ -59,13 +73,17 @@ pub fn resolveRef(
 
             var p = parser.Parser.initAt(allocator, data, @intCast(entry.offset));
             const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
+            const object = if (security) |handler|
+                handler.decryptObject(allocator, .{ .num = indirect.num, .gen = indirect.gen }, indirect.obj) catch return Object{ .null = {} }
+            else
+                indirect.obj;
 
-            try resolved_cache.put(ref.num, indirect.obj);
-            return indirect.obj;
+            try resolved_cache.put(ref.num, object);
+            return object;
         },
         .compressed => {
             // Object is inside an object stream
-            return resolveCompressedObject(allocator, data, xref, entry, resolved_cache);
+            return resolveCompressedObject(allocator, data, xref, entry, resolved_cache, security);
         },
     }
 }
@@ -76,6 +94,7 @@ fn resolveCompressedObject(
     xref: *const XRefTable,
     entry: xref_mod.XRefEntry,
     resolved_cache: *std.AutoHashMap(u32, Object),
+    security: ?*const encryption.SecurityHandler,
 ) !Object {
     const objstm_num: u32 = @intCast(entry.offset);
     const index = entry.gen_or_index;
@@ -88,7 +107,12 @@ fn resolveCompressedObject(
     var p = parser.Parser.initAt(allocator, data, @intCast(objstm_entry.offset));
     const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
 
-    const stream = switch (indirect.obj) {
+    const objstm_obj = if (security) |handler|
+        handler.decryptObject(allocator, .{ .num = indirect.num, .gen = indirect.gen }, indirect.obj) catch return Object{ .null = {} }
+    else
+        indirect.obj;
+
+    const stream = switch (objstm_obj) {
         .stream => |s| s,
         else => return Object{ .null = {} },
     };
@@ -151,6 +175,15 @@ pub fn buildPageTree(
     data: []const u8,
     xref: *const XRefTable,
 ) PageTreeError![]Page {
+    return buildPageTreeWithSecurity(allocator, data, xref, null);
+}
+
+pub fn buildPageTreeWithSecurity(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    security: ?*const encryption.SecurityHandler,
+) PageTreeError![]Page {
     var resolved_cache = std.AutoHashMap(u32, Object).init(allocator);
     defer resolved_cache.deinit();
 
@@ -161,7 +194,7 @@ pub fn buildPageTree(
     };
 
     // Resolve catalog
-    const catalog = resolveRef(allocator, data, xref, root_ref, &resolved_cache) catch
+    const catalog = resolveRefWithSecurity(allocator, data, xref, root_ref, &resolved_cache, security) catch
         return PageTreeError.CatalogNotFound;
 
     const catalog_dict = switch (catalog) {
@@ -190,6 +223,7 @@ pub fn buildPageTree(
         allocator,
         data,
         xref,
+        security,
         &resolved_cache,
         &visited,
         &pages,
@@ -207,6 +241,7 @@ fn walkPageTree(
     allocator: std.mem.Allocator,
     data: []const u8,
     xref: *const XRefTable,
+    security: ?*const encryption.SecurityHandler,
     cache: *std.AutoHashMap(u32, Object),
     visited: *std.AutoHashMap(u32, void),
     pages: *std.ArrayList(Page),
@@ -224,7 +259,7 @@ fn walkPageTree(
     defer _ = visited.remove(node_ref.num);
 
     // Resolve node
-    const node = resolveRef(allocator, data, xref, node_ref, cache) catch
+    const node = resolveRefWithSecurity(allocator, data, xref, node_ref, cache, security) catch
         return PageTreeError.InvalidPageTree;
 
     const dict = switch (node) {
@@ -244,7 +279,7 @@ fn walkPageTree(
     var resources = inherited_resources;
     if (dict.get("Resources")) |res_obj| {
         const resolved = switch (res_obj) {
-            .reference => |r| resolveRef(allocator, data, xref, r, cache) catch res_obj,
+            .reference => |r| resolveRefWithSecurity(allocator, data, xref, r, cache, security) catch res_obj,
             else => res_obj,
         };
         if (resolved == .dict) {
@@ -266,6 +301,7 @@ fn walkPageTree(
                 allocator,
                 data,
                 xref,
+                security,
                 cache,
                 visited,
                 pages,
@@ -314,9 +350,21 @@ pub fn getPageContents(
     page: Page,
     cache: *std.AutoHashMap(u32, Object),
 ) ![]const u8 {
+    return getPageContentsWithSecurity(parse_allocator, scratch_allocator, data, xref, page, cache, null);
+}
+
+pub fn getPageContentsWithSecurity(
+    parse_allocator: std.mem.Allocator,
+    scratch_allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    page: Page,
+    cache: *std.AutoHashMap(u32, Object),
+    security: ?*const encryption.SecurityHandler,
+) ![]const u8 {
     const contents = page.dict.get("Contents") orelse return &[_]u8{};
 
-    return getStreamData(parse_allocator, scratch_allocator, data, xref, contents, cache);
+    return getStreamData(parse_allocator, scratch_allocator, data, xref, contents, cache, security);
 }
 
 fn getStreamData(
@@ -326,11 +374,12 @@ fn getStreamData(
     xref: *const XRefTable,
     obj: Object,
     cache: *std.AutoHashMap(u32, Object),
+    security: ?*const encryption.SecurityHandler,
 ) ![]const u8 {
     switch (obj) {
         .reference => |ref| {
-            const resolved = try resolveRef(parse_allocator, data, xref, ref, cache);
-            return getStreamData(parse_allocator, scratch_allocator, data, xref, resolved, cache);
+            const resolved = try resolveRefWithSecurity(parse_allocator, data, xref, ref, cache, security);
+            return getStreamData(parse_allocator, scratch_allocator, data, xref, resolved, cache, security);
         },
         .stream => |s| {
             const decompress = @import("decompress.zig");
@@ -347,7 +396,7 @@ fn getStreamData(
             errdefer result.deinit(scratch_allocator);
 
             for (arr) |item| {
-                const stream_data = try getStreamData(parse_allocator, scratch_allocator, data, xref, item, cache);
+                const stream_data = try getStreamData(parse_allocator, scratch_allocator, data, xref, item, cache, security);
                 // stream_data is arena-allocated, no need to free
                 try result.appendSlice(scratch_allocator, stream_data);
                 try result.append(scratch_allocator, '\n'); // Separate streams

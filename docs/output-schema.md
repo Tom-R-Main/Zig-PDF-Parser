@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.7.0`
+Current schema version: `0.8.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -30,9 +30,9 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.7.0` adds specialist protocol records. These are additive and keep the
-native Zig kernel deterministic: the parser can emit page/region requests for
-local OCR, table, formula, layout, or entity specialists without requiring any
+Schema `0.8.0` adds encrypted-document manifest metadata for known-password
+PDF parsing. Earlier schema `0.7.0` added specialist protocol records for local
+OCR, table, formula, layout, or entity specialists without requiring any
 specific external model package.
 
 ## Provenance Envelope
@@ -71,6 +71,35 @@ parser version, optional input SHA256, source path, page count, encryption and
 corrupt flags, extraction options, route counts, OCR/table/form/formula
 extraction counts, artifact counts, output artifact hashes, capability
 coverage, warnings, errors, and available output formats.
+
+The manifest includes an `encryption` object for encrypted and unencrypted
+documents:
+
+```json
+{
+  "encrypted": true,
+  "requires_password": true,
+  "authenticated": true,
+  "auth_type": "user",
+  "encryption_version": 4,
+  "security_revision": 4,
+  "key_bits": 128,
+  "stream_method": "aesv2",
+  "string_method": "aesv2",
+  "encrypt_metadata": true,
+  "weak_crypto": false,
+  "permissions": {
+    "raw": -4,
+    "extract": true,
+    "print_low_resolution": true,
+    "print_high_resolution": true
+  }
+}
+```
+
+Passwords are open-time inputs only and are never serialized. Permission flags
+are emitted as evidence; extraction proceeds by default after authentication
+unless a host application enforces its own policy.
 
 The manifest is intended to be a durable document-intelligence run record. Batch
 JSON and `artifact-jsonl` include `output_artifacts` entries with SHA256 hashes
@@ -256,6 +285,7 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 ```bash
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format stream-jsonl
+pdf-parser extract-adaptive --input encrypted.pdf --password-file .pdf-password --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 \
   --format artifact-jsonl --emit-specialist-requests requests.jsonl \
@@ -263,6 +293,7 @@ pdf-parser extract-adaptive --input doc.pdf --source-id external-123 \
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
+pdf-parser serve --host 0.0.0.0 --port 8080
 ```
 
 `jsonl` remains a compatibility format for reconciled span JSONL. Use
@@ -281,6 +312,26 @@ Minimal specialist config shape:
 }
 ```
 
-The config format is intentionally small. In schema `0.7.0`, it is adapter
+The config format is intentionally small. In schema `0.8.0`, it is adapter
 plumbing for future local subprocess invocation; the kernel never depends on a
 specific Python package or hosted model.
+
+## Host Packaging Modes
+
+The artifact schema is transport-independent. The CLI, C ABI, Python CFFI
+helper, and HTTP server all emit the same public records.
+
+- CLI subprocess: `extract-adaptive` is the recommended integration point for
+  workers, Cloud Run jobs, and ingestion queues.
+- C ABI: `pdf_parser_extract_adaptive_file(...)` and
+  `pdf_parser_extract_adaptive_memory(...)` return allocated JSON/JSONL buffers
+  plus explicit status/error fields. Callers free output with
+  `pdf_parser_free_buffer(...)` or `pdf_parser_result_clear(...)`.
+- HTTP server: `POST /v1/extract-adaptive` accepts a JSON body with
+  `input_path`, optional `source_id`, optional `document_id`, `format`,
+  `page_start`, `page_end`, `strict`, `permissive`, `password`,
+  `password_file`, `debug_assets_dir`, and `specialist_config_path`.
+
+The HTTP server is stateless and file-path based in this version. Upload,
+object-store, authentication, and job orchestration belong in the host app or
+worker layer.

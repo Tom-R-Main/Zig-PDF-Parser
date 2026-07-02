@@ -52,6 +52,13 @@ pub fn extractAdaptive(
             .offset = parse_error.offset,
         };
     }
+    const encryption_info = document.encryptionInfo();
+    var encryption_warning_storage: [2]schema.ManifestDiagnostic = undefined;
+    const encryption_warnings = schema.collectEncryptionWarnings(
+        &encryption_warning_storage,
+        encryption_info,
+        document.error_config.respect_permissions,
+    );
 
     const render_options = schema.RenderOptions{
         .document_id = options.document_id orelse document.source_path orelse "document",
@@ -60,7 +67,9 @@ pub fn extractAdaptive(
         .source_path = document.source_path,
         .page_count = document.pageCount(),
         .encrypted = document.isEncrypted(),
+        .encryption_info = encryption_info,
         .corrupt = document.errors.items.len > 0,
+        .warnings = encryption_warnings,
         .errors = parser_errors,
         .include_debug_asset_refs = options.include_debug_asset_refs,
         .debug_assets_dir = options.debug_assets_dir,

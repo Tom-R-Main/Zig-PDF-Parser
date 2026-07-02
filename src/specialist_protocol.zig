@@ -10,7 +10,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.7.0";
+pub const schema_version = "0.8.0";
 
 pub const SpecialistKind = enum {
     ocr,

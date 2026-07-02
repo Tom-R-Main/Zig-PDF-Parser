@@ -24,6 +24,7 @@ pub const pagetree = @import("pagetree.zig");
 pub const encoding = @import("encoding.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const decompress = @import("decompress.zig");
+pub const encryption = @import("encryption.zig");
 pub const simd = @import("simd.zig");
 pub const layout = @import("layout.zig");
 pub const structtree = @import("structtree.zig");
@@ -99,6 +100,10 @@ pub const StructElement = structtree.StructElement;
 pub const MarkdownOptions = markdown.MarkdownOptions;
 pub const MarkdownRenderer = markdown.MarkdownRenderer;
 pub const FullTextMode = enum { accuracy, fast };
+pub const EncryptionInfo = encryption.Info;
+pub const EncryptionAuthType = encryption.AuthType;
+pub const EncryptionCryptMethod = encryption.CryptMethod;
+pub const EncryptionPermissions = encryption.Permissions;
 
 /// Error handling configuration
 pub const ErrorConfig = struct {
@@ -112,6 +117,14 @@ pub const ErrorConfig = struct {
     continue_on_encoding_error: bool = true,
     /// Log errors to stderr?
     log_errors: bool = false,
+    /// Optional password for encrypted PDFs.
+    password: ?[]const u8 = null,
+    /// Try the empty password path when no password is supplied.
+    allow_empty_password: bool = true,
+    /// Record permissions by default, but do not block extraction.
+    respect_permissions: bool = false,
+    /// Allow reading weak legacy encryption such as RC4-40/128.
+    allow_weak_crypto: bool = true,
 
     pub fn default() ErrorConfig {
         return .{};
@@ -123,6 +136,7 @@ pub const ErrorConfig = struct {
             .continue_on_parse_error = false,
             .continue_on_missing_object = false,
             .continue_on_encoding_error = false,
+            .allow_empty_password = true,
         };
     }
 
@@ -184,6 +198,9 @@ pub const Document = struct {
     /// Error configuration
     error_config: ErrorConfig,
 
+    /// PDF Standard Security Handler, present after successful authentication.
+    security: ?encryption.SecurityHandler = null,
+
     /// Accumulated errors
     errors: std.ArrayList(ParseErrorRecord),
 
@@ -235,7 +252,6 @@ pub const Document = struct {
         }
 
         const doc = try allocator.create(Document);
-        errdefer allocator.destroy(doc);
 
         doc.* = .{
             .data = data,
@@ -248,11 +264,13 @@ pub const Document = struct {
             .allocator = allocator,
             .parsing_arena = std.heap.ArenaAllocator.init(allocator),
             .error_config = config,
+            .security = null,
             .errors = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
 
+        errdefer doc.close();
         try doc.parseDocument();
         return doc;
     }
@@ -260,7 +278,6 @@ pub const Document = struct {
     /// Open from owned allocated memory (Windows - will be freed on close via allocator.free)
     fn openFromMemoryOwnedAlloc(allocator: std.mem.Allocator, data: []align(std.heap.page_size_min) u8, config: ErrorConfig) !*Document {
         const doc = try allocator.create(Document);
-        errdefer allocator.destroy(doc);
 
         doc.* = .{
             .data = data,
@@ -273,11 +290,13 @@ pub const Document = struct {
             .allocator = allocator,
             .parsing_arena = std.heap.ArenaAllocator.init(allocator),
             .error_config = config,
+            .security = null,
             .errors = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
 
+        errdefer doc.close();
         try doc.parseDocument();
         return doc;
     }
@@ -286,7 +305,6 @@ pub const Document = struct {
     /// Caller must keep the memory alive until close().
     pub fn openFromMemoryUnsafe(allocator: std.mem.Allocator, data: []const u8, config: ErrorConfig) !*Document {
         const doc = try allocator.create(Document);
-        errdefer allocator.destroy(doc);
 
         doc.* = .{
             .data = data,
@@ -299,11 +317,13 @@ pub const Document = struct {
             .allocator = allocator,
             .parsing_arena = std.heap.ArenaAllocator.init(allocator),
             .error_config = config,
+            .security = null,
             .errors = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
 
+        errdefer doc.close();
         try doc.parseDocument();
         return doc;
     }
@@ -342,21 +362,10 @@ pub const Document = struct {
             }
         };
 
-        // Check for encryption
-        if (self.xref_table.trailer.get("Encrypt") != null) {
-            if (!self.error_config.continue_on_parse_error) {
-                return error.EncryptedPdf;
-            }
-            try self.errors.append(self.allocator, .{
-                .kind = .encrypted,
-                .offset = 0,
-                .message = "PDF is encrypted; text extraction will produce incorrect results",
-            });
-            // Still parse pages so page_count works, but extraction will be unreliable
-        }
+        try self.authenticateIfEncrypted(arena);
 
         // Build page tree (uses arena for all allocations)
-        const pages_slice = pagetree.buildPageTree(arena, self.data, &self.xref_table) catch |err| {
+        const pages_slice = pagetree.buildPageTreeWithSecurity(arena, self.data, &self.xref_table, self.securityHandler()) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
                     .kind = .syntax_error,
@@ -375,6 +384,75 @@ pub const Document = struct {
         }
     }
 
+    fn authenticateIfEncrypted(self: *Document, arena: std.mem.Allocator) !void {
+        const encrypt_obj = self.xref_table.trailer.get("Encrypt") orelse return;
+        const encrypt_ref: ?ObjRef = switch (encrypt_obj) {
+            .reference => |r| r,
+            else => null,
+        };
+        const resolved = switch (encrypt_obj) {
+            .reference => |r| pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch encrypt_obj,
+            else => encrypt_obj,
+        };
+        const encrypt_dict = switch (resolved) {
+            .dict => |d| d,
+            else => {
+                if (!self.error_config.continue_on_parse_error) return error.InvalidEncryptionDictionary;
+                try self.errors.append(self.allocator, .{
+                    .kind = .encrypted,
+                    .offset = 0,
+                    .message = "PDF encryption dictionary is malformed",
+                });
+                return;
+            },
+        };
+
+        const security = encryption.parseAndAuthenticate(
+            arena,
+            encrypt_ref,
+            encrypt_dict,
+            self.xref_table.trailer,
+            self.error_config.password,
+            self.error_config.allow_empty_password,
+        ) catch |err| {
+            if (!self.error_config.continue_on_parse_error) return err;
+            try self.errors.append(self.allocator, .{
+                .kind = .encrypted,
+                .offset = 0,
+                .message = switch (err) {
+                    error.InvalidPassword => "PDF is encrypted and requires a valid password",
+                    error.UnsupportedSecurityHandler => "PDF uses an unsupported encryption security handler",
+                    error.UnsupportedCryptFilter => "PDF uses an unsupported encryption crypt filter",
+                    error.UnsupportedRevision => "PDF uses an unsupported encryption revision",
+                    error.UnsupportedVersion => "PDF uses an unsupported encryption version",
+                    error.WeakCryptoDisabled => "PDF uses weak encryption and weak crypto reading is disabled",
+                    error.PermissionDenied => "PDF permissions disallow text extraction",
+                    else => "PDF encryption could not be authenticated",
+                },
+            });
+            return;
+        };
+        if (security.weak_crypto and !self.error_config.allow_weak_crypto) {
+            if (!self.error_config.continue_on_parse_error) return error.WeakCryptoDisabled;
+            try self.errors.append(self.allocator, .{
+                .kind = .encrypted,
+                .offset = 0,
+                .message = "PDF uses weak encryption and weak crypto reading is disabled",
+            });
+            return;
+        }
+        if (!security.permissions.extract and self.error_config.respect_permissions) {
+            if (!self.error_config.continue_on_parse_error) return error.PermissionDenied;
+            try self.errors.append(self.allocator, .{
+                .kind = .encrypted,
+                .offset = 0,
+                .message = "PDF permissions disallow text extraction",
+            });
+            return;
+        }
+        self.security = security;
+    }
+
     /// Lazy-load fonts for a specific page (called on first extraction)
     fn ensurePageFonts(self: *Document, page_idx: usize) void {
         const arena = self.parsing_arena.allocator();
@@ -384,7 +462,7 @@ pub const Document = struct {
         const fonts_dict_obj = resources.get("Font") orelse return;
 
         const fonts_dict_resolved = switch (fonts_dict_obj) {
-            .reference => |ref| pagetree.resolveRef(arena, self.data, &self.xref_table, ref, &self.object_cache) catch null,
+            .reference => |ref| self.resolve(ref) catch null,
             else => fonts_dict_obj,
         };
 
@@ -418,7 +496,7 @@ pub const Document = struct {
 
             // Resolve font dictionary
             const font_obj = switch (entry.value) {
-                .reference => |ref| pagetree.resolveRef(arena, self.data, &self.xref_table, ref, &self.object_cache) catch continue,
+                .reference => |ref| self.resolve(ref) catch continue,
                 .dict => entry.value,
                 else => continue,
             };
@@ -433,10 +511,11 @@ pub const Document = struct {
                 data: []const u8,
                 xref_table: *const xref.XRefTable,
                 object_cache: *std.AutoHashMap(u32, parser.Object),
+                security: ?*const encryption.SecurityHandler,
 
                 fn resolve(self_resolver: @This(), obj: parser.Object) parser.Object {
                     return switch (obj) {
-                        .reference => |ref| pagetree.resolveRef(self_resolver.arena, self_resolver.data, self_resolver.xref_table, ref, self_resolver.object_cache) catch obj,
+                        .reference => |ref| pagetree.resolveRefWithSecurity(self_resolver.arena, self_resolver.data, self_resolver.xref_table, ref, self_resolver.object_cache, self_resolver.security) catch obj,
                         else => obj,
                     };
                 }
@@ -446,6 +525,7 @@ pub const Document = struct {
                 .data = self.data,
                 .xref_table = &self.xref_table,
                 .object_cache = &self.object_cache,
+                .security = self.securityHandler(),
             };
 
             // Use the comprehensive parseFontEncoding
@@ -508,6 +588,19 @@ pub const Document = struct {
         return self.xref_table.trailer.get("Encrypt") != null;
     }
 
+    pub fn isAuthenticated(self: *const Document) bool {
+        return self.security != null;
+    }
+
+    pub fn encryptionInfo(self: *const Document) encryption.Info {
+        if (self.security) |security| return security.info();
+        return .{ .encrypted = self.isEncrypted() };
+    }
+
+    fn securityHandler(self: *const Document) ?*const encryption.SecurityHandler {
+        return if (self.security) |*security| security else null;
+    }
+
     /// Get number of pages
     pub fn pageCount(self: *const Document) usize {
         return self.pages.items.len;
@@ -526,12 +619,13 @@ pub const Document = struct {
 
     /// Resolve an object reference
     pub fn resolve(self: *Document, ref: ObjRef) !Object {
-        return pagetree.resolveRef(
+        return pagetree.resolveRefWithSecurity(
             self.parsing_arena.allocator(),
             self.data,
             &self.xref_table,
             ref,
             &self.object_cache,
+            self.securityHandler(),
         );
     }
 
@@ -546,13 +640,14 @@ pub const Document = struct {
         const scratch_allocator = scratch_arena.allocator();
 
         // Get content stream (allocated from arena, no need to free)
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsWithSecurity(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.securityHandler(),
         ) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
@@ -581,6 +676,7 @@ pub const Document = struct {
             .font_cache = &self.font_cache,
             .page_num = page_num,
             .depth = 0,
+            .security = self.securityHandler(),
         };
         try extractTextFromContentFull(content, page.resources, &ctx, writer);
     }
@@ -603,13 +699,14 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsWithSecurity(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.securityHandler(),
         ) catch return &.{};
 
         if (content.len == 0) return &.{};
@@ -713,7 +810,7 @@ pub const Document = struct {
             else => return false,
         };
 
-        const catalog = pagetree.resolveRef(arena, self.data, &self.xref_table, root_ref, &self.object_cache) catch return false;
+        const catalog = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, root_ref, &self.object_cache, self.securityHandler()) catch return false;
 
         const catalog_dict = switch (catalog) {
             .dict => |d| d,
@@ -787,13 +884,14 @@ pub const Document = struct {
         const page = self.pages.items[page_num];
 
         // Get content stream
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsWithSecurity(
             parse_allocator,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.securityHandler(),
         ) catch return self.withPageFormFields(page_num, allocator, try allocator.alloc(u8, 0));
 
         if (content.len == 0) {
@@ -978,7 +1076,7 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
         const page = self.pages.items[page_num];
-        const content = pagetree.getPageContents(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache) catch return output.toOwnedSlice(allocator);
+        const content = pagetree.getPageContentsWithSecurity(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache, self.securityHandler()) catch return output.toOwnedSlice(allocator);
 
         self.ensurePageFonts(page_num);
         try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, runtime.arrayListWriter(&output, allocator));
@@ -1050,13 +1148,14 @@ pub const Document = struct {
                 const scratch_allocator = scratch_arena.allocator();
 
                 const page = self.pages.items[page_num];
-                const content = pagetree.getPageContents(
+                const content = pagetree.getPageContentsWithSecurity(
                     parse_allocator,
                     scratch_allocator,
                     self.data,
                     &self.xref_table,
                     page,
                     &self.object_cache,
+                    self.securityHandler(),
                 ) catch continue;
 
                 if (content.len == 0) continue;
@@ -1252,7 +1351,7 @@ pub const Document = struct {
             .reference => |r| r,
             else => return null,
         };
-        const catalog = pagetree.resolveRef(arena, self.data, &self.xref_table, root_ref, &self.object_cache) catch return null;
+        const catalog = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, root_ref, &self.object_cache, self.securityHandler()) catch return null;
         const catalog_dict = switch (catalog) {
             .dict => |d| d,
             else => return null,
@@ -1263,7 +1362,7 @@ pub const Document = struct {
         const pl_dict = switch (pl_obj) {
             .dict => |d| d,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return null;
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return null;
                 break :blk switch (obj) {
                     .dict => |d| d,
                     else => return null,
@@ -1278,7 +1377,7 @@ pub const Document = struct {
             break :blk switch (nums_obj) {
                 .array => |a| a,
                 .reference => |r| inner: {
-                    const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return null;
+                    const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return null;
                     break :inner switch (obj) {
                         .array => |a| a,
                         else => return null,
@@ -1304,7 +1403,7 @@ pub const Document = struct {
             const label_obj = switch (nums_arr[i + 1]) {
                 .dict => |d| d,
                 .reference => |r| inner: {
-                    const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch continue;
+                    const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch continue;
                     break :inner switch (obj) {
                         .dict => |d| d,
                         else => continue,
@@ -1528,7 +1627,7 @@ pub const Document = struct {
         const annots_arr = switch (annots_obj) {
             .array => |a| a,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch
                     return allocator.alloc(Link, 0);
                 break :blk switch (obj) {
                     .array => |a| a,
@@ -1550,7 +1649,7 @@ pub const Document = struct {
             const annot_dict = switch (annot_obj) {
                 .dict => |d| d,
                 .reference => |r| blk: {
-                    const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch continue;
+                    const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch continue;
                     break :blk switch (obj) {
                         .dict => |d| d,
                         else => continue,
@@ -1574,7 +1673,7 @@ pub const Document = struct {
                 const action = switch (action_obj) {
                     .dict => |d| d,
                     .reference => |r| blk: {
-                        const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch null;
+                        const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch null;
                         break :blk if (obj) |o| switch (o) {
                             .dict => |d| d,
                             else => null,
@@ -1649,7 +1748,7 @@ pub const Document = struct {
         const arr = switch (dest_obj) {
             .array => |a| a,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return null;
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return null;
                 break :blk switch (obj) {
                     .array => |a| a,
                     else => return null,
@@ -1778,13 +1877,14 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsWithSecurity(
             arena,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.securityHandler(),
         ) catch return allocator.alloc(ImageInfo, 0);
 
         if (content.len == 0) return allocator.alloc(ImageInfo, 0);
@@ -1862,7 +1962,7 @@ pub const Document = struct {
         const xobjects = switch (xobjects_obj) {
             .dict => |d| d,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return null;
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return null;
                 break :blk switch (obj) {
                     .dict => |d| d,
                     else => return null,
@@ -1875,7 +1975,7 @@ pub const Document = struct {
         const xobj_stream = switch (xobj_obj) {
             .stream => |s| s,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return null;
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return null;
                 break :blk switch (obj) {
                     .stream => |s| s,
                     else => return null,
@@ -1909,13 +2009,14 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContents(
+        const content = pagetree.getPageContentsWithSecurity(
             arena,
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
+            self.securityHandler(),
         ) catch return allocator.alloc(specialists.RulingLine, 0);
 
         if (content.len == 0) return allocator.alloc(specialists.RulingLine, 0);
@@ -2096,7 +2197,7 @@ pub const Document = struct {
             .reference => |r| r,
             else => return allocator.alloc(FormField, 0),
         };
-        const catalog = pagetree.resolveRef(arena, self.data, &self.xref_table, root_ref, &self.object_cache) catch
+        const catalog = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, root_ref, &self.object_cache, self.securityHandler()) catch
             return allocator.alloc(FormField, 0);
         const catalog_dict = switch (catalog) {
             .dict => |d| d,
@@ -2108,7 +2209,7 @@ pub const Document = struct {
         const acroform = switch (acroform_obj) {
             .dict => |d| d,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch
                     return allocator.alloc(FormField, 0);
                 break :blk switch (obj) {
                     .dict => |d| d,
@@ -2123,7 +2224,7 @@ pub const Document = struct {
         const fields_arr = switch (fields_obj) {
             .array => |a| a,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch
                     return allocator.alloc(FormField, 0);
                 break :blk switch (obj) {
                     .array => |a| a,
@@ -2163,7 +2264,7 @@ pub const Document = struct {
         const field_dict = switch (field_obj) {
             .dict => |d| d,
             .reference => |r| blk: {
-                const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch return;
+                const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch return;
                 break :blk switch (obj) {
                     .dict => |d| d,
                     else => return,
@@ -2193,7 +2294,7 @@ pub const Document = struct {
             const kids_arr = switch (kids_obj) {
                 .array => |a| a,
                 .reference => |r| blk: {
-                    const obj = pagetree.resolveRef(arena, self.data, &self.xref_table, r, &self.object_cache) catch {
+                    const obj = pagetree.resolveRefWithSecurity(arena, self.data, &self.xref_table, r, &self.object_cache, self.securityHandler()) catch {
                         allocator.free(full_name);
                         return;
                     };
@@ -2374,6 +2475,7 @@ const ExtractionContext = struct {
     font_cache: *const std.StringHashMap(encoding.FontEncoding),
     page_num: usize,
     depth: u8, // Recursion depth for nested Form XObjects
+    security: ?*const encryption.SecurityHandler,
 
     const MAX_DEPTH: u8 = 10; // Prevent infinite recursion
 };
@@ -2798,7 +2900,7 @@ fn handleDoOperator(
     const xobjects = switch (xobjects_obj) {
         .dict => |d| d,
         .reference => |ref| blk: {
-            const resolved = pagetree.resolveRef(ctx.parse_allocator, ctx.data, ctx.xref_table, ref, @constCast(ctx.object_cache)) catch return;
+            const resolved = pagetree.resolveRefWithSecurity(ctx.parse_allocator, ctx.data, ctx.xref_table, ref, @constCast(ctx.object_cache), ctx.security) catch return;
             break :blk switch (resolved) {
                 .dict => |d| d,
                 else => return,
@@ -2812,7 +2914,7 @@ fn handleDoOperator(
     const xobj_resolved = switch (xobj) {
         .stream => |s| s,
         .reference => |ref| blk: {
-            const resolved = pagetree.resolveRef(ctx.parse_allocator, ctx.data, ctx.xref_table, ref, @constCast(ctx.object_cache)) catch return;
+            const resolved = pagetree.resolveRefWithSecurity(ctx.parse_allocator, ctx.data, ctx.xref_table, ref, @constCast(ctx.object_cache), ctx.security) catch return;
             break :blk switch (resolved) {
                 .stream => |s| s,
                 else => return,
@@ -2844,6 +2946,7 @@ fn handleDoOperator(
         .font_cache = ctx.font_cache,
         .page_num = ctx.page_num,
         .depth = ctx.depth + 1,
+        .security = ctx.security,
     };
 
     extractContentStream(form_content, .{ .stream = .{

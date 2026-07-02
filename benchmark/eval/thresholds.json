@@ -1,0 +1,23 @@
+{
+  "benchmark_schema_version": "0.1.0",
+  "description": "Conservative default regression thresholds for the checked-in tiny corpus. Lower-is-better metrics may increase by at most max_regression; higher-is-better metrics may decrease by at most max_regression.",
+  "metrics": {
+    "cer": { "direction": "lower", "max_regression": 0.02, "required": false },
+    "wer": { "direction": "lower", "max_regression": 0.02, "required": false },
+    "normalized_edit_distance": { "direction": "lower", "max_regression": 0.02, "required": false },
+    "token_f1": { "direction": "higher", "max_regression": 0.02, "required": false },
+    "reading_order_score": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_cell_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_span_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_role_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_rowspan_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_colspan_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_page_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_continuation_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "table_source_span_coverage": { "direction": "higher", "max_regression": 0.05, "required": false },
+    "formula_structure_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "form_field_accuracy": { "direction": "higher", "max_regression": 0.03, "required": false },
+    "latency_ms": { "direction": "lower", "max_regression": 25.0, "required": false },
+    "peak_rss_mb": { "direction": "lower", "max_regression": 32.0, "required": false }
+  }
+}

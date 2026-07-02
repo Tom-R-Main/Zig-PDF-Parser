@@ -10,6 +10,7 @@ kernel into a hybrid, adaptive parser.
 - Multiple decompression filters: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength
 - Font encoding support: WinAnsi, MacRoman, ToUnicode CMap
 - XRef table and stream parsing (PDF 1.5+)
+- Known-password Standard Security Handler decryption for encrypted PDFs
 - Configurable error handling (strict or permissive)
 - Structure tree extraction for tagged PDFs (PDF/UA)
 - Geometric (Y→X) reading order for non-tagged PDFs
@@ -24,6 +25,8 @@ kernel into a hybrid, adaptive parser.
   low-confidence regions, and span/block ids
 - Specialist protocol records for OCR/table/formula/layout/entity adapters
 - JSON inspection and trace output for page and region routing decisions
+- Corpus benchmark scorecards for parser versions, external tools, private
+  manifests, and CI quality gates
 
 ## Performance Benchmark
 
@@ -50,6 +53,14 @@ zig build eval -- --adaptive \
   --ocr-executable tesseract \
   --ocr-rasterizer pdftoppm \
   --manifest benchmark/eval/corpus/manifest.tsv
+zig build benchmark-eval
+pdf-parser benchmark \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --suite-id tiny-corpus \
+  --tools pdf-parser:adaptive,pdf-parser:native \
+  --thresholds benchmark/eval/thresholds.json \
+  --output benchmark/eval/outputs/scorecards/tiny-corpus.json \
+  --jsonl benchmark/eval/outputs/scorecards/tiny-corpus.records.jsonl
 .venv/bin/python benchmark/eval/compare.py \
   --pdf-parser-adaptive \
   --tools pdf-parser,pymupdf,pypdfium2,pdfplumber \
@@ -62,6 +73,15 @@ financial tables, AcroForms, and corrupt/adversarial PDFs. Financial table truth
 can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and bbox-aware
 provenance. Form truth asserts field name/type/value sequences. Formula truth
 can assert both text and simple structure records.
+
+`pdf-parser benchmark` is the product-facing corpus runner. It emits a full
+scorecard JSON plus optional record-oriented JSONL with `benchmark_run`,
+`benchmark_lane`, `benchmark_document_result`, `benchmark_category_summary`,
+`benchmark_regression`, and `benchmark_scorecard` records. Tool lanes are
+neutral: use `pdf-parser:native`, `pdf-parser:adaptive`, or
+`command:<id>=<command template with {pdf}>`. `--candidate-command` and
+`--baseline-command` compare two pdf-parser-compatible executables and
+`--fail-on-regression` makes the scorecard usable as a CI ingestion gate.
 
 ## Requirements
 
@@ -124,6 +144,8 @@ pdf-parser extract --adaptive --trace doc.pdf
 pdf-parser inspect complexity doc.pdf --format json
 pdf-parser info document.pdf                 # Show document info
 pdf-parser bench document.pdf                # Run benchmark
+pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv \
+  --tools pdf-parser:adaptive --output /tmp/pdf-parser-scorecard.json
 ```
 
 Adaptive extraction keeps fast native extraction on the default path while
@@ -146,7 +168,7 @@ debug assets, then `document_finished`. `jsonl` remains a compatibility span
 stream, and `rag-jsonl` remains chunk-only. The schema is documented in
 [docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets are formal `debug_asset` records in schema `0.7.0`. By
+Visual review assets are formal `debug_asset` records in schema `0.8.0`. By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
 `page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`, `document.hocr.html`,
@@ -167,6 +189,83 @@ pdf-parser extract-adaptive \
 `document_id`. It is emitted on the manifest, artifacts, chunks, and provenance
 envelopes so any pipeline can join records back to its own source table,
 object-store key, or ingestion run.
+
+Encrypted PDFs are opened with a supplied known password, not cracked:
+
+```bash
+pdf-parser extract encrypted.pdf --password "$PDF_PASSWORD"
+pdf-parser extract-adaptive \
+  --input encrypted.pdf \
+  --source-id external-system-id \
+  --password-file .pdf-password \
+  --format artifact-jsonl
+```
+
+`--password-file` reads one local file and ignores trailing CR/LF bytes. Do not
+use it with secret files you do not intend the worker process to read. The
+parser records encryption/authentication metadata in the document manifest, but
+never emits the password.
+
+### Packaging For Host Apps
+
+Use three integration modes, in this order:
+
+1. **CLI subprocess**: recommended default for workers, Siftable ingestion, and
+   Cloud Run jobs. It is easiest to isolate, supervise, retry, and deploy:
+
+   ```bash
+   pdf-parser extract-adaptive \
+     --input doc.pdf \
+     --source-id external-system-id \
+     --format artifact-jsonl
+   pdf-parser extract-adaptive \
+     --input doc.pdf \
+     --source-id external-system-id \
+     --format stream-jsonl
+   ```
+
+2. **C ABI**: use `zig build shared` and include `pdf_parser.h` for Python,
+   Node, native, or other host bindings. The ABI returns the same versioned
+   JSON/JSONL artifacts as allocated buffers; callers must release returned
+   buffers with `pdf_parser_free_buffer(...)` or clear the full result with
+   `pdf_parser_result_clear(...)`.
+
+   ```c
+   PdfParserAdaptiveOptions options = {
+       .abi_version = PDF_PARSER_ABI_VERSION,
+       .format = PDF_PARSER_FORMAT_ARTIFACT_JSONL,
+       .input_path = "doc.pdf",
+       .source_id = "external-system-id",
+       .password = "known-password",
+       .permissive = 1,
+   };
+   PdfParserAdaptiveResult result = {0};
+   int status = pdf_parser_extract_adaptive_file(&options, &result);
+   if (status == PDF_PARSER_STATUS_OK) {
+       /* result.output/result.output_len is artifact JSONL */
+   }
+   pdf_parser_result_clear(&result);
+   ```
+
+   Python exposes the same surface as `zpdf.extract_adaptive(...,
+   password="known-password")` or `password_file=".pdf-password"`. Node
+   wrappers should prefer Node-API over direct V8 bindings for ABI stability,
+   while Siftable can continue using the subprocess path first.
+
+3. **HTTP server**: useful for later long-running batch corpora or internal
+   services. It is a stateless wrapper around the same adapter:
+
+   ```bash
+   pdf-parser serve --host 0.0.0.0 --port 8080
+   curl -s http://localhost:8080/v1/extract-adaptive \
+     -H 'content-type: application/json' \
+     -d '{"input_path":"doc.pdf","source_id":"external-system-id","format":"stream-jsonl"}'
+   ```
+
+   Endpoints are `GET /healthz`, `GET /v1/capabilities`, and
+   `POST /v1/extract-adaptive`. Cloud Run services should bind to
+   `0.0.0.0:$PORT`; Cloud Run jobs should use the CLI subprocess mode and exit
+   when the document or manifest finishes.
 
 The specialist protocol keeps the Zig kernel deterministic while making local
 specialists swappable. Route traces identify regions that need OCR, table,
@@ -258,6 +357,7 @@ src/
 ├── root.zig         # Document API and core types
 ├── main.zig         # CLI entry point
 ├── capi.zig         # C ABI exports for FFI
+├── server.zig       # Stateless HTTP host adapter
 ├── wapi.zig         # WASM API exports
 ├── parser.zig       # PDF object parser
 ├── xref.zig         # XRef table/stream parsing
@@ -279,11 +379,13 @@ src/
 ├── ocr.zig          # OCR routing adapter and Tesseract subprocess/C-FFI hooks
 ├── eval.zig         # Evaluation metrics
 ├── eval_runner.zig  # Eval CLI
+├── benchmark_runner.zig # Corpus benchmark scorecards and regression gates
 ├── eval_corpus_writer.zig # Deterministic fixture writer
 └── simd.zig         # SIMD-accelerated parsing
 
+include/pdf_parser.h # Public C ABI header
 python/zpdf/         # Python bindings (cffi, legacy package name)
-benchmark/eval/      # Tiny eval corpus, truth labels, and comparator
+benchmark/eval/      # Tiny eval corpus, truth labels, thresholds, scorecards, comparator
 examples/            # Usage examples
 ```
 
@@ -309,7 +411,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.7.0`. Every emitted record carries a `provenance` envelope with document and
+`0.8.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

@@ -5,6 +5,7 @@ from pathlib import Path
 # Test files
 TEST_DIR = Path(__file__).parent.parent.parent
 TEST_PDF = TEST_DIR / "test" / "test.pdf"
+ADAPTIVE_TEST_PDF = TEST_DIR / "benchmark" / "eval" / "corpus" / "clean_born_digital" / "clean-native.pdf"
 TAGGED_PDF = TEST_DIR / "benchmark" / "PDFUA-Ref-2-08_BookChapter.pdf"
 ACROBAT_PDF = TEST_DIR / "test" / "acrobat_reference.pdf"
 
@@ -112,6 +113,30 @@ class TestTextExtraction:
         with zpdf.Document(TEST_PDF) as doc:
             with pytest.raises(ValueError):
                 _ = doc.extract_all(mode="invalid")
+
+    @pytest.mark.skipif(not ADAPTIVE_TEST_PDF.exists(), reason="adaptive smoke PDF not available")
+    def test_extract_adaptive_c_abi_artifact_jsonl(self):
+        output = zpdf.extract_adaptive(
+            ADAPTIVE_TEST_PDF,
+            source_id="external-python-smoke",
+            password=None,
+            format="artifact-jsonl",
+        )
+        first_line = output.splitlines()[0]
+        assert '"record_type":"document_manifest"' in first_line
+        assert '"source_id":"external-python-smoke"' in output
+
+    @pytest.mark.skipif(not ADAPTIVE_TEST_PDF.exists(), reason="adaptive smoke PDF not available")
+    def test_extract_adaptive_rejects_duplicate_password_sources(self, tmp_path):
+        password_file = tmp_path / "password.txt"
+        password_file.write_text("secret\n")
+        with pytest.raises(ValueError):
+            zpdf.extract_adaptive(
+                ADAPTIVE_TEST_PDF,
+                password="secret",
+                password_file=password_file,
+                format="artifact-jsonl",
+            )
 
 
 class TestTaggedPDF:

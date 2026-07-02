@@ -138,6 +138,65 @@ specialist adapters can report into the same records as they come online.
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.
 
+## Benchmark Scorecards
+
+Use `pdf-parser benchmark` when evaluation needs to behave like a product
+quality gate instead of a one-off report:
+
+```sh
+pdf-parser benchmark \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --suite-id tiny-corpus \
+  --tools pdf-parser:adaptive,pdf-parser:native \
+  --thresholds benchmark/eval/thresholds.json \
+  --output benchmark/eval/outputs/scorecards/tiny-corpus.json \
+  --jsonl benchmark/eval/outputs/scorecards/tiny-corpus.records.jsonl
+```
+
+The full JSON scorecard and JSONL stream use benchmark schema `0.1.0`, separate
+from adaptive extraction schemas. Records include `benchmark_run`,
+`benchmark_suite`, `benchmark_lane`, `benchmark_document_result`,
+`benchmark_category_summary`, `benchmark_regression`, and
+`benchmark_scorecard`. Each record carries `run_id`, `suite_id`,
+`manifest_sha256`, `tool_id`, `category`, timing fields, status, and any
+warnings/errors represented as skipped document results.
+
+Tool lanes are explicit:
+
+```sh
+pdf-parser benchmark --tools pdf-parser:native,pdf-parser:adaptive
+pdf-parser benchmark --tools 'command:my-tool=my-extractor --text {pdf}'
+```
+
+Unknown optional tools are emitted as skipped unless `--require-tools` is set.
+The legacy Python comparator remains useful for PyMuPDF, pypdfium2, and
+pdfplumber; a host can wrap those as `command:<id>=...` lanes when it needs them
+inside the Zig scorecard.
+
+Parser version comparison is executable-based:
+
+```sh
+pdf-parser benchmark \
+  --manifest private/manifest.tsv \
+  --baseline-command ./releases/pdf-parser-0.7.0 \
+  --candidate-command ./zig-out/bin/pdf-parser \
+  --thresholds benchmark/eval/thresholds.json \
+  --fail-on-regression
+```
+
+`benchmark/eval/thresholds.json` defines conservative default regression
+tolerance. Lower-is-better metrics such as `cer`, `wer`, normalized edit
+distance, latency, and RSS may increase only by their configured
+`max_regression`. Higher-is-better metrics such as token F1, reading order,
+table structure, formula structure, and form accuracy may decrease only by
+their configured `max_regression`. Metrics that are `null` do not fail unless
+marked `required`.
+
+For Siftable or another ingestion pipeline, map the scorecard JSONL directly:
+`benchmark_run` to the processing run, `benchmark_document_result` to per-source
+quality evidence, `benchmark_category_summary` to class-level gates, and
+`benchmark_regression` to reviewable blocking annotations.
+
 ## Comparator Baselines
 
 Use the lightweight comparator for a side-by-side view over the manifest:

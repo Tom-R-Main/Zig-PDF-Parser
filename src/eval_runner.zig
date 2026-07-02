@@ -13,12 +13,12 @@ const testpdf = @import("testpdf.zig");
 
 pub const main = runtime.MainWithArgs(mainInner).main;
 
-const ExtractionMode = enum {
+pub const ExtractionMode = enum {
     native,
     adaptive,
 };
 
-const Options = struct {
+pub const Options = struct {
     pdf_path: ?[]const u8 = null,
     manifest_path: ?[]const u8 = null,
     truth_text_path: ?[]const u8 = null,
@@ -86,7 +86,7 @@ fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
     try writeOutput(options.output_path, jsonl);
 }
 
-const ManifestEntry = struct {
+pub const ManifestEntry = struct {
     category: eval.CorpusCategory,
     doc_id: []const u8,
     pdf_path: []const u8,
@@ -98,14 +98,14 @@ const ManifestEntry = struct {
     truth_form_json_path: ?[]const u8 = null,
 };
 
-const ExpectedRouteCounts = struct {
+pub const ExpectedRouteCounts = struct {
     doc_id: []const u8,
     ocr_pages: ?u32 = null,
     table_regions: ?u32 = null,
     formula_regions: ?u32 = null,
 };
 
-fn runManifest(
+pub fn runManifest(
     allocator: std.mem.Allocator,
     base_options: Options,
     manifest_path: []const u8,
@@ -160,12 +160,12 @@ fn runManifest(
     return out.toOwnedSlice(allocator);
 }
 
-fn inferMetadataPath(allocator: std.mem.Allocator, manifest_path: []const u8) ![]u8 {
+pub fn inferMetadataPath(allocator: std.mem.Allocator, manifest_path: []const u8) ![]u8 {
     const dir = std.fs.path.dirname(manifest_path) orelse ".";
     return std.fmt.allocPrint(allocator, "{s}/metadata.jsonl", .{dir});
 }
 
-fn parseMetadataRouteCounts(allocator: std.mem.Allocator, metadata: []const u8) ![]ExpectedRouteCounts {
+pub fn parseMetadataRouteCounts(allocator: std.mem.Allocator, metadata: []const u8) ![]ExpectedRouteCounts {
     var counts: std.ArrayList(ExpectedRouteCounts) = .empty;
     errdefer counts.deinit(allocator);
 
@@ -185,14 +185,14 @@ fn parseMetadataRouteCounts(allocator: std.mem.Allocator, metadata: []const u8) 
     return counts.toOwnedSlice(allocator);
 }
 
-fn findExpectedRouteCounts(counts: []const ExpectedRouteCounts, doc_id: []const u8) ?ExpectedRouteCounts {
+pub fn findExpectedRouteCounts(counts: []const ExpectedRouteCounts, doc_id: []const u8) ?ExpectedRouteCounts {
     for (counts) |entry| {
         if (std.mem.eql(u8, entry.doc_id, doc_id)) return entry;
     }
     return null;
 }
 
-fn parseManifestLine(raw_line: []const u8) !?ManifestEntry {
+pub fn parseManifestLine(raw_line: []const u8) !?ManifestEntry {
     const line = std.mem.trim(u8, raw_line, " \t\r\n");
     if (line.len == 0 or line[0] == '#') return null;
 
@@ -230,7 +230,7 @@ fn docIdForMetrics(options: Options, pdf_path: []const u8) []const u8 {
     return options.doc_id orelse std.fs.path.basename(pdf_path);
 }
 
-fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
+pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 {
     const pdf_path = options.pdf_path orelse return error.MissingInput;
     var truth_text: ?[]align(1) u8 = null;
     defer if (truth_text) |text| allocator.free(text);

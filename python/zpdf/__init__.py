@@ -6,7 +6,7 @@ from ._ffi import ffi, lib
 from .exceptions import ZpdfError, InvalidPdfError, PageNotFoundError, ExtractionError
 
 __version__ = "0.1.0"
-__all__ = ["Document", "PageInfo", "TextSpan", "ZpdfError", "InvalidPdfError", "PageNotFoundError", "ExtractionError"]
+__all__ = ["Document", "PageInfo", "TextSpan", "extract_adaptive", "ZpdfError", "InvalidPdfError", "PageNotFoundError", "ExtractionError"]
 
 
 class TextSpan:
@@ -49,6 +49,80 @@ class PageInfo:
 
     def __repr__(self):
         return f"PageInfo(width={self.width}, height={self.height}, rotation={self.rotation})"
+
+
+def _adaptive_format_value(format: str) -> int:
+    normalized = format.replace("_", "-")
+    if normalized == "json":
+        return lib.PDF_PARSER_FORMAT_JSON
+    if normalized == "artifact-jsonl":
+        return lib.PDF_PARSER_FORMAT_ARTIFACT_JSONL
+    if normalized == "stream-jsonl":
+        return lib.PDF_PARSER_FORMAT_STREAM_JSONL
+    if normalized == "trace-json":
+        return lib.PDF_PARSER_FORMAT_TRACE_JSON
+    raise ValueError("format must be json, artifact-jsonl, stream-jsonl, or trace-json")
+
+
+def extract_adaptive(
+    source: Union[str, Path, bytes],
+    *,
+    source_id: Optional[str] = None,
+    document_id: Optional[str] = None,
+    password: Optional[str] = None,
+    password_file: Optional[Union[str, Path]] = None,
+    format: str = "artifact-jsonl",
+    strict: bool = False,
+    permissive: bool = True,
+) -> str:
+    """Extract versioned adaptive artifacts through the public C ABI.
+
+    The returned string is the same JSON/JSONL contract emitted by the CLI.
+    """
+    result = ffi.new("PdfParserAdaptiveResult*")
+    opts = ffi.new("PdfParserAdaptiveOptions*")
+    opts.abi_version = lib.PDF_PARSER_ABI_VERSION
+    opts.format = _adaptive_format_value(format)
+    opts.page_start = -1
+    opts.page_end = -1
+    opts.strict = 1 if strict else 0
+    opts.permissive = 1 if permissive else 0
+
+    keepalive = []
+    if source_id is not None:
+        keepalive.append(ffi.new("char[]", source_id.encode("utf-8")))
+        opts.source_id = keepalive[-1]
+    if document_id is not None:
+        keepalive.append(ffi.new("char[]", document_id.encode("utf-8")))
+        opts.document_id = keepalive[-1]
+    if password is not None and password_file is not None:
+        raise ValueError("pass either password or password_file, not both")
+    if password is not None:
+        keepalive.append(ffi.new("char[]", password.encode("utf-8")))
+        opts.password = keepalive[-1]
+    if password_file is not None:
+        keepalive.append(ffi.new("char[]", str(password_file).encode("utf-8")))
+        opts.password_file = keepalive[-1]
+
+    try:
+        if isinstance(source, bytes):
+            data = ffi.from_buffer(source)
+            status = lib.pdf_parser_extract_adaptive_memory(opts, data, len(source), result)
+        else:
+            keepalive.append(ffi.new("char[]", str(source).encode("utf-8")))
+            opts.input_path = keepalive[-1]
+            status = lib.pdf_parser_extract_adaptive_file(opts, result)
+
+        if status != lib.PDF_PARSER_STATUS_OK:
+            message = "adaptive extraction failed"
+            if result.error_message != ffi.NULL and result.error_len:
+                message = ffi.buffer(result.error_message, result.error_len)[:].decode("utf-8", errors="replace")
+            raise ExtractionError(message)
+
+        data = ffi.buffer(result.output, result.output_len)[:]
+        return data.decode("utf-8", errors="replace")
+    finally:
+        lib.pdf_parser_result_clear(result)
 
 
 class Document:

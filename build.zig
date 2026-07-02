@@ -45,9 +45,12 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(shared_lib);
+    const install_header = b.addInstallFile(b.path("include/pdf_parser.h"), "include/pdf_parser.h");
+    b.getInstallStep().dependOn(&install_header.step);
 
     const shared_step = b.step("shared", "Build shared library for FFI");
     shared_step.dependOn(&shared_lib.step);
+    shared_step.dependOn(&install_header.step);
 
     // WebAssembly build
     const wasm = b.addExecutable(.{
@@ -180,6 +183,12 @@ pub fn build(b: *std.Build) void {
 
     const run_main_unit_tests = b.addRunArtifact(main_unit_tests);
 
+    const capi_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/capi.zig", target, optimize, ocr_build),
+    });
+
+    const run_capi_unit_tests = b.addRunArtifact(capi_unit_tests);
+
     const eval_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/eval.zig", target, optimize, ocr_build),
     });
@@ -191,6 +200,18 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_eval_runner_unit_tests = b.addRunArtifact(eval_runner_unit_tests);
+
+    const benchmark_runner_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/benchmark_runner.zig", target, optimize, ocr_build),
+    });
+
+    const run_benchmark_runner_unit_tests = b.addRunArtifact(benchmark_runner_unit_tests);
+
+    const server_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/server.zig", target, optimize, ocr_build),
+    });
+
+    const run_server_unit_tests = b.addRunArtifact(server_unit_tests);
 
     const ocr_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/ocr.zig", target, optimize, ocr_build),
@@ -269,6 +290,24 @@ pub fn build(b: *std.Build) void {
     const eval_step = b.step("eval", "Run per-document evaluation and emit JSONL");
     eval_step.dependOn(&eval_cmd.step);
 
+    const benchmark_eval_cmd = b.addRunArtifact(exe);
+    benchmark_eval_cmd.step.dependOn(b.getInstallStep());
+    benchmark_eval_cmd.addArgs(&.{
+        "benchmark",
+        "--manifest",
+        "benchmark/eval/corpus/manifest.tsv",
+        "--suite-id",
+        "tiny-corpus",
+        "--tools",
+        "pdf-parser:native",
+    });
+    if (b.args) |args| {
+        benchmark_eval_cmd.addArgs(args);
+    }
+
+    const benchmark_eval_step = b.step("benchmark-eval", "Run corpus benchmark scorecard");
+    benchmark_eval_step.dependOn(&benchmark_eval_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_simd_unit_tests.step);
@@ -286,8 +325,11 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_stream_unit_tests.step);
     test_step.dependOn(&run_adaptive_unit_tests.step);
     test_step.dependOn(&run_main_unit_tests.step);
+    test_step.dependOn(&run_capi_unit_tests.step);
     test_step.dependOn(&run_eval_unit_tests.step);
     test_step.dependOn(&run_eval_runner_unit_tests.step);
+    test_step.dependOn(&run_benchmark_runner_unit_tests.step);
+    test_step.dependOn(&run_server_unit_tests.step);
     test_step.dependOn(&run_ocr_unit_tests.step);
     test_step.dependOn(&run_interpreter_unit_tests.step);
     test_step.dependOn(&run_testpdf_unit_tests.step);
@@ -330,6 +372,7 @@ fn parserModule(
         .target = target,
         .optimize = optimize,
     });
+    module.addSystemIncludePath(.{ .cwd_relative = "include" });
     module.addOptions("ocr_options", ocr_build.options);
 
     if (ocr_build.enable_tesseract_c) {

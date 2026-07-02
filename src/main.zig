@@ -5,12 +5,16 @@
 //!        pdf-parser inspect complexity [options] input.pdf
 //!        pdf-parser info input.pdf
 //!        pdf-parser bench input.pdf
+//!        pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv
+//!        pdf-parser serve --host 0.0.0.0 --port 8080
 //!
 //! Designed to be a drop-in comparison with `mutool draw -F txt`
 
 const std = @import("std");
 const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
+const benchmark_runner = @import("benchmark_runner.zig");
+const server = @import("server.zig");
 
 pub const main = runtime.MainWithArgs(mainInner).main;
 
@@ -34,6 +38,10 @@ fn mainInner(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try runSearch(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "bench")) {
         try runBench(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "benchmark")) {
+        try benchmark_runner.runCli(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "serve")) {
+        try server.runCli(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
         try printUsage();
     } else {
@@ -60,6 +68,8 @@ fn printUsage() !void {
         \\  info        Show PDF structure information (metadata, outline, etc.)
         \\  search      Search for text across all pages
         \\  bench       Benchmark extraction performance
+        \\  benchmark   Run corpus benchmark scorecards for parser/tool comparison
+        \\  serve       Run stateless HTTP adapter server
         \\  help        Show this help
         \\
         \\Extract options:
@@ -70,6 +80,9 @@ fn printUsage() !void {
         \\  -m, --markdown  Shortcut for --format markdown
         \\  --adaptive      Use adaptive routing and reconciled outputs
         \\  --source-id ID  External caller-owned source id for adaptive artifacts
+        \\  --password PASS Open an encrypted PDF with a supplied password
+        \\  --password-file FILE
+        \\                  Read the encrypted PDF password from FILE (trailing newline ignored)
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
         \\  --emit-specialist-requests FILE
@@ -93,12 +106,15 @@ fn printUsage() !void {
         \\  pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
         \\  pdf-parser extract --adaptive -f stream-jsonl doc.pdf
         \\  pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
+        \\  pdf-parser extract-adaptive --input encrypted.pdf --password-file .password --format artifact-jsonl
         \\  pdf-parser extract --adaptive -f debug-svg doc.pdf
         \\  pdf-parser extract doc.pdf --adaptive --trace
         \\  pdf-parser inspect complexity doc.pdf --format json
         \\  pdf-parser extract --reading-order doc.pdf   # Visual reading order
         \\  pdf-parser search "revenue" document.pdf      # Search across all pages
         \\  pdf-parser bench document.pdf                # Benchmark vs mutool
+        \\  pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv --tools pdf-parser:adaptive
+        \\  pdf-parser serve --host 0.0.0.0 --port 8080
         \\
     );
 }
@@ -121,10 +137,43 @@ const OutputFormat = enum {
     debug_svg, // SVG block overlay
 };
 
+const PasswordInput = struct {
+    value: ?[]const u8 = null,
+    owned: ?[]align(1) u8 = null,
+
+    fn deinit(self: *PasswordInput, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = .{};
+    }
+};
+
+fn loadPasswordInput(
+    allocator: std.mem.Allocator,
+    password: ?[]const u8,
+    password_file: ?[]const u8,
+) !PasswordInput {
+    if (password != null and password_file != null) return error.DuplicatePasswordSource;
+    if (password) |value| return .{ .value = value };
+    const path = password_file orelse return .{};
+    const data = try runtime.readFileAllocAlignedCwd(allocator, path, .fromByteUnits(1));
+    const trimmed = trimTrailingNewlines(data);
+    return .{ .value = trimmed, .owned = data };
+}
+
+fn trimTrailingNewlines(bytes: []const u8) []const u8 {
+    var end = bytes.len;
+    while (end > 0 and (bytes[end - 1] == '\n' or bytes[end - 1] == '\r')) {
+        end -= 1;
+    }
+    return bytes[0..end];
+}
+
 fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var input_file: ?[]const u8 = null;
     var output_file: ?[]const u8 = null;
     var page_range: ?[]const u8 = null;
+    var password: ?[]const u8 = null;
+    var password_file: ?[]const u8 = null;
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var output_format: OutputFormat = .text;
     var sequential = false;
@@ -149,6 +198,12 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < args.len) source_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--password")) {
+            i += 1;
+            if (i < args.len) password = args[i];
+        } else if (std.mem.eql(u8, arg, "--password-file")) {
+            i += 1;
+            if (i < args.len) password_file = args[i];
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
@@ -202,16 +257,23 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
+    var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
+        std.debug.print("Error loading password input: {}\n", .{err});
+        return err;
+    };
+    defer password_input.deinit(allocator);
+    error_mode.password = password_input.value;
+
     // Open document
     const doc = zpdf.Document.openWithConfig(allocator, path, error_mode) catch |err| {
         std.debug.print("Error opening {s}: {}\n", .{ path, err });
-        return;
+        return err;
     };
     defer doc.close();
 
     // Warn about encrypted PDFs
-    if (doc.isEncrypted()) {
-        std.debug.print("Warning: {s} is encrypted. Text extraction may produce incorrect results.\n", .{path});
+    if (doc.isEncrypted() and !doc.isAuthenticated()) {
+        std.debug.print("Warning: {s} is encrypted and was not authenticated. Text extraction may produce incorrect results.\n", .{path});
     }
 
     // Setup output
@@ -511,6 +573,13 @@ fn doAdaptiveExtract(
             .offset = parse_error.offset,
         };
     }
+    const encryption_info = doc.encryptionInfo();
+    var encryption_warning_storage: [2]zpdf.schema.ManifestDiagnostic = undefined;
+    const encryption_warnings = zpdf.schema.collectEncryptionWarnings(
+        &encryption_warning_storage,
+        encryption_info,
+        doc.error_config.respect_permissions,
+    );
 
     const schema_options = zpdf.schema.RenderOptions{
         .document_id = doc.source_path orelse "document",
@@ -519,7 +588,9 @@ fn doAdaptiveExtract(
         .source_path = doc.source_path,
         .page_count = doc.pageCount(),
         .encrypted = doc.isEncrypted(),
+        .encryption_info = encryption_info,
         .corrupt = doc.errors.items.len > 0,
+        .warnings = encryption_warnings,
         .errors = parser_errors,
         .debug_assets_dir = debug_assets_dir,
         .specialist_config_path = specialist_config_file,
@@ -642,6 +713,8 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var output_file: ?[]const u8 = null;
     var page_range: ?[]const u8 = null;
     var source_id: ?[]const u8 = null;
+    var password: ?[]const u8 = null;
+    var password_file: ?[]const u8 = null;
     var debug_assets_dir: ?[]const u8 = null;
     var specialist_requests_file: ?[]const u8 = null;
     var specialist_config_file: ?[]const u8 = null;
@@ -663,6 +736,12 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         } else if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < args.len) source_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--password")) {
+            i += 1;
+            if (i < args.len) password = args[i];
+        } else if (std.mem.eql(u8, arg, "--password-file")) {
+            i += 1;
+            if (i < args.len) password_file = args[i];
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
@@ -697,9 +776,16 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         return;
     };
 
+    var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
+        std.debug.print("Error loading password input: {}\n", .{err});
+        return err;
+    };
+    defer password_input.deinit(allocator);
+    error_mode.password = password_input.value;
+
     const doc = zpdf.Document.openWithConfig(allocator, path, error_mode) catch |err| {
         std.debug.print("Error opening {s}: {}\n", .{ path, err });
-        return;
+        return err;
     };
     defer doc.close();
 
@@ -780,6 +866,8 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var page_range: ?[]const u8 = null;
     var format: []const u8 = "json";
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
+    var password: ?[]const u8 = null;
+    var password_file: ?[]const u8 = null;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -790,6 +878,12 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "-p")) {
             i += 1;
             if (i < args.len) page_range = args[i];
+        } else if (std.mem.eql(u8, arg, "--password")) {
+            i += 1;
+            if (i < args.len) password = args[i];
+        } else if (std.mem.eql(u8, arg, "--password-file")) {
+            i += 1;
+            if (i < args.len) password_file = args[i];
         } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
             i += 1;
             if (i < args.len) format = args[i];
@@ -812,9 +906,16 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     };
 
+    var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
+        std.debug.print("Error loading password input: {}\n", .{err});
+        return err;
+    };
+    defer password_input.deinit(allocator);
+    error_mode.password = password_input.value;
+
     const doc = zpdf.Document.openWithConfig(allocator, path, error_mode) catch |err| {
         std.debug.print("Error opening {s}: {}\n", .{ path, err });
-        return;
+        return err;
     };
     defer doc.close();
 
@@ -1149,7 +1250,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
         const requests = try runtime.readFileAllocAlignedCwd(allocator, requests_path, .fromByteUnits(1));
         defer allocator.free(requests);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"record_type\":\"specialist_request\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.7.0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.8.0\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"source_id\":\"external-specialist-cli\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_kind\":\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_outputs\"") != null);

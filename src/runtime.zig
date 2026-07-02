@@ -17,6 +17,10 @@ fn currentIo() std.Io {
     return current_io orelse @panic("std.Io not initialized");
 }
 
+pub fn current() std.Io {
+    return currentIo();
+}
+
 /// Build a Zig 0.16 entrypoint that supplies an allocator and argv to `main_fn`.
 pub fn MainWithArgs(comptime main_fn: anytype) type {
     return struct {
@@ -74,6 +78,32 @@ pub fn createFileCwd(path: []const u8) !File {
 
 pub fn createDirPathCwd(path: []const u8) !void {
     _ = try std.Io.Dir.cwd().createDirPathStatus(currentIo(), path, .default_dir);
+}
+
+pub fn createDirPath(path: []const u8) !void {
+    if (!std.fs.path.isAbsolute(path)) return createDirPathCwd(path);
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return;
+    if (dirExists(path)) return;
+    if (std.fs.path.dirname(path)) |parent| {
+        if (!std.mem.eql(u8, parent, path)) try createDirPath(parent);
+    }
+    std.Io.Dir.createDirAbsolute(currentIo(), path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+}
+
+pub fn dirExists(path: []const u8) bool {
+    const dir = if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openDirAbsolute(currentIo(), path, .{})
+    else
+        std.Io.Dir.cwd().openDir(currentIo(), path, .{});
+    if (dir) |opened| {
+        opened.close(currentIo());
+        return true;
+    } else |_| {
+        return false;
+    }
 }
 
 pub fn closeFile(file: File) void {

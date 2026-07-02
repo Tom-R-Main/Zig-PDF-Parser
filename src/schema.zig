@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const complexity = @import("complexity.zig");
+const encryption = @import("encryption.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 const specialist_protocol = @import("specialist_protocol.zig");
@@ -20,6 +21,7 @@ pub const RenderOptions = struct {
     source_path: ?[]const u8 = null,
     page_count: ?usize = null,
     encrypted: ?bool = null,
+    encryption_info: ?encryption.Info = null,
     corrupt: ?bool = null,
     warnings: []const ManifestDiagnostic = &.{},
     errors: []const ManifestDiagnostic = &.{},
@@ -33,6 +35,29 @@ pub const ManifestDiagnostic = struct {
     message: []const u8,
     offset: ?u64 = null,
 };
+
+pub fn collectEncryptionWarnings(
+    storage: []ManifestDiagnostic,
+    info: encryption.Info,
+    respect_permissions: bool,
+) []const ManifestDiagnostic {
+    var count: usize = 0;
+    if (info.encrypted and info.authenticated and info.weak_crypto and count < storage.len) {
+        storage[count] = .{
+            .code = "weak_pdf_encryption",
+            .message = "PDF uses weak legacy encryption; extraction continued because weak crypto reading is enabled",
+        };
+        count += 1;
+    }
+    if (info.encrypted and info.authenticated and !info.permissions.extract and !respect_permissions and count < storage.len) {
+        storage[count] = .{
+            .code = "permissions_not_enforced",
+            .message = "PDF permissions disallow text extraction; extraction continued because respect_permissions is false",
+        };
+        count += 1;
+    }
+    return storage[0..count];
+}
 
 pub const RecordOffsets = struct {
     span_base: u32 = 0,
@@ -243,6 +268,8 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"encryption\":");
+    try writeEncryptionInfo(writer, options.encryption_info);
     try writer.writeAll(",\"corrupt\":");
     try writer.print("{}", .{options.corrupt orelse (options.errors.len > 0)});
     try writer.writeAll(",\"input_sha256\":");
@@ -294,6 +321,58 @@ fn writeRouteCounts(writer: anytype, result: anytype) !void {
         "{{\"native_pages\":{},\"page_routes\":{},\"region_routes\":{},\"ocr_regions\":{},\"table_regions\":{},\"formula_regions\":{}}}",
         .{ native_pages, result.page_routes.len, result.region_routes.len, ocr_regions, table_regions, formula_regions },
     );
+}
+
+fn writeEncryptionInfo(writer: anytype, info: ?encryption.Info) !void {
+    const value = info orelse encryption.Info{};
+
+    try writer.writeAll("{\"encrypted\":");
+    try writer.print("{}", .{value.encrypted});
+    try writer.writeAll(",\"requires_password\":");
+    try writer.print("{}", .{value.requires_password});
+    try writer.writeAll(",\"authenticated\":");
+    try writer.print("{}", .{value.authenticated});
+    try writer.writeAll(",\"auth_type\":\"");
+    try writer.writeAll(@tagName(value.auth_type));
+    try writer.writeAll("\",\"encryption_version\":");
+    try writer.print("{}", .{value.encryption_version});
+    try writer.writeAll(",\"security_revision\":");
+    try writer.print("{}", .{value.security_revision});
+    try writer.writeAll(",\"key_bits\":");
+    try writer.print("{}", .{value.key_bits});
+    try writer.writeAll(",\"stream_method\":\"");
+    try writer.writeAll(@tagName(value.stream_method));
+    try writer.writeAll("\",\"string_method\":\"");
+    try writer.writeAll(@tagName(value.string_method));
+    try writer.writeAll("\",\"encrypt_metadata\":");
+    try writer.print("{}", .{value.encrypt_metadata});
+    try writer.writeAll(",\"weak_crypto\":");
+    try writer.print("{}", .{value.weak_crypto});
+    try writer.writeAll(",\"permissions\":");
+    try writePermissions(writer, value.permissions);
+    try writer.writeByte('}');
+}
+
+fn writePermissions(writer: anytype, permissions: encryption.Permissions) !void {
+    try writer.writeAll("{\"raw\":");
+    try writer.print("{}", .{permissions.raw});
+    try writer.writeAll(",\"print_low_resolution\":");
+    try writer.print("{}", .{permissions.print_low_resolution});
+    try writer.writeAll(",\"modify\":");
+    try writer.print("{}", .{permissions.modify});
+    try writer.writeAll(",\"extract\":");
+    try writer.print("{}", .{permissions.extract});
+    try writer.writeAll(",\"annotate\":");
+    try writer.print("{}", .{permissions.annotate});
+    try writer.writeAll(",\"fill_forms\":");
+    try writer.print("{}", .{permissions.fill_forms});
+    try writer.writeAll(",\"accessibility\":");
+    try writer.print("{}", .{permissions.accessibility});
+    try writer.writeAll(",\"assemble\":");
+    try writer.print("{}", .{permissions.assemble});
+    try writer.writeAll(",\"print_high_resolution\":");
+    try writer.print("{}", .{permissions.print_high_resolution});
+    try writer.writeByte('}');
 }
 
 fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions) !void {
@@ -676,6 +755,8 @@ pub fn writeStreamManifestRecord(writer: anytype, options: RenderOptions, event_
     } else {
         try writer.writeAll("null");
     }
+    try writer.writeAll(",\"encryption\":");
+    try writeEncryptionInfo(writer, options.encryption_info);
     try writer.writeAll(",\"corrupt\":");
     try writer.print("{}", .{options.corrupt orelse (options.errors.len > 0)});
     try writer.writeAll(",\"input_sha256\":");
