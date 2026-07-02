@@ -430,6 +430,9 @@ pub const SpanCollector = struct {
             if (span.text.len > 0) {
                 self.allocator.free(@constCast(span.text));
             }
+            if (span.font.name) |name| {
+                self.allocator.free(@constCast(name));
+            }
         }
         self.spans.deinit(self.allocator);
         self.text_buffer.deinit(self.allocator);
@@ -471,6 +474,9 @@ pub const SpanCollector = struct {
         if (self.text_buffer.items.len == 0) return;
 
         const text = try self.allocator.dupe(u8, self.text_buffer.items);
+        errdefer self.allocator.free(text);
+        const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
+        errdefer if (font_name) |name| self.allocator.free(name);
         const width = @as(f64, @floatFromInt(text.len)) * self.current_font_size * self.avg_char_width;
         const height = self.current_font_size * 1.2;
 
@@ -485,7 +491,7 @@ pub const SpanCollector = struct {
             .text = text,
             .source = .native_pdf,
             .confidence = 1.0,
-            .font = .{ .name = self.current_font_name, .size = self.current_font_size, .has_to_unicode = self.current_font_has_to_unicode },
+            .font = .{ .name = font_name, .size = self.current_font_size, .has_to_unicode = self.current_font_has_to_unicode },
             .block_id = self.current_block_id,
             .line_id = self.current_line_id,
             .mcid = self.current_mcid,

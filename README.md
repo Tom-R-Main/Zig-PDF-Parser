@@ -159,6 +159,7 @@ pdf-parser extract --adaptive -f jsonl doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
+pdf-parser extract --adaptive --no-ocr -f artifact-jsonl doc.pdf
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl \
   --emit-specialist-requests requests.jsonl
@@ -180,7 +181,9 @@ include `use_native`, `queue_ocr`, `candidate_layout`, `candidate_table`,
 `candidate_formula`, and `candidate_table_formula`. The trace JSON reports page
 index, region index, span count, route, confidence, signal scores, and reasons
 such as `image_dominant`, `missing_tounicode`, `table_alignment`,
-`formula_density`, and `low_reading_order_confidence`.
+`formula_density`, and `low_reading_order_confidence`. Use `--no-ocr` when a
+host pipeline wants adaptive structure and routing evidence without invoking
+fresh OCR subprocesses.
 
 Adaptive `json` emits the versioned public schema: a `document_manifest` plus
 typed `span`, `block`, `table`, `form_field`, `route_trace`,

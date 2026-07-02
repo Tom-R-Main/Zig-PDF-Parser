@@ -613,6 +613,9 @@ pub const Document = struct {
             if (span.text.len > 0) {
                 allocator.free(@constCast(span.text));
             }
+            if (span.font.name) |name| {
+                allocator.free(@constCast(name));
+            }
         }
         allocator.free(spans);
     }

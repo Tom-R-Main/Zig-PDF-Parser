@@ -1395,6 +1395,7 @@ fn freeTextSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
 
 fn freeOwnedTextSpan(allocator: std.mem.Allocator, span: layout.TextSpan) void {
     if (span.text.len > 0) allocator.free(@constCast(span.text));
+    if (span.font.name) |name| allocator.free(@constCast(name));
 }
 
 fn testSpan(text: []const u8, x0: f64, y0: f64, x1: f64, y1: f64) layout.TextSpan {

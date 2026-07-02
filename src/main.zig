@@ -87,6 +87,7 @@ fn printUsage() !void {
         \\                  Tesseract executable for adaptive OCR routes
         \\  --ocr-rasterizer FILE
         \\                  pdftoppm-compatible rasterizer for adaptive OCR routes
+        \\  --no-ocr        Disable adaptive OCR subprocess routing
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
         \\  --emit-specialist-requests FILE
@@ -188,6 +189,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var debug_assets_dir: ?[]const u8 = null;
     var specialist_requests_file: ?[]const u8 = null;
     var specialist_config_file: ?[]const u8 = null;
+    var enable_ocr = true;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -217,6 +219,8 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--specialist-config")) {
             i += 1;
             if (i < args.len) specialist_config_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--no-ocr")) {
+            enable_ocr = false;
         } else if (std.mem.eql(u8, arg, "--strict")) {
             error_mode = zpdf.ErrorConfig.strict();
         } else if (std.mem.eql(u8, arg, "--permissive")) {
@@ -298,7 +302,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(pages);
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, enable_ocr, allocator, output_handle);
         return;
     }
 
@@ -554,6 +558,7 @@ fn doAdaptiveExtract(
     debug_assets_dir: ?[]const u8,
     specialist_requests_file: ?[]const u8,
     specialist_config_file: ?[]const u8,
+    enable_ocr: bool,
     allocator: std.mem.Allocator,
     output_handle: ?runtime.File,
 ) !void {
@@ -605,6 +610,7 @@ fn doAdaptiveExtract(
             var request_result = doc.extractAdaptive(allocator, .{
                 .page_start = window.start,
                 .page_end = window.end,
+                .enable_ocr = enable_ocr,
             }) catch |err| {
                 std.debug.print("Error generating specialist requests: {}\n", .{err});
                 return;
@@ -624,6 +630,7 @@ fn doAdaptiveExtract(
                 .adaptive_options = .{
                     .page_start = window.start,
                     .page_end = window.end,
+                    .enable_ocr = enable_ocr,
                 },
                 .schema_options = schema_options,
             }) catch |err| {
@@ -638,6 +645,7 @@ fn doAdaptiveExtract(
                 .adaptive_options = .{
                     .page_start = window.start,
                     .page_end = window.end,
+                    .enable_ocr = enable_ocr,
                 },
                 .schema_options = schema_options,
             }) catch |err| {
@@ -651,6 +659,7 @@ fn doAdaptiveExtract(
     var result = doc.extractAdaptive(allocator, .{
         .page_start = window.start,
         .page_end = window.end,
+        .enable_ocr = enable_ocr,
     }) catch |err| {
         std.debug.print("Error during adaptive extraction: {}\n", .{err});
         return;
@@ -725,6 +734,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
     var ocr_config = zpdf.OcrConfig{};
+    var enable_ocr = true;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -762,6 +772,8 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
                 std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
                 return;
             };
+        } else if (std.mem.eql(u8, arg, "--no-ocr")) {
+            enable_ocr = false;
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
@@ -843,6 +855,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
+                .enable_ocr = enable_ocr,
                 .ocr_config = ocr_config,
             },
         }) catch |err| {
@@ -862,6 +875,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
+                .enable_ocr = enable_ocr,
                 .ocr_config = ocr_config,
             },
         }) catch |err| {
@@ -955,6 +969,7 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var result = doc.extractAdaptive(allocator, .{
         .page_start = window.start,
         .page_end = window.end,
+        .enable_ocr = false,
     }) catch |err| {
         std.debug.print("Error inspecting complexity: {}\n", .{err});
         return;

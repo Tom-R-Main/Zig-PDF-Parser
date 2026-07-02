@@ -96,7 +96,7 @@ pub fn scoreRegion(input: PageInput, region: BBox) RegionScore {
         .formula_density = scoreFormulaDensity(&stats),
     };
 
-    const route = decideRoute(signals, stats.span_count);
+    const route = decideRoute(signals, stats.span_count, stats.char_count);
     return .{
         .page_index = input.page_index,
         .bbox = region,
@@ -108,13 +108,15 @@ pub fn scoreRegion(input: PageInput, region: BBox) RegionScore {
     };
 }
 
-fn decideRoute(signals: SignalScores, span_count: usize) RouteDecision {
+fn decideRoute(signals: SignalScores, span_count: usize, char_count: usize) RouteDecision {
     var route = RouteDecision{ .max_signal = signals.max() };
+    const sparse_image_needs_ocr = signals.sparse_text >= 0.85 and
+        signals.image_dominance >= 0.20 and
+        (char_count < 40 or signals.missing_tounicode >= 0.35);
     route.needs_ocr = span_count == 0 or
         signals.bad_unicode >= 0.35 or
         signals.hidden_ocr >= 0.45 or
-        signals.image_dominance >= 0.65 or
-        (signals.sparse_text >= 0.85 and signals.image_dominance >= 0.20);
+        sparse_image_needs_ocr;
     route.needs_table_model = signals.table_alignment >= 0.60;
     route.needs_formula_model = signals.formula_density >= 0.55;
     route.needs_layout_model = signals.low_reading_order_confidence >= 0.55 or
@@ -151,6 +153,8 @@ const RegionStats = struct {
     numeric_chars: usize = 0,
     math_chars: usize = 0,
     superscript_like_spans: usize = 0,
+    x_buckets: [128]BucketCount = undefined,
+    x_bucket_count: usize = 0,
 
     fn init(input: PageInput, region: BBox) RegionStats {
         return .{
@@ -163,7 +167,7 @@ const RegionStats = struct {
     fn collect(self: *RegionStats) void {
         self.collectSpans();
         self.collectImages();
-        self.aligned_x_bucket_count = countAlignedXBuckets(self.input.spans, self.region);
+        self.finalizeXBuckets();
     }
 
     fn collectSpans(self: *RegionStats) void {
@@ -178,7 +182,7 @@ const RegionStats = struct {
             self.span_count += 1;
             self.char_count += text_span.text.len;
             self.text_area += clippedArea(self.region, text_span.bbox);
-            self.repeated_x_spans += repeatedXContribution(self.input.spans, self.region, text_span);
+            self.addXBucket(xBucket(text_span.x0));
 
             if (!std.unicode.utf8ValidateSlice(text_span.text)) self.invalid_utf8_spans += 1;
             self.replacement_chars += countNeedle(text_span.text, "\xEF\xBF\xBD");
@@ -221,6 +225,32 @@ const RegionStats = struct {
         }
     }
 
+    fn addXBucket(self: *RegionStats, bucket: i64) void {
+        for (self.x_buckets[0..self.x_bucket_count]) |*entry| {
+            if (entry.bucket == bucket) {
+                entry.count += 1;
+                return;
+            }
+        }
+        if (self.x_bucket_count < self.x_buckets.len) {
+            self.x_buckets[self.x_bucket_count] = .{ .bucket = bucket, .count = 1 };
+            self.x_bucket_count += 1;
+        }
+    }
+
+    fn finalizeXBuckets(self: *RegionStats) void {
+        var aligned_bucket_count: usize = 0;
+        var repeated_span_count: usize = 0;
+        for (self.x_buckets[0..self.x_bucket_count]) |entry| {
+            if (entry.count >= 3) {
+                aligned_bucket_count += 1;
+                repeated_span_count += entry.count;
+            }
+        }
+        self.aligned_x_bucket_count = aligned_bucket_count;
+        self.repeated_x_spans = repeated_span_count;
+    }
+
     fn collectImages(self: *RegionStats) void {
         for (self.input.images) |image| {
             const clipped = clippedArea(self.region, image.bbox);
@@ -229,6 +259,11 @@ const RegionStats = struct {
             self.image_area += clipped;
         }
     }
+};
+
+const BucketCount = struct {
+    bucket: i64,
+    count: usize,
 };
 
 fn scoreSparseText(stats: *const RegionStats) f32 {
@@ -303,46 +338,6 @@ fn scoreFormulaDensity(stats: *const RegionStats) f32 {
     else
         0.0;
     return f32Clamp(@max(clamp01((symbol_ratio - 0.08) / 0.30), superscript_ratio * 2.0));
-}
-
-fn repeatedXContribution(spans: []const TextSpan, region: BBox, text_span: TextSpan) usize {
-    var aligned: usize = 0;
-    const bucket = xBucket(text_span.x0);
-    for (spans) |other| {
-        if (!intersects(region, other.bbox)) continue;
-        if (xBucket(other.x0) == bucket) aligned += 1;
-    }
-    return if (aligned >= 3) 1 else 0;
-}
-
-fn countAlignedXBuckets(spans: []const TextSpan, region: BBox) usize {
-    var buckets: [128]struct { bucket: i64, count: usize } = undefined;
-    var bucket_count: usize = 0;
-
-    for (spans) |text_span| {
-        if (!intersects(region, text_span.bbox)) continue;
-        const bucket = xBucket(text_span.x0);
-
-        var found = false;
-        for (buckets[0..bucket_count]) |*entry| {
-            if (entry.bucket == bucket) {
-                entry.count += 1;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found and bucket_count < buckets.len) {
-            buckets[bucket_count] = .{ .bucket = bucket, .count = 1 };
-            bucket_count += 1;
-        }
-    }
-
-    var aligned: usize = 0;
-    for (buckets[0..bucket_count]) |entry| {
-        if (entry.count >= 3) aligned += 1;
-    }
-    return aligned;
 }
 
 fn xBucket(x: f64) i64 {
@@ -502,6 +497,53 @@ test "image-dominant sparse region routes to OCR" {
     try std.testing.expect(page.score.signals.sparse_text >= 0.85);
     try std.testing.expect(page.score.signals.image_dominance >= 0.65);
     try std.testing.expect(page.score.route.needs_ocr);
+}
+
+test "image-dominant sparse page with usable native text avoids OCR" {
+    const spans = [_]TextSpan{
+        span("Annual report cover page with valid native title text", 72, 700, 380, 714),
+        span("Fiscal year overview", 72, 680, 220, 694),
+    };
+    const images = [_]ImageBox{
+        .{ .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 590, .y1 = 760 }, .pixel_width = 1600, .pixel_height = 2200 },
+    };
+
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .spans = &spans,
+        .images = &images,
+    });
+
+    try std.testing.expect(page.score.signals.sparse_text >= 0.85);
+    try std.testing.expect(page.score.signals.image_dominance >= 0.65);
+    try std.testing.expect(page.score.char_count >= 40);
+    try std.testing.expect(!page.score.route.needs_ocr);
+}
+
+test "image-dominant page with native text avoids OCR" {
+    const spans = [_]TextSpan{
+        span("Revenue increased as subscription adoption expanded across all regions.", 72, 700, 520, 714),
+        span("Operating margin improved because infrastructure costs grew slower than revenue.", 72, 680, 540, 694),
+        span("Cash flow from operations remained positive for the full fiscal year.", 72, 660, 500, 674),
+        span("The company continues to invest in product quality and customer success.", 72, 640, 510, 654),
+        span("See Note 7 for additional details about deferred revenue balances.", 72, 620, 500, 634),
+        span("Management believes these investments support long-term durable growth.", 72, 600, 510, 614),
+        span("This page has an image-heavy background but readable native text.", 72, 580, 500, 594),
+        span("Native extraction should remain the default path for this page.", 72, 560, 480, 574),
+    };
+    const images = [_]ImageBox{
+        .{ .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 590, .y1 = 760 }, .pixel_width = 1600, .pixel_height = 2200 },
+    };
+
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .spans = &spans,
+        .images = &images,
+    });
+
+    try std.testing.expect(page.score.signals.image_dominance >= 0.65);
+    try std.testing.expect(page.score.signals.sparse_text < 0.45);
+    try std.testing.expect(!page.score.route.needs_ocr);
 }
 
 test "bad unicode and hidden OCR layer are OCR signals" {

@@ -85,7 +85,7 @@ pub fn scoreTable(input: RegionInput) TableScore {
     const repeated_x = scoreRepeatedXPositions(input.bbox, spans);
     const ruling = scoreRulingLines(input);
     const whitespace = scoreWhitespaceColumns(input.bbox, spans);
-    const numeric = scoreNumericDensity(spans);
+    const numeric = scoreNumericDensity(input.bbox, spans);
     const signals = TableSignals{
         .repeated_x_positions = repeated_x,
         .ruling_lines = ruling,
@@ -106,8 +106,8 @@ pub fn scoreTable(input: RegionInput) TableScore {
 pub fn scoreFormula(input: RegionInput) FormulaScore {
     const spans = regionSpans(input);
     const signals = FormulaSignals{
-        .symbol_density = scoreSymbolDensity(spans),
-        .superscript_subscript_offsets = scoreScriptOffsets(spans),
+        .symbol_density = scoreSymbolDensity(input.bbox, spans),
+        .superscript_subscript_offsets = scoreScriptOffsets(input.bbox, spans),
         .compact_math_cluster = scoreCompactMathCluster(input.bbox, spans),
     };
 
@@ -215,52 +215,46 @@ fn regionSpans(input: RegionInput) []const TextSpan {
 
 fn scoreRepeatedXPositions(region: BBox, spans: []const TextSpan) f32 {
     if (spans.len < 4) return 0;
-    if (countAlignedXBuckets(region, spans) < 2) return 0;
 
-    var repeated_count: usize = 0;
-    for (spans, 0..) |span, span_index| {
-        if (!intersects(region, span.bbox)) continue;
-        var aligned: usize = 0;
-        const bucket = xBucket(span.x0);
-        for (spans, 0..) |other, other_index| {
-            if (span_index == other_index) continue;
-            if (!intersects(region, other.bbox)) continue;
-            if (xBucket(other.x0) == bucket) aligned += 1;
-        }
-        if (aligned >= 2) repeated_count += 1;
-    }
-
-    return ratioScore(repeated_count, spans.len, 0.30, 0.72);
-}
-
-fn countAlignedXBuckets(region: BBox, spans: []const TextSpan) usize {
-    var buckets: [128]struct { bucket: i64, count: usize } = undefined;
+    var buckets: [128]BucketCount = undefined;
     var bucket_count: usize = 0;
-
+    var region_span_count: usize = 0;
     for (spans) |span| {
         if (!intersects(region, span.bbox)) continue;
-        const bucket = xBucket(span.x0);
-
-        var found = false;
-        for (buckets[0..bucket_count]) |*entry| {
-            if (entry.bucket == bucket) {
-                entry.count += 1;
-                found = true;
-                break;
-            }
-        }
-
-        if (!found and bucket_count < buckets.len) {
-            buckets[bucket_count] = .{ .bucket = bucket, .count = 1 };
-            bucket_count += 1;
-        }
+        region_span_count += 1;
+        addBucket(&buckets, &bucket_count, xBucket(span.x0));
     }
+    if (region_span_count < 4) return 0;
 
-    var aligned: usize = 0;
+    var aligned_bucket_count: usize = 0;
+    var repeated_count: usize = 0;
     for (buckets[0..bucket_count]) |entry| {
-        if (entry.count >= 3) aligned += 1;
+        if (entry.count >= 3) {
+            aligned_bucket_count += 1;
+            repeated_count += entry.count;
+        }
     }
-    return aligned;
+    if (aligned_bucket_count < 2) return 0;
+
+    return ratioScore(repeated_count, region_span_count, 0.30, 0.72);
+}
+
+const BucketCount = struct {
+    bucket: i64,
+    count: usize,
+};
+
+fn addBucket(buckets: *[128]BucketCount, bucket_count: *usize, bucket: i64) void {
+    for (buckets[0..bucket_count.*]) |*entry| {
+        if (entry.bucket == bucket) {
+            entry.count += 1;
+            return;
+        }
+    }
+    if (bucket_count.* < buckets.len) {
+        buckets[bucket_count.*] = .{ .bucket = bucket, .count = 1 };
+        bucket_count.* += 1;
+    }
 }
 
 fn scoreRulingLines(input: RegionInput) f32 {
@@ -289,14 +283,18 @@ fn scoreWhitespaceColumns(region: BBox, spans: []const TextSpan) f32 {
     const row_count = countRows(region, spans);
     if (row_count < 2) return 0;
 
+    const font_size = averageFontSize(region, spans);
+    var region_span_count: usize = 0;
     var repeated_gap_rows: usize = 0;
     for (spans) |left| {
         if (!intersects(region, left.bbox)) continue;
+        region_span_count += 1;
         var saw_gap = false;
         for (spans) |right| {
+            if (!intersects(region, right.bbox)) continue;
             if (!sameRow(left, right)) continue;
             const gap = right.x0 - left.x1;
-            if (gap >= averageFontSize(spans) * 2.2) {
+            if (gap >= font_size * 2.2) {
                 saw_gap = true;
                 break;
             }
@@ -304,13 +302,14 @@ fn scoreWhitespaceColumns(region: BBox, spans: []const TextSpan) f32 {
         if (saw_gap) repeated_gap_rows += 1;
     }
 
-    return ratioScore(repeated_gap_rows, spans.len, 0.28, 0.66);
+    return ratioScore(repeated_gap_rows, region_span_count, 0.28, 0.66);
 }
 
-fn scoreNumericDensity(spans: []const TextSpan) f32 {
+fn scoreNumericDensity(region: BBox, spans: []const TextSpan) f32 {
     var digit_count: usize = 0;
     var char_count: usize = 0;
     for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
         for (span.text) |byte| {
             if (std.ascii.isWhitespace(byte)) continue;
             char_count += 1;
@@ -320,10 +319,11 @@ fn scoreNumericDensity(spans: []const TextSpan) f32 {
     return ratioScore(digit_count, char_count, 0.18, 0.62);
 }
 
-fn scoreSymbolDensity(spans: []const TextSpan) f32 {
+fn scoreSymbolDensity(region: BBox, spans: []const TextSpan) f32 {
     var math_count: usize = 0;
     var char_count: usize = 0;
     for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
         for (span.text) |byte| {
             if (std.ascii.isWhitespace(byte)) continue;
             char_count += 1;
@@ -335,28 +335,30 @@ fn scoreSymbolDensity(spans: []const TextSpan) f32 {
     return ratioScore(math_count, char_count, 0.10, 0.38);
 }
 
-fn scoreScriptOffsets(spans: []const TextSpan) f32 {
-    if (spans.len < 2) return 0;
-    const baseline = medianY(spans);
-    const body_size = medianFontSize(spans);
+fn scoreScriptOffsets(region: BBox, spans: []const TextSpan) f32 {
+    const span_count = countRegionSpans(region, spans);
+    if (span_count < 2) return 0;
+    const baseline = medianY(region, spans);
+    const body_size = medianFontSize(region, spans);
     if (body_size <= 0) return 0;
 
     var script_count: usize = 0;
     for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
         const small = span.font_size > 0 and span.font_size <= body_size * 0.86;
         const shifted = @abs(span.y0 - baseline) >= body_size * 0.20;
         if (small and shifted) script_count += 1;
     }
-    return ratioScore(script_count, spans.len, 0.06, 0.26);
+    return ratioScore(script_count, span_count, 0.06, 0.26);
 }
 
 fn scoreCompactMathCluster(region: BBox, spans: []const TextSpan) f32 {
-    if (spans.len == 0) return 0;
-    const span_bounds = mergeSpanBounds(spans);
+    if (countRegionSpans(region, spans) == 0) return 0;
+    const span_bounds = mergeSpanBounds(region, spans);
     const region_area = bboxArea(region);
     if (region_area <= 0) return 0;
     const fill_ratio = bboxArea(span_bounds) / region_area;
-    const symbol_score = scoreSymbolDensity(spans);
+    const symbol_score = scoreSymbolDensity(region, spans);
     return clamp01f(@as(f32, @floatCast((1.0 - clamp01(fill_ratio)) * 0.4)) + symbol_score * 0.6);
 }
 
@@ -412,11 +414,11 @@ fn countRows(region: BBox, spans: []const TextSpan) usize {
     return bucket_count;
 }
 
-fn averageFontSize(spans: []const TextSpan) f64 {
-    if (spans.len == 0) return 12;
+fn averageFontSize(region: BBox, spans: []const TextSpan) f64 {
     var total: f64 = 0;
     var count: usize = 0;
     for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
         if (span.font_size > 0) {
             total += span.font_size;
             count += 1;
@@ -425,34 +427,54 @@ fn averageFontSize(spans: []const TextSpan) f64 {
     return if (count == 0) 12 else total / @as(f64, @floatFromInt(count));
 }
 
-fn medianY(spans: []const TextSpan) f64 {
-    if (spans.len == 0) return 0;
+fn medianY(region: BBox, spans: []const TextSpan) f64 {
     var values: [64]f64 = undefined;
-    const count = @min(spans.len, values.len);
-    for (spans[0..count], 0..) |span, i| values[i] = span.y0;
+    var count: usize = 0;
+    for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
+        if (count == values.len) break;
+        values[count] = span.y0;
+        count += 1;
+    }
+    if (count == 0) return 0;
     std.mem.sort(f64, values[0..count], {}, comptime std.sort.asc(f64));
     return values[count / 2];
 }
 
-fn medianFontSize(spans: []const TextSpan) f64 {
-    if (spans.len == 0) return 0;
+fn medianFontSize(region: BBox, spans: []const TextSpan) f64 {
     var values: [64]f64 = undefined;
-    const count = @min(spans.len, values.len);
-    for (spans[0..count], 0..) |span, i| values[i] = span.font_size;
+    var count: usize = 0;
+    for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
+        if (count == values.len) break;
+        values[count] = span.font_size;
+        count += 1;
+    }
+    if (count == 0) return 0;
     std.mem.sort(f64, values[0..count], {}, comptime std.sort.asc(f64));
     return values[count / 2];
 }
 
-fn mergeSpanBounds(spans: []const TextSpan) BBox {
-    if (spans.len == 0) return .{};
-    var bounds = spans[0].bbox;
-    for (spans[1..]) |span| {
+fn mergeSpanBounds(region: BBox, spans: []const TextSpan) BBox {
+    var maybe_bounds: ?BBox = null;
+    for (spans) |span| {
+        if (!intersects(region, span.bbox)) continue;
+        var bounds = maybe_bounds orelse span.bbox;
         bounds.x0 = @min(bounds.x0, span.x0);
         bounds.y0 = @min(bounds.y0, span.y0);
         bounds.x1 = @max(bounds.x1, span.x1);
         bounds.y1 = @max(bounds.y1, span.y1);
+        maybe_bounds = bounds;
     }
-    return bounds;
+    return maybe_bounds orelse .{};
+}
+
+fn countRegionSpans(region: BBox, spans: []const TextSpan) usize {
+    var count: usize = 0;
+    for (spans) |span| {
+        if (intersects(region, span.bbox)) count += 1;
+    }
+    return count;
 }
 
 fn intersects(a: BBox, b: BBox) bool {
