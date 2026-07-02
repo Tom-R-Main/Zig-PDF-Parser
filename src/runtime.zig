@@ -90,6 +90,10 @@ pub fn deleteFileCwd(path: []const u8) void {
     std.Io.Dir.cwd().deleteFile(currentIo(), path) catch {};
 }
 
+pub fn deleteTreeCwd(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(currentIo(), path) catch {};
+}
+
 pub fn readFileAllocAlignedCwd(
     allocator: std.mem.Allocator,
     path: []const u8,

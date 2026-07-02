@@ -9,6 +9,7 @@ const adaptive = @import("adaptive.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 const schema = @import("schema.zig");
+const visual_assets = @import("visual_assets.zig");
 
 pub const StreamingEventType = enum {
     document_manifest,
@@ -77,10 +78,12 @@ pub fn extractAdaptiveStreaming(
         defer page_result.deinit();
 
         const page_counts = try writePageArtifacts(
+            allocator,
             writer,
             manifest_options.document_id,
             manifest_options.source_id,
             manifest_options.input_sha256,
+            manifest_options.debug_assets_dir,
             page_index,
             &page_result,
             summary.artifact_counts,
@@ -92,6 +95,7 @@ pub fn extractAdaptiveStreaming(
         summary.artifact_counts.tables += page_counts.tables;
         summary.artifact_counts.route_traces += page_counts.route_traces;
         summary.artifact_counts.rag_chunks += page_counts.rag_chunks;
+        summary.artifact_counts.debug_assets += page_counts.debug_assets;
 
         const page_routes = routeTotals(&page_result);
         addRouteTotals(&summary.route_counts, page_routes);
@@ -112,7 +116,9 @@ pub fn extractAdaptiveStreaming(
     }
 
     if (options.include_debug_asset_refs) {
-        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, manifest_options.source_id, manifest_options.input_sha256, &event_index);
+        const document_debug_assets = try visual_assets.collectDocumentRefs(allocator, manifest_options.debug_assets_dir);
+        defer visual_assets.deinitRecords(allocator, document_debug_assets);
+        summary.artifact_counts.debug_assets += try schema.writeDebugAssetStreamRecords(writer, manifest_options.document_id, manifest_options.source_id, manifest_options.input_sha256, document_debug_assets, &event_index);
     }
 
     const elapsed_ns = runtime.nanoTimestamp() - started_ns;
@@ -135,10 +141,12 @@ pub fn extractAdaptiveStreaming(
 }
 
 fn writePageArtifacts(
+    allocator: std.mem.Allocator,
     writer: anytype,
     document_id: []const u8,
     source_id: ?[]const u8,
     input_sha256: ?[]const u8,
+    debug_assets_dir: ?[]const u8,
     page_index: u32,
     result: anytype,
     global_counts: schema.StreamCounts,
@@ -210,6 +218,10 @@ fn writePageArtifacts(
         counts.rag_chunks += 1;
         try writer.writeByte('\n');
     }
+
+    const page_debug_assets = try visual_assets.collectPageMaterialized(allocator, result, debug_assets_dir, page_index);
+    defer visual_assets.deinitRecords(allocator, page_debug_assets);
+    counts.debug_assets = try schema.writeDebugAssetStreamRecords(writer, document_id, source_id, input_sha256, page_debug_assets, event_index);
 
     return counts;
 }

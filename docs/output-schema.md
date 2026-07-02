@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.5.0`
+Current schema version: `0.6.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -124,9 +124,32 @@ source mask, confidence, and source block/span references.
 
 ### `debug_asset`
 
-Reference to debug artifacts such as debug SVG overlays, route trace JSON,
-hOCR, and ALTO outputs. Each record includes kind, media type, output format,
-URI when materialized, page/region scope, and producing stage.
+Reference to visual review and coordinate artifacts. Debug assets are always
+declared in the public schema; sidecar files are written only when the caller
+passes `--debug-assets-dir` or sets the equivalent adapter/schema option.
+
+Debug asset records include `debug_asset_id`, `asset_kind`, compatibility
+`kind`, `media_type`, `output_format`, `uri`, `path`, `sha256`, `byte_length`,
+`page_index`, `region_index`, `layers`, `stage`, `source_id`, and provenance.
+When no asset directory is supplied, `uri`, `path`, `sha256`, and `byte_length`
+are `null`.
+
+Current `asset_kind` values:
+
+- `page_overlay_svg`
+- `low_confidence_overlay_svg`
+- `table_grid_overlay_svg`
+- `ocr_route_overlay_svg`
+- `span_block_id_overlay_svg`
+- `hocr`
+- `alto`
+- `route_trace_json`
+
+Materialized page assets use deterministic filenames such as
+`page-0001.page-overlay.svg`, `page-0001.table-grid.svg`,
+`page-0001.ocr-routes.svg`, and `page-0001.span-block-ids.svg`. Document-level
+assets include `document.debug.svg`, `document.hocr.html`,
+`document.alto.xml`, and `document.route-trace.json`.
 
 ### Streaming lifecycle records
 
@@ -155,12 +178,15 @@ span*
 block*
 table*
 rag_chunk*
+debug_asset*
 page_finished
 debug_asset*
 document_finished
 ```
 
-The page block repeats for each requested page.
+When `--debug-assets-dir` is provided, page-scoped `debug_asset` records are
+emitted before that page's `page_finished` event. Document-scoped debug assets
+are emitted near the end of the stream before `document_finished`.
 
 ## Siftable Artifact Mapping
 
@@ -186,6 +212,7 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 ```bash
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format stream-jsonl
+pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf

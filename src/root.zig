@@ -37,6 +37,7 @@ pub const adaptive = @import("adaptive.zig");
 pub const schema = @import("schema.zig");
 pub const stream = @import("stream.zig");
 pub const adapter = @import("adapter.zig");
+pub const visual_assets = @import("visual_assets.zig");
 pub const eval = @import("eval.zig");
 
 // Re-exports
@@ -81,6 +82,7 @@ pub const StreamingEventType = stream.StreamingEventType;
 pub const AdaptiveAdapterOptions = adapter.AdaptiveAdapterOptions;
 pub const AdaptiveAdapterFormat = adapter.AdaptiveAdapterFormat;
 pub const AdaptiveAdapterSummary = adapter.AdaptiveAdapterSummary;
+pub const VisualAssetRecord = visual_assets.AssetRecord;
 pub const CorpusCategory = eval.CorpusCategory;
 pub const TextMetrics = eval.TextMetrics;
 pub const DocumentResult = eval.DocumentResult;

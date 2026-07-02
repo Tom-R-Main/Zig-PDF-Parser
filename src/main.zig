@@ -70,6 +70,8 @@ fn printUsage() !void {
         \\  -m, --markdown  Shortcut for --format markdown
         \\  --adaptive      Use adaptive routing and reconciled outputs
         \\  --source-id ID  External caller-owned source id for adaptive artifacts
+        \\  --debug-assets-dir DIR
+        \\                  Write visual review sidecar assets for adaptive outputs
         \\  --trace         Emit adaptive route trace JSON
         \\  --sequential    Disable parallel extraction
         \\  --reading-order Use visual reading order (experimental, slower)
@@ -126,6 +128,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var adaptive = false;
     var trace = false;
     var source_id: ?[]const u8 = null;
+    var debug_assets_dir: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -140,6 +143,9 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < args.len) source_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
+            i += 1;
+            if (i < args.len) debug_assets_dir = args[i];
         } else if (std.mem.eql(u8, arg, "--strict")) {
             error_mode = zpdf.ErrorConfig.strict();
         } else if (std.mem.eql(u8, arg, "--permissive")) {
@@ -214,7 +220,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(pages);
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, allocator, output_handle);
         return;
     }
 
@@ -467,6 +473,7 @@ fn doAdaptiveExtract(
     output_format: OutputFormat,
     trace: bool,
     source_id: ?[]const u8,
+    debug_assets_dir: ?[]const u8,
     allocator: std.mem.Allocator,
     output_handle: ?runtime.File,
 ) !void {
@@ -500,6 +507,7 @@ fn doAdaptiveExtract(
         .encrypted = doc.isEncrypted(),
         .corrupt = doc.errors.items.len > 0,
         .errors = parser_errors,
+        .debug_assets_dir = debug_assets_dir,
     };
 
     if (!trace and output_format == .stream_jsonl) {
@@ -585,6 +593,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var output_file: ?[]const u8 = null;
     var page_range: ?[]const u8 = null;
     var source_id: ?[]const u8 = null;
+    var debug_assets_dir: ?[]const u8 = null;
     var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
     var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
 
@@ -603,6 +612,9 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         } else if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < args.len) source_id = args[i];
+        } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
+            i += 1;
+            if (i < args.len) debug_assets_dir = args[i];
         } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
             i += 1;
             if (i < args.len) {
@@ -662,6 +674,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
+            .debug_assets_dir = debug_assets_dir,
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
@@ -677,6 +690,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
+            .debug_assets_dir = debug_assets_dir,
             .adaptive_options = .{
                 .page_start = window.start,
                 .page_end = window.end,
@@ -999,6 +1013,58 @@ test "extract-adaptive CLI emits neutral source id artifacts" {
             try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
         }
     }
+}
+
+test "extract-adaptive CLI writes visual review sidecars only when requested" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-cli-assets-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var no_assets_output_buf: [112]u8 = undefined;
+    const no_assets_output_path = try std.fmt.bufPrint(&no_assets_output_buf, "pdf-parser-cli-assets-{x}-none.jsonl", .{std.testing.random_seed});
+    runtime.deleteFileCwd(no_assets_output_path);
+    defer runtime.deleteFileCwd(no_assets_output_path);
+
+    try runExtractAdaptive(allocator, &.{ "--input", input_path, "--source-id", "external-assets", "--format", "artifact-jsonl", "--output", no_assets_output_path });
+    const no_assets_output = try runtime.readFileAllocAlignedCwd(allocator, no_assets_output_path, .fromByteUnits(1));
+    defer allocator.free(no_assets_output);
+    try std.testing.expect(std.mem.indexOf(u8, no_assets_output, "\"asset_kind\":\"table_grid_overlay_svg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, no_assets_output, "\"path\":null") != null);
+
+    var asset_dir_buf: [96]u8 = undefined;
+    const asset_dir = try std.fmt.bufPrint(&asset_dir_buf, "pdf-parser-cli-assets-dir-{x}", .{std.testing.random_seed});
+    runtime.deleteTreeCwd(asset_dir);
+    defer runtime.deleteTreeCwd(asset_dir);
+    var output_buf: [112]u8 = undefined;
+    const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-cli-assets-{x}.jsonl", .{std.testing.random_seed});
+    runtime.deleteFileCwd(output_path);
+    defer runtime.deleteFileCwd(output_path);
+
+    try runExtractAdaptive(allocator, &.{ "--input", input_path, "--source-id", "external-assets", "--format", "artifact-jsonl", "--debug-assets-dir", asset_dir, "--output", output_path });
+    const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+    defer allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"path\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"sha256\":\"") != null);
+
+    const table_grid_path = try std.fs.path.join(allocator, &.{ asset_dir, "page-0001.table-grid.svg" });
+    defer allocator.free(table_grid_path);
+    const table_grid = try runtime.readFileAllocAlignedCwd(allocator, table_grid_path, .fromByteUnits(1));
+    defer allocator.free(table_grid);
+    try std.testing.expect(std.mem.indexOf(u8, table_grid, "id=\"table-grid\"") != null);
 }
 
 test "inspect complexity reports native route as JSON" {

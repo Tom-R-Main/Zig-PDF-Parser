@@ -282,7 +282,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.5.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.6.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);
@@ -320,10 +320,18 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
+    try std.testing.expectEqualStrings("0.6.0", debug_assets[0].object.get("schema_version").?.string);
+    try std.testing.expect(debug_assets[0].object.get("asset_kind") != null);
+    try std.testing.expect(debug_assets[0].object.get("path") != null);
+    try std.testing.expectEqual(.null, debug_assets[0].object.get("path").?);
+    try std.testing.expect(debug_assets[0].object.get("uri") != null);
+    try std.testing.expect(debug_assets[0].object.get("sha256") != null);
+    try std.testing.expect(debug_assets[0].object.get("byte_length") != null);
+    try std.testing.expect(debug_assets[0].object.get("layers") != null);
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.5.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.6.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -332,6 +340,80 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"input_sha256\":\"fixture-hash\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"source_id\":\"external-clean-native\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"provenance\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"asset_kind\":\"page_overlay_svg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"asset_kind\":\"table_grid_overlay_svg\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"asset_kind\":\"ocr_route_overlay_svg\"") != null);
+}
+
+test "versioned schema materializes visual review assets when directory is supplied" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{});
+    defer result.deinit();
+
+    var dir_buf: [96]u8 = undefined;
+    const asset_dir = try std.fmt.bufPrint(&dir_buf, "pdf-parser-debug-assets-{x}", .{std.testing.random_seed});
+    runtime.deleteTreeCwd(asset_dir);
+    defer runtime.deleteTreeCwd(asset_dir);
+
+    const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{
+        .document_id = "visual-assets",
+        .source_id = "external-visual-assets",
+        .debug_assets_dir = asset_dir,
+    });
+    defer allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+    const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
+    try std.testing.expect(debug_assets.len >= 9);
+
+    var saw_table_grid_record = false;
+    for (debug_assets) |asset| {
+        try expectProvenanceObject(asset);
+        try std.testing.expectEqualStrings("external-visual-assets", asset.object.get("source_id").?.string);
+        try std.testing.expect(asset.object.get("path") != null);
+        if (asset.object.get("path").? == .string) {
+            try std.testing.expectEqual(@as(usize, 64), asset.object.get("sha256").?.string.len);
+            try std.testing.expect(asset.object.get("byte_length").?.integer > 0);
+        }
+        if (std.mem.eql(u8, asset.object.get("asset_kind").?.string, "table_grid_overlay_svg")) saw_table_grid_record = true;
+    }
+    try std.testing.expect(saw_table_grid_record);
+
+    const table_grid_path = try std.fs.path.join(allocator, &.{ asset_dir, "page-0001.table-grid.svg" });
+    defer allocator.free(table_grid_path);
+    const table_grid = try runtime.readFileAllocAlignedCwd(allocator, table_grid_path, .fromByteUnits(1));
+    defer allocator.free(table_grid);
+    try std.testing.expect(std.mem.indexOf(u8, table_grid, "id=\"table-grid\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, table_grid, "class=\"table-grid-cell\"") != null);
+
+    const span_block_path = try std.fs.path.join(allocator, &.{ asset_dir, "page-0001.span-block-ids.svg" });
+    defer allocator.free(span_block_path);
+    const span_block = try runtime.readFileAllocAlignedCwd(allocator, span_block_path, .fromByteUnits(1));
+    defer allocator.free(span_block);
+    try std.testing.expect(std.mem.indexOf(u8, span_block, "id=\"span-block-id-overlay\"") != null);
+
+    const low_conf_path = try std.fs.path.join(allocator, &.{ asset_dir, "page-0001.low-confidence.svg" });
+    defer allocator.free(low_conf_path);
+    const low_conf = try runtime.readFileAllocAlignedCwd(allocator, low_conf_path, .fromByteUnits(1));
+    defer allocator.free(low_conf);
+    try std.testing.expect(std.mem.indexOf(u8, low_conf, "id=\"low-confidence-regions\"") != null);
+
+    const ocr_route_path = try std.fs.path.join(allocator, &.{ asset_dir, "page-0001.ocr-routes.svg" });
+    defer allocator.free(ocr_route_path);
+    const ocr_route = try runtime.readFileAllocAlignedCwd(allocator, ocr_route_path, .fromByteUnits(1));
+    defer allocator.free(ocr_route);
+    try std.testing.expect(std.mem.indexOf(u8, ocr_route, "id=\"ocr-route-overlay\"") != null);
 }
 
 test "versioned artifact jsonl starts with manifest then typed records" {
@@ -363,7 +445,7 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.5.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.6.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
@@ -416,6 +498,9 @@ test "streaming adaptive jsonl emits manifest page artifacts and document finish
 
 test "streaming adaptive jsonl emits financial table before page finish" {
     const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
 
     const pdf_data = try testpdf.generateMergedCellFinancialTablePdf(allocator);
     defer allocator.free(pdf_data);
@@ -427,10 +512,19 @@ test "streaming adaptive jsonl emits financial table before page finish" {
     defer output.deinit(allocator);
     const writer = runtime.arrayListWriter(&output, allocator);
 
-    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-table" } });
+    var dir_buf: [96]u8 = undefined;
+    const asset_dir = try std.fmt.bufPrint(&dir_buf, "pdf-parser-stream-debug-assets-{x}", .{std.testing.random_seed});
+    runtime.deleteTreeCwd(asset_dir);
+    defer runtime.deleteTreeCwd(asset_dir);
+
+    const summary = try doc.extractAdaptiveStreaming(allocator, writer, .{ .schema_options = .{ .document_id = "stream-table", .debug_assets_dir = asset_dir } });
     try std.testing.expect(summary.artifact_counts.tables > 0);
+    try std.testing.expect(summary.artifact_counts.debug_assets > 0);
     try expectIndexBefore(output.items, "\"record_type\":\"table\"", "\"event_type\":\"page_finished\"");
+    try expectIndexBefore(output.items, "\"asset_kind\":\"table_grid_overlay_svg\"", "\"event_type\":\"page_finished\"");
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"colspan\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"record_type\":\"debug_asset\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"path\":\"") != null);
     try expectJsonlLinesParse(allocator, output.items);
 }
 
@@ -548,7 +642,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
-    try std.testing.expectEqualStrings("0.5.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.6.0", tables[0].object.get("schema_version").?.string);
     try std.testing.expect(tables[0].object.get("logical_table_id") != null);
     try std.testing.expect(tables[0].object.get("table_part_index") != null);
     try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
@@ -558,7 +652,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
     try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.5.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.6.0", cells[0].object.get("schema_version").?.string);
     try std.testing.expect(cells[0].object.get("cell_id") != null);
     try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
     try std.testing.expect(cells[0].object.get("raw_text") != null);

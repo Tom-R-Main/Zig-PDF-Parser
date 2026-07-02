@@ -20,6 +20,8 @@ kernel into a hybrid, adaptive parser.
 - Geometry-aware table reconstruction for aligned, ruled, merged-cell, rowspan,
   footnote, and multi-page financial table fixtures
 - JSON/JSONL/RAG/hOCR/ALTO/debug-SVG output surfaces with typed provenance
+- Optional visual review sidecars for page overlays, table grids, OCR routes,
+  low-confidence regions, and span/block ids
 - JSON inspection and trace output for page and region routing decisions
 
 ## Performance Benchmark
@@ -111,6 +113,7 @@ pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser extract --adaptive -f rag-jsonl doc.pdf
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
+pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
 pdf-parser extract --adaptive -f hocr doc.pdf
 pdf-parser extract --adaptive -f alto doc.pdf
 pdf-parser extract --adaptive -f debug-svg doc.pdf
@@ -138,13 +141,21 @@ artifacts, `page_finished`, optional debug assets, then `document_finished`.
 `jsonl` remains a compatibility span stream, and `rag-jsonl` remains chunk-only.
 The schema is documented in [docs/output-schema.md](docs/output-schema.md).
 
+Visual review assets are formal `debug_asset` records in schema `0.6.0`. By
+default they are references with `path:null`, `uri:null`, and null hashes. Add
+`--debug-assets-dir DIR` to materialize deterministic sidecar files such as
+`page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`, `document.hocr.html`,
+and `document.route-trace.json`; the corresponding records then include file
+path, byte length, SHA256, page scope, layers, and provenance.
+
 For host applications, prefer the neutral adapter command:
 
 ```bash
 pdf-parser extract-adaptive \
   --input doc.pdf \
   --source-id external-system-id \
-  --format artifact-jsonl
+  --format artifact-jsonl \
+  --debug-assets-dir review-assets
 ```
 
 `source_id` is a caller-owned external identity, separate from the parser's
@@ -262,7 +273,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.5.0`. Every emitted record carries a `provenance` envelope with document and
+`0.6.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

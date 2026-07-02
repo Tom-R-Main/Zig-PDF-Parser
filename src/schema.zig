@@ -7,8 +7,9 @@ const std = @import("std");
 const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
+const visual_assets = @import("visual_assets.zig");
 
-pub const schema_version = "0.5.0";
+pub const schema_version = "0.6.0";
 pub const parser_version = "0.1.0-alpha";
 
 pub const RenderOptions = struct {
@@ -22,6 +23,7 @@ pub const RenderOptions = struct {
     warnings: []const ManifestDiagnostic = &.{},
     errors: []const ManifestDiagnostic = &.{},
     include_debug_asset_refs: bool = true,
+    debug_assets_dir: ?[]const u8 = null,
 };
 
 pub const ManifestDiagnostic = struct {
@@ -64,6 +66,9 @@ pub const StreamRecordMeta = struct {
 };
 
 pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options: RenderOptions) ![]u8 {
+    const debug_assets = try visual_assets.collectBatch(allocator, result, options.debug_assets_dir, options.include_debug_asset_refs);
+    defer visual_assets.deinitRecords(allocator, debug_assets);
+
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     const writer = runtime.arrayListWriter(&output, allocator);
@@ -97,13 +102,16 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
         try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, .{}, null);
     }
     try writer.writeAll("],\"debug_assets\":[");
-    if (options.include_debug_asset_refs) try writeDebugAssetRecords(writer, options.document_id, options.source_id, options.input_sha256, false, null);
+    try writeDebugAssetRecords(writer, options.document_id, options.source_id, options.input_sha256, debug_assets, false, null);
     try writer.writeAll("]}");
 
     return output.toOwnedSlice(allocator);
 }
 
 pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, options: RenderOptions) ![]u8 {
+    const debug_assets = try visual_assets.collectBatch(allocator, result, options.debug_assets_dir, options.include_debug_asset_refs);
+    defer visual_assets.deinitRecords(allocator, debug_assets);
+
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     const writer = runtime.arrayListWriter(&output, allocator);
@@ -131,9 +139,7 @@ pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, option
         try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, .{}, null);
         try writer.writeByte('\n');
     }
-    if (options.include_debug_asset_refs) {
-        try writeDebugAssetRecords(writer, options.document_id, options.source_id, options.input_sha256, true, null);
-    }
+    try writeDebugAssetRecords(writer, options.document_id, options.source_id, options.input_sha256, debug_assets, true, null);
 
     return output.toOwnedSlice(allocator);
 }
@@ -286,7 +292,7 @@ fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions)
             result.form_fields.len,
             routeTraceCount(result),
             result.reconciled.chunks.len,
-            if (options.include_debug_asset_refs) debug_asset_specs.len else 0,
+            visual_assets.assetCount(result, options.include_debug_asset_refs),
         },
     );
 }
@@ -425,7 +431,7 @@ fn outputArtifactCount(result: anytype, kind: ArtifactHashKind, options: RenderO
         .form_fields => result.form_fields.len,
         .route_traces => routeTraceCount(result),
         .rag_chunks => result.reconciled.chunks.len,
-        .debug_assets => if (options.include_debug_asset_refs) debug_asset_specs.len else 0,
+        .debug_assets => visual_assets.assetCount(result, options.include_debug_asset_refs),
     };
 }
 
@@ -543,12 +549,8 @@ fn hashRagChunks(hasher: anytype, result: anytype) void {
 
 fn hashDebugAssets(hasher: anytype, include_debug_asset_refs: bool) void {
     if (!include_debug_asset_refs) return;
-    for (debug_asset_specs) |asset| {
-        hashText(hasher, asset.id);
-        hashText(hasher, asset.kind);
-        hashText(hasher, asset.media_type);
-        hashText(hasher, asset.output_format);
-    }
+    hashText(hasher, "visual-review-assets-v1");
+    hashPrint(hasher, "{};", .{include_debug_asset_refs});
 }
 
 fn hashText(hasher: anytype, text: []const u8) void {
@@ -773,9 +775,9 @@ pub fn writeRagChunkStreamRecord(writer: anytype, result: anytype, document_id: 
     try writeRagChunkRecord(writer, result, document_id, source_id, input_sha256, chunk, offsets.chunk_base, offsets.block_base, offsets, meta);
 }
 
-pub fn writeDebugAssetStreamRecords(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, event_index: *u64) !usize {
+pub fn writeDebugAssetStreamRecords(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, records: []const visual_assets.AssetRecord, event_index: *u64) !usize {
     const before = event_index.*;
-    try writeDebugAssetRecords(writer, document_id, source_id, input_sha256, true, event_index);
+    try writeDebugAssetRecords(writer, document_id, source_id, input_sha256, records, true, event_index);
     return @intCast(event_index.* - before);
 }
 
@@ -1270,22 +1272,8 @@ fn writeRagChunkRecord(writer: anytype, result: anytype, document_id: []const u8
     try writer.writeByte('}');
 }
 
-const DebugAssetSpec = struct {
-    id: []const u8,
-    kind: []const u8,
-    media_type: []const u8,
-    output_format: []const u8,
-};
-
-const debug_asset_specs = [_]DebugAssetSpec{
-    .{ .id = "debug-svg", .kind = "debug_overlay", .media_type = "image/svg+xml", .output_format = "debug-svg" },
-    .{ .id = "route-trace", .kind = "route_trace", .media_type = "application/json", .output_format = "trace-json" },
-    .{ .id = "hocr", .kind = "coordinate_text", .media_type = "text/html", .output_format = "hocr" },
-    .{ .id = "alto", .kind = "coordinate_text", .media_type = "application/xml", .output_format = "alto" },
-};
-
-fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, jsonl: bool, stream_event_index: ?*u64) !void {
-    for (debug_asset_specs, 0..) |asset, index| {
+pub fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, records: []const visual_assets.AssetRecord, jsonl: bool, stream_event_index: ?*u64) !void {
+    for (records, 0..) |asset, index| {
         if (index > 0) {
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
         }
@@ -1301,25 +1289,53 @@ fn writeDebugAssetRecords(writer: anytype, document_id: []const u8, source_id: ?
         try writeDocumentId(writer, document_id);
         try writeSourceId(writer, source_id);
         try writer.writeAll(",\"debug_asset_id\":\"");
-        try writeJsonEscaped(writer, asset.id);
+        try writeJsonEscaped(writer, asset.debug_asset_id);
+        try writer.writeAll("\",\"asset_kind\":\"");
+        try writeJsonEscaped(writer, asset.asset_kind);
         try writer.writeAll("\",\"kind\":\"");
         try writeJsonEscaped(writer, asset.kind);
         try writer.writeAll("\",\"media_type\":\"");
         try writeJsonEscaped(writer, asset.media_type);
         try writer.writeAll("\",\"output_format\":\"");
         try writeJsonEscaped(writer, asset.output_format);
-        try writer.writeAll("\",\"uri\":null,\"page_index\":null,\"region_index\":null,\"stage\":\"output_ready\"");
+        try writer.writeAll("\",\"uri\":");
+        try writeOptionalString(writer, asset.uri);
+        try writer.writeAll(",\"path\":");
+        try writeOptionalString(writer, asset.path);
+        try writer.writeAll(",\"sha256\":");
+        try writeOptionalString(writer, asset.sha256);
+        try writer.writeAll(",\"byte_length\":");
+        if (asset.byte_length) |byte_length| {
+            try writer.print("{}", .{byte_length});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"page_index\":");
+        try writeOptionalU32(writer, asset.page_index);
+        try writer.writeAll(",\"region_index\":");
+        try writeOptionalU32(writer, asset.region_index);
+        try writer.writeAll(",\"layers\":[");
+        for (asset.layers, 0..) |layer, layer_index| {
+            if (layer_index > 0) try writer.writeByte(',');
+            try writer.writeByte('"');
+            try writeJsonEscaped(writer, layer);
+            try writer.writeByte('"');
+        }
+        try writer.writeAll("],\"stage\":\"");
+        try writeJsonEscaped(writer, asset.stage);
+        try writer.writeByte('"');
         try writeProvenance(writer, .{
             .document_id = document_id,
             .source_id = source_id,
             .input_sha256 = input_sha256,
-            .artifact_id = asset.id,
+            .artifact_id = asset.debug_asset_id,
+            .page_index = asset.page_index,
             .source_kind = "debug",
             .confidence = 1.0,
         });
         try writer.writeByte('}');
     }
-    if (jsonl and debug_asset_specs.len > 0) try writer.writeByte('\n');
+    if (jsonl and records.len > 0) try writer.writeByte('\n');
 }
 
 const ProvenanceArgs = struct {

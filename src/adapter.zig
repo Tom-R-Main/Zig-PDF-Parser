@@ -21,6 +21,7 @@ pub const AdaptiveAdapterOptions = struct {
     format: AdaptiveAdapterFormat = .artifact_jsonl,
     adaptive_options: adaptive.ExtractOptions = .{},
     include_debug_asset_refs: bool = true,
+    debug_assets_dir: ?[]const u8 = null,
 };
 
 pub const AdaptiveAdapterSummary = struct {
@@ -58,6 +59,7 @@ pub fn extractAdaptive(
         .corrupt = document.errors.items.len > 0,
         .errors = parser_errors,
         .include_debug_asset_refs = options.include_debug_asset_refs,
+        .debug_assets_dir = options.debug_assets_dir,
     };
 
     if (options.format == .stream_jsonl) {
