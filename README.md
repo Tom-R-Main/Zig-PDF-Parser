@@ -111,6 +111,9 @@ pdf-parser benchmark \
 .venv/bin/python benchmark/eval/structural_compare.py \
   --manifest benchmark/eval/corpus/manifest.tsv \
   --output /tmp/pdf-parser-structural.jsonl
+.venv/bin/python benchmark/eval/font_compare.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --output /tmp/pdf-parser-font-diff.jsonl
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
 .venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
@@ -127,10 +130,13 @@ pdf-parser benchmark \
 
 Current fixture classes include clean born-digital text, academic two-column
 layout, scientific formulas, image-only scans, mixed native/scan pages,
-financial tables, AcroForms, and corrupt/adversarial PDFs. Financial table truth
-can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and bbox-aware
-provenance. Form truth asserts field name/type/value sequences. Formula truth
-can assert both text and simple structure records.
+financial tables, AcroForms, weird-font cases, and corrupt/adversarial PDFs.
+`benchmark/eval/font_compare.py` runs the weird-font subset against
+`pdf-parser`, PyMuPDF, and pypdfium2; use it as differential accuracy evidence,
+not as a claim that the Python tools are universal ground truth. Financial
+table truth can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and
+bbox-aware provenance. Form truth asserts field name/type/value sequences.
+Formula truth can assert both text and simple structure records.
 
 `pdf-parser benchmark` is the product-facing corpus runner. It emits a full
 scorecard JSON plus optional record-oriented JSONL with `benchmark_run`,

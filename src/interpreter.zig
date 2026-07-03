@@ -671,6 +671,7 @@ pub const SpanCollector = struct {
             .mcid = self.current_mcid,
             .unicode_map_error = self.pending_unicode_map_error,
             .actual_text = self.pending_actual_text,
+            .writing_mode = self.current_writing_mode,
         }));
 
         self.text_buffer.clearRetainingCapacity();

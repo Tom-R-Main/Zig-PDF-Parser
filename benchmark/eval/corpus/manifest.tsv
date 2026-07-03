@@ -14,4 +14,9 @@ forms	acroform-fields	benchmark/eval/corpus/forms/acroform-fields.pdf	benchmark/
 forms	realistic-widget-fields	benchmark/eval/corpus/forms/realistic-widget-fields.pdf	benchmark/eval/ground_truth/page_text/forms/realistic-widget-fields.txt					benchmark/eval/ground_truth/form_fields/forms/realistic-widget-fields.json
 forms	inherited-widget-fields	benchmark/eval/corpus/forms/inherited-widget-fields.pdf	benchmark/eval/ground_truth/page_text/forms/inherited-widget-fields.txt					benchmark/eval/ground_truth/form_fields/forms/inherited-widget-fields.json
 scanned_typewritten	mixed-native-scan	benchmark/eval/corpus/scanned_typewritten/mixed-native-scan.pdf	benchmark/eval/ground_truth/page_text/scanned_typewritten/mixed-native-scan.txt
+weird_fonts	actualtext-repair	benchmark/eval/corpus/weird_fonts/actualtext-repair.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/actualtext-repair.txt
+weird_fonts	type3-simple	benchmark/eval/corpus/weird_fonts/type3-simple.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-simple.txt
+weird_fonts	type3-tounicode	benchmark/eval/corpus/weird_fonts/type3-tounicode.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-tounicode.txt
+weird_fonts	identity-h-broken	benchmark/eval/corpus/weird_fonts/identity-h-broken.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-h-broken.txt
+weird_fonts	identity-v-vertical-cjk	benchmark/eval/corpus/weird_fonts/identity-v-vertical-cjk.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-v-vertical-cjk.txt
 adversarial_corrupt	missing-page-type	benchmark/eval/corpus/adversarial_corrupt/missing-page-type.pdf	benchmark/eval/ground_truth/page_text/adversarial_corrupt/missing-page-type.txt

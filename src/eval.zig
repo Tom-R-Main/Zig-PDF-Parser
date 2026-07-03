@@ -18,6 +18,7 @@ pub const CorpusCategory = enum {
     legal_contracts,
     manuals,
     forms,
+    weird_fonts,
     adversarial_corrupt,
 
     pub fn parse(text: []const u8) ?CorpusCategory {
@@ -35,6 +36,7 @@ pub const corpus_categories = [_]CorpusCategory{
     .legal_contracts,
     .manuals,
     .forms,
+    .weird_fonts,
     .adversarial_corrupt,
 };
 
@@ -564,9 +566,9 @@ fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
 }
 
 test "corpus categories include requested benchmark classes" {
-    try std.testing.expectEqual(@as(usize, 10), corpus_categories.len);
+    try std.testing.expectEqual(@as(usize, 11), corpus_categories.len);
     try std.testing.expectEqual(CorpusCategory.scientific_math, CorpusCategory.parse("scientific_math").?);
-    try std.testing.expectEqual(CorpusCategory.adversarial_corrupt, corpus_categories[9]);
+    try std.testing.expectEqual(CorpusCategory.adversarial_corrupt, corpus_categories[10]);
 }
 
 test "text metrics track character word token and order quality" {

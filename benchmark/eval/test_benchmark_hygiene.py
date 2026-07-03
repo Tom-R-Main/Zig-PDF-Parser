@@ -30,6 +30,7 @@ profile_lanes = load_module("profile_lanes", EVAL_DIR / "profile_lanes.py")
 analyze_baseline = load_module("analyze_baseline", EVAL_DIR / "analyze_baseline.py")
 run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
 structural_compare = load_module("structural_compare", EVAL_DIR / "structural_compare.py")
+font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
@@ -257,6 +258,106 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "ocr-routed", None, None, True))
         self.assertFalse(profile_lanes.ocr_full_run_guard(text, "ocr-routed", None, None, False))
         self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "adaptive-stream-jsonl", None, None, False))
+
+    def test_font_compare_loads_metadata_sidecar_and_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "font.pdf"
+            text_path = temp_path / "font.txt"
+            truth_path = temp_path / "font.json"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            text_path.write_text("Correct ActualText replacement\n", encoding="utf-8")
+            truth_path.write_text(
+                json.dumps(
+                    {
+                        "expected_text": "Correct ActualText replacement",
+                        "expect_actual_text": True,
+                        "expect_unicode_map_error": False,
+                        "expected_writing_mode": 0,
+                        "required_glyph_trace_fields": ["record_type", "bbox"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_path = temp_path / "manifest.tsv"
+            manifest_path.write_text(
+                f"weird_fonts\tactualtext-repair\t{pdf_path}\t{text_path}\n",
+                encoding="utf-8",
+            )
+            metadata_path = temp_path / "metadata.jsonl"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "category": "weird_fonts",
+                        "doc_id": "actualtext-repair",
+                        "font_truth_path": str(truth_path),
+                        "font_case_tags": ["actualtext", "marked-content"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = font_compare.load_entries(manifest_path, ROOT)
+            truth = font_compare.load_font_truth(entries[0])
+
+        self.assertEqual("actualtext-repair", entries[0].doc_id)
+        self.assertEqual(("actualtext", "marked-content"), entries[0].font_case_tags)
+        self.assertTrue(truth["expect_actual_text"])
+
+    def test_font_compare_validates_truth_shape(self) -> None:
+        with self.assertRaises(ValueError):
+            font_compare.validate_font_truth({"expected_text": "missing fields"})
+
+    def test_font_compare_optional_baseline_skip(self) -> None:
+        entry = font_compare.Entry(
+            category="weird_fonts",
+            doc_id="doc",
+            pdf_path=Path("/tmp/doc.pdf"),
+            truth_text_path=Path("/tmp/doc.txt"),
+            font_truth_path=None,
+            font_case_tags=("type3",),
+        )
+
+        row = font_compare.skipped(entry, "pymupdf", "PyMuPDF is not installed")
+
+        self.assertEqual("font_compare_result", row["record_type"])
+        self.assertEqual("skipped", row["status"])
+        self.assertEqual(["type3"], row["font_case_tags"])
+
+    def test_font_compare_pdf_parser_expectations_use_glyph_traces(self) -> None:
+        truth = {
+            "expected_text": "日本",
+            "expect_actual_text": False,
+            "expect_unicode_map_error": False,
+            "expected_writing_mode": 1,
+            "required_glyph_trace_fields": ["record_type", "bbox", "writing_mode"],
+        }
+        result = {
+            "text": "日本",
+            "glyph_traces": [
+                {
+                    "record_type": "glyph_trace",
+                    "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+                    "writing_mode": 1,
+                    "unicode_map_error": False,
+                    "actual_text": False,
+                }
+            ],
+        }
+
+        expectations = font_compare.expectation_results("pdf-parser", truth, result)
+
+        self.assertTrue(expectations["vertical_writing_ok"])
+        self.assertTrue(expectations["unicode_map_error_ok"])
+        self.assertTrue(expectations["required_glyph_trace_fields_ok"])
+
+    def test_font_compare_metrics_are_normalized(self) -> None:
+        metrics = font_compare.text_metrics("Correct   text", "Correct text")
+
+        self.assertEqual(0.0, metrics["cer"])
+        self.assertEqual(0.0, metrics["wer"])
+        self.assertEqual(1.0, metrics["token_f1"])
 
     def test_profile_output_jsonl_parses_line_by_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

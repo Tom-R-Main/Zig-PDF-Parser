@@ -82,6 +82,7 @@ pub const TextSpan = struct {
     mcid: ?i32 = null,
     unicode_map_error: bool = false,
     actual_text: bool = false,
+    writing_mode: u8 = 0,
 
     pub fn init(args: struct {
         page_index: u32 = 0,
@@ -95,6 +96,7 @@ pub const TextSpan = struct {
         mcid: ?i32 = null,
         unicode_map_error: bool = false,
         actual_text: bool = false,
+        writing_mode: u8 = 0,
     }) TextSpan {
         var font = args.font;
         const font_size = if (font.size != 0) font.size else args.bbox.y1 - args.bbox.y0;
@@ -117,6 +119,7 @@ pub const TextSpan = struct {
             .mcid = args.mcid,
             .unicode_map_error = args.unicode_map_error,
             .actual_text = args.actual_text,
+            .writing_mode = args.writing_mode,
         };
     }
 };

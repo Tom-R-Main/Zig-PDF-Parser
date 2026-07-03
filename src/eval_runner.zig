@@ -1260,7 +1260,7 @@ fn printUsage() !void {
         \\Categories:
         \\  clean_born_digital, academic_two_column, scientific_math,
         \\  scanned_typewritten, patents, financial_tables, legal_contracts,
-        \\  manuals, forms, adversarial_corrupt
+        \\  manuals, forms, weird_fonts, adversarial_corrupt
         \\
     );
 }

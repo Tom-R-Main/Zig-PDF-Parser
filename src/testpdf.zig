@@ -546,6 +546,217 @@ pub fn generateCIDFontPdf(allocator: std.mem.Allocator) ![]u8 {
     return pdf.toOwnedSlice(allocator);
 }
 
+fn generateSinglePageFontFixturePdf(
+    allocator: std.mem.Allocator,
+    font_resources: []const u8,
+    content: []const u8,
+    extra_objects: []const []const u8,
+) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+    var offsets: std.ArrayList(usize) = .empty;
+    defer offsets.deinit(allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    try offsets.append(allocator, pdf.items.len);
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    try offsets.append(allocator, pdf.items.len);
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    try offsets.append(allocator, pdf.items.len);
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << ");
+    try writer.writeAll(font_resources);
+    try writer.writeAll(" >> >> >>\nendobj\n");
+
+    try offsets.append(allocator, pdf.items.len);
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    for (extra_objects) |object| {
+        try offsets.append(allocator, pdf.items.len);
+        try writer.writeAll(object);
+        if (!std.mem.endsWith(u8, object, "\n")) try writer.writeByte('\n');
+    }
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n");
+    try writer.print("0 {}\n", .{offsets.items.len + 1});
+    try writer.writeAll("0000000000 65535 f \n");
+    for (offsets.items) |offset| {
+        try writer.print("{d:0>10} 00000 n \n", .{offset});
+    }
+    try writer.writeAll("trailer\n");
+    try writer.print("<< /Size {} /Root 1 0 R >>\n", .{offsets.items.len + 1});
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+fn repeatedWidths(allocator: std.mem.Allocator, count: usize, width_value: []const u8) ![]u8 {
+    var widths: std.ArrayList(u8) = .empty;
+    errdefer widths.deinit(allocator);
+    var writer = runtime.arrayListWriter(&widths, allocator);
+    for (0..count) |index| {
+        if (index > 0) try writer.writeByte(' ');
+        try writer.writeAll(width_value);
+    }
+    return widths.toOwnedSlice(allocator);
+}
+
+/// Generate a fixture where /ActualText repairs intentionally bad visible text.
+pub fn generateActualTextRepairPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n" ++
+        "/F1 12 Tf\n" ++
+        "100 700 Td\n" ++
+        "/Span << /ActualText (Correct ActualText replacement) /MCID 0 >> BDC\n" ++
+        "(WRONGVISIBLE) Tj\n" ++
+        "EMC\n" ++
+        "ET\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
+/// Generate a deterministic Type3 font fixture using WinAnsi text mapping.
+pub fn generateType3SimplePdf(allocator: std.mem.Allocator) ![]u8 {
+    const widths = try repeatedWidths(allocator, 91, "600");
+    defer allocator.free(widths);
+    const font = try std.fmt.allocPrint(
+        allocator,
+        "5 0 obj\n" ++
+            "<< /Type /Font /Subtype /Type3 /Name /F1 /FontBBox [0 -200 1000 900] " ++
+            "/FontMatrix [0.001 0 0 0.001 0 0] /FirstChar 32 /LastChar 122 " ++
+            "/Widths [{s}] /Encoding /WinAnsiEncoding /Resources << >> /CharProcs << /.notdef 6 0 R >> >>\n" ++
+            "endobj\n",
+        .{widths},
+    );
+    defer allocator.free(font);
+    const charproc =
+        "6 0 obj\n" ++
+        "<< /Length 17 >>\n" ++
+        "stream\n" ++
+        "600 0 0 0 0 0 d0\n" ++
+        "endstream\n" ++
+        "endobj\n";
+    const content = "BT\n/F1 16 Tf\n100 700 Td\n(Type3 simple text) Tj\nET\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, charproc });
+}
+
+/// Generate a Type3 font whose ToUnicode CMap remaps raw ABC to XYZ.
+pub fn generateType3ToUnicodePdf(allocator: std.mem.Allocator) ![]u8 {
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type3 /Name /F1 /FontBBox [0 -200 1000 900] " ++
+        "/FontMatrix [0.001 0 0 0.001 0 0] /FirstChar 65 /LastChar 67 /Widths [600 600 600] " ++
+        "/Encoding << /Type /Encoding /Differences [65 /A /B /C] >> /Resources << >> " ++
+        "/CharProcs << /.notdef 6 0 R /A 6 0 R /B 6 0 R /C 6 0 R >> /ToUnicode 7 0 R >>\n" ++
+        "endobj\n";
+    const charproc =
+        "6 0 obj\n" ++
+        "<< /Length 17 >>\n" ++
+        "stream\n" ++
+        "600 0 0 0 0 0 d0\n" ++
+        "endstream\n" ++
+        "endobj\n";
+    const tounicode =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\/CMapName /Type3ToUnicode def
+        \\1 begincodespacerange
+        \\<00> <FF>
+        \\endcodespacerange
+        \\3 beginbfchar
+        \\<41> <0058>
+        \\<42> <0059>
+        \\<43> <005A>
+        \\endbfchar
+        \\endcmap
+        \\CMapName currentdict /CMap defineresource pop
+        \\end
+        \\end
+    ;
+    const cmap_object = try std.fmt.allocPrint(
+        allocator,
+        "7 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n",
+        .{ tounicode.len, tounicode },
+    );
+    defer allocator.free(cmap_object);
+    const content = "BT\n/F1 16 Tf\n100 700 Td\n(ABC) Tj\nET\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, charproc, cmap_object });
+}
+
+/// Generate an Identity-H CID font without ToUnicode and with a suspicious control CID.
+pub fn generateIdentityHBrokenPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n" ++
+        "/F1 12 Tf\n100 700 Td\n(Broken identity) Tj\n" ++
+        "/F2 12 Tf\n100 680 Td\n<0001> Tj\n" ++
+        "ET\n";
+    const font1 =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    const font2 =
+        "6 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type0 /BaseFont /BrokenIdentity /Encoding /Identity-H /DescendantFonts [7 0 R] >>\n" ++
+        "endobj\n";
+    const descendant =
+        "7 0 obj\n" ++
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /BrokenIdentity " ++
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R /F2 6 0 R", content, &.{ font1, font2, descendant });
+}
+
+/// Generate a vertical Identity-V CID font fixture with ToUnicode for Japanese text.
+pub fn generateIdentityVVerticalCjkPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content = "BT\n/F1 18 Tf\n300 700 Td\n<00010002> Tj\nET\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type0 /BaseFont /VerticalCJK /Encoding /Identity-V " ++
+        "/DescendantFonts [6 0 R] /ToUnicode 7 0 R >>\n" ++
+        "endobj\n";
+    const descendant =
+        "6 0 obj\n" ++
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /VerticalCJK " ++
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 5 >> /DW 1000 /W [1 [1000 1000]] >>\n" ++
+        "endobj\n";
+    const tounicode =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapType 2 def
+        \\/CMapName /VerticalCJKToUnicode def
+        \\/WMode 1 def
+        \\1 begincodespacerange
+        \\<0000> <FFFF>
+        \\endcodespacerange
+        \\2 beginbfchar
+        \\<0001> <65E5>
+        \\<0002> <672C>
+        \\endbfchar
+        \\endcmap
+        \\CMapName currentdict /CMap defineresource pop
+        \\end
+        \\end
+    ;
+    const cmap_object = try std.fmt.allocPrint(
+        allocator,
+        "7 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n",
+        .{ tounicode.len, tounicode },
+    );
+    defer allocator.free(cmap_object);
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, descendant, cmap_object });
+}
+
 /// Generate a PDF whose leaf page node omits /Type (valid but often rejected).
 /// Tests Fix 2: pagetree /Type default inference.
 pub fn generatePdfWithoutPageType(allocator: std.mem.Allocator, text: []const u8) ![]u8 {

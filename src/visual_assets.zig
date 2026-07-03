@@ -291,14 +291,15 @@ fn renderGlyphTraceJsonl(allocator: std.mem.Allocator, result: anytype, page_ind
             );
             try writeOptionalJsonString(writer, span.font.name);
             try writer.print(
-                ",\"font_size\":{d:.3},\"writing_mode\":0,\"generated\":false,\"hyphen\":{},\"unicode_map_error\":{},\"actual_text\":{},\"mcid\":",
-                .{ span.font_size, isHyphenText(span.text[byte_index..end]), span.unicode_map_error, span.actual_text },
+                ",\"font_size\":{d:.3},\"writing_mode\":{},\"generated\":false,\"hyphen\":{},\"unicode_map_error\":{},\"actual_text\":{},\"mcid\":",
+                .{ span.font_size, span.writing_mode, isHyphenText(span.text[byte_index..end]), span.unicode_map_error, span.actual_text },
             );
             if (span.mcid) |mcid| {
                 try writer.print("{}", .{mcid});
             } else {
                 try writer.writeAll("null");
             }
+            try writer.writeByte('}');
             try writer.writeByte('\n');
 
             char_index += 1;

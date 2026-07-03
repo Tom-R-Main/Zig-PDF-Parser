@@ -32,8 +32,8 @@ zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
 
 That command emits one JSONL record for each current fixture category:
 clean born-digital text, academic two-column layout, scientific math notation,
-scanned/typewritten image-only input, financial tables, forms, and adversarial
-page-tree recovery.
+scanned/typewritten image-only input, financial tables, forms, weird-font
+fixtures, and adversarial page-tree recovery.
 
 `benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
 checked-in corpus. Each row records the fixture id, source note, redistribution
@@ -42,6 +42,26 @@ loads this sidecar automatically when it sits next to `manifest.tsv` and fails
 if the adaptive counters differ from those expectations. Large or raw third-party
 corpora should live under `benchmark/eval/raw_cache/`, which is ignored by git;
 checked-in PDFs should stay small, redistributable reductions.
+
+Font-fidelity sidecars live under `benchmark/eval/ground_truth/fonts/`. They are
+discovered from `metadata.jsonl` instead of extra manifest columns so existing
+text/table/formula eval lanes stay compatible. The current `weird_fonts`
+category covers ActualText repair, Type3 fonts, broken Identity-H, and vertical
+CJK:
+
+```sh
+.venv/bin/python benchmark/eval/font_compare.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --output /tmp/pdf-parser-font-diff.jsonl
+```
+
+The font comparator runs `pdf-parser extract-adaptive --format artifact-jsonl
+--debug-assets-dir ...`, reads `page-*.glyph-trace.jsonl`, and compares the
+same PDFs with PyMuPDF and pypdfium2 when those optional packages are present.
+Use `--require-baselines` when missing Python baselines should fail the run.
+This is a differential accuracy harness: the sidecar truth defines the expected
+behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an
+absolute oracle.
 
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
@@ -110,6 +130,7 @@ benchmark/eval/
     legal_contracts/
     manuals/
     forms/
+    weird_fonts/
     adversarial_corrupt/
   ground_truth/
     page_text/
@@ -118,6 +139,7 @@ benchmark/eval/
     formulas/
     formulas_json/
     form_fields/
+    fonts/
     reading_order/
   outputs/
     pdf-parser/

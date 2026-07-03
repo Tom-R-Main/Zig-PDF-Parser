@@ -463,7 +463,8 @@ pub const FontEncoding = struct {
                     self.cid_system_info.isIdentity() and
                     !self.has_to_unicode and
                     (final_codepoint < 0x20 or (final_codepoint >= 0x7F and final_codepoint <= 0x9F));
-                const len = std.unicode.utf8Encode(@intCast(final_codepoint), &buf) catch 1;
+                const len = if (suspicious_identity) 1 else std.unicode.utf8Encode(@intCast(final_codepoint), &buf) catch 1;
+                if (suspicious_identity) buf[0] = ' ';
                 try sink.writeDecodedGlyph(.{
                     .source_code = code.value,
                     .source_bytes = data[source_start..i],

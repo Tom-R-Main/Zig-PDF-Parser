@@ -21,6 +21,8 @@ const Fixture = struct {
     formula_truth: ?[]const u8 = null,
     formula_json_truth: ?[]const u8 = null,
     form_json_truth: ?[]const u8 = null,
+    font_truth: ?[]const u8 = null,
+    font_case_tags: []const []const u8 = &.{},
     generate: *const fn (std.mem.Allocator) anyerror![]u8,
 };
 
@@ -494,6 +496,116 @@ const fixtures = [_]Fixture{
         .generate = testpdf.generateMixedNativeScanPdf,
     },
     .{
+        .category = "weird_fonts",
+        .doc_id = "actualtext-repair",
+        .pdf_name = "actualtext-repair.pdf",
+        .source_note = "synthetic marked-content fixture where ActualText repairs intentionally wrong visible glyph text",
+        .truth =
+        \\Correct ActualText replacement
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "Correct ActualText replacement",
+        \\  "expect_actual_text": true,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "generated", "hyphen", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "actualtext", "marked-content" },
+        .generate = testpdf.generateActualTextRepairPdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "type3-simple",
+        .pdf_name = "type3-simple.pdf",
+        .source_note = "synthetic Type3 font fixture using WinAnsi text and deterministic width metadata",
+        .truth =
+        \\Type3 simple text
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "Type3 simple text",
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "type3", "winansi" },
+        .generate = testpdf.generateType3SimplePdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "type3-tounicode",
+        .pdf_name = "type3-tounicode.pdf",
+        .source_note = "synthetic Type3 font fixture where ToUnicode remaps raw ABC glyph codes to XYZ text",
+        .truth =
+        \\XYZ
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "XYZ",
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "type3", "tounicode" },
+        .generate = testpdf.generateType3ToUnicodePdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "identity-h-broken",
+        .pdf_name = "identity-h-broken.pdf",
+        .source_note = "synthetic Identity-H fixture without ToUnicode and a suspicious control CID",
+        .truth =
+        \\Broken identity
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "Broken identity",
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": true,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "identity-h", "missing-tounicode", "unicode-map-error" },
+        .generate = testpdf.generateIdentityHBrokenPdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "identity-v-vertical-cjk",
+        .pdf_name = "identity-v-vertical-cjk.pdf",
+        .source_note = "synthetic Identity-V fixture with ToUnicode Japanese text and vertical writing mode evidence",
+        .truth =
+        \\日本
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "日本",
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 1,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "identity-v", "vertical-cjk", "tounicode" },
+        .generate = testpdf.generateIdentityVVerticalCjkPdf,
+    },
+    .{
         .category = "adversarial_corrupt",
         .doc_id = "missing-page-type",
         .pdf_name = "missing-page-type.pdf",
@@ -554,7 +666,6 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
         defer allocator.free(pdf);
         try writeFile(pdf_path, pdf);
         try writeFile(truth_path, fixture.truth);
-        try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, pdf);
 
         try manifest_writer.print("{s}\t{s}\t{s}\t{s}", .{
             fixture.category,
@@ -612,6 +723,17 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
             fixture.form_json_truth,
         );
         defer if (form_json_truth_path) |path| allocator.free(path);
+        const font_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "fonts",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.font_truth,
+        );
+        defer if (font_truth_path) |path| allocator.free(path);
+        try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, font_truth_path, pdf);
         try writeOptionalManifestFields(
             manifest_writer,
             &.{ table_truth_path, reading_order_truth_path, formula_truth_path, formula_json_truth_path, form_json_truth_path },
@@ -633,6 +755,7 @@ fn writeFixtureMetadata(
     fixture: Fixture,
     pdf_path: []const u8,
     truth_path: []const u8,
+    font_truth_path: ?[]const u8,
     pdf: []const u8,
 ) !void {
     var digest: [32]u8 = undefined;
@@ -648,17 +771,28 @@ fn writeFixtureMetadata(
     try writeJsonEscaped(writer, pdf_path);
     try writer.writeAll("\",\"truth_text_path\":\"");
     try writeJsonEscaped(writer, truth_path);
+    if (font_truth_path) |path| {
+        try writer.writeAll("\",\"font_truth_path\":\"");
+        try writeJsonEscaped(writer, path);
+    }
     try writer.writeAll("\",\"source_note\":\"");
     try writeJsonEscaped(writer, fixture.source_note);
     try writer.writeAll("\",\"license_status\":\"");
     try writeJsonEscaped(writer, fixture.license_status);
     try writer.writeAll("\",\"sha256\":\"");
     try writer.writeAll(&digest_hex);
-    try writer.print("\",\"expected_ocr_pages\":{},\"expected_table_regions\":{},\"expected_formula_regions\":{}}}\n", .{
+    try writer.print("\",\"expected_ocr_pages\":{},\"expected_table_regions\":{},\"expected_formula_regions\":{},\"font_case_tags\":[", .{
         fixture.expected_ocr_pages,
         fixture.expected_table_regions,
         fixture.expected_formula_regions,
     });
+    for (fixture.font_case_tags, 0..) |tag, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try writeJsonEscaped(writer, tag);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll("]}\n");
 }
 
 fn writeHexLower(out: *[64]u8, bytes: *const [32]u8) void {
