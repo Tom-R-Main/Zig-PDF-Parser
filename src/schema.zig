@@ -221,6 +221,15 @@ pub const StreamRecordMeta = struct {
     sequence_scope: []const u8 = "document",
 };
 
+pub const TableRenderScratch = struct {
+    cell_span_ids: std.ArrayList(u32) = .empty,
+
+    pub fn deinit(self: *TableRenderScratch, allocator: std.mem.Allocator) void {
+        self.cell_span_ids.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options: RenderOptions) ![]u8 {
     const debug_assets = try visual_assets.collectBatch(allocator, result, options.debug_assets_dir, options.include_debug_asset_refs);
     defer visual_assets.deinitRecords(allocator, debug_assets);
@@ -241,9 +250,11 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
         try writeBlockRecord(writer, result, options.document_id, options.source_id, options.input_sha256, block, 0, .{}, null);
     }
     try writer.writeAll("],\"tables\":[");
+    var table_scratch: TableRenderScratch = .{};
+    defer table_scratch.deinit(allocator);
     for (result.tables, 0..) |table, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeTableRecord(writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), .{}, null);
+        try writeTableRecord(allocator, writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), .{}, null, &table_scratch);
     }
     try writer.writeAll("],\"form_fields\":[");
     for (result.form_fields, 0..) |field, index| {
@@ -299,8 +310,10 @@ pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result:
         try writeBlockRecord(writer, result, options.document_id, options.source_id, options.input_sha256, block, 0, offsets, null);
         try writer.writeByte('\n');
     }
+    var table_scratch: TableRenderScratch = .{};
+    defer table_scratch.deinit(allocator);
     for (result.tables, 0..) |table, index| {
-        try writeTableRecord(writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), offsets, null);
+        try writeTableRecord(allocator, writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), offsets, null, &table_scratch);
         try writer.writeByte('\n');
     }
     for (result.form_fields, 0..) |field, index| {
@@ -1042,8 +1055,8 @@ pub fn writeBlockStreamRecord(writer: anytype, result: anytype, document_id: []c
     try writeBlockRecord(writer, result, document_id, source_id, input_sha256, block, offsets.block_base, offsets, meta);
 }
 
-pub fn writeTableStreamRecord(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, meta: StreamRecordMeta) !void {
-    try writeTableRecord(writer, document_id, source_id, input_sha256, result, table, table_index, offsets, meta);
+pub fn writeTableStreamRecord(allocator: std.mem.Allocator, writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, meta: StreamRecordMeta, scratch: *TableRenderScratch) !void {
+    try writeTableRecord(allocator, writer, document_id, source_id, input_sha256, result, table, table_index, offsets, meta, scratch);
 }
 
 pub fn writeRouteTraceStreamRecords(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, offsets: RecordOffsets, event_index: *u64) !usize {
@@ -1165,7 +1178,7 @@ fn writeBlockRecord(writer: anytype, result: anytype, document_id: []const u8, s
     try writer.writeByte('}');
 }
 
-fn writeTableRecord(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta) !void {
+fn writeTableRecord(allocator: std.mem.Allocator, writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, table: anytype, table_index: u32, offsets: RecordOffsets, stream_meta: ?StreamRecordMeta, scratch: *TableRenderScratch) !void {
     try writeRecordHeader(writer, "table");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -1194,7 +1207,7 @@ fn writeTableRecord(writer: anytype, document_id: []const u8, source_id: ?[]cons
         try writer.writeAll(",\"cells\":[");
         for (row.cells, 0..) |cell, cell_index| {
             if (cell_index > 0) try writer.writeByte(',');
-            try writeCellJson(writer, document_id, source_id, input_sha256, result, table_index, cell, offsets, stream_meta != null);
+            try writeCellJson(allocator, writer, document_id, source_id, input_sha256, result, table_index, cell, offsets, &scratch.cell_span_ids, stream_meta != null);
         }
         try writer.writeAll("]}");
     }
@@ -1219,7 +1232,21 @@ fn writeTableRecord(writer: anytype, document_id: []const u8, source_id: ?[]cons
     try writer.writeByte('}');
 }
 
-fn writeCellJson(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, table_index: u32, cell: layout.TableCell, offsets: RecordOffsets, stream: bool) !void {
+fn writeCellJson(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    document_id: []const u8,
+    source_id: ?[]const u8,
+    input_sha256: ?[]const u8,
+    result: anytype,
+    table_index: u32,
+    cell: layout.TableCell,
+    offsets: RecordOffsets,
+    cell_span_ids: *std.ArrayList(u32),
+    stream: bool,
+) !void {
+    try collectCellSpanIds(allocator, cell_span_ids, result, cell, offsets);
+
     try writer.writeAll("{\"schema_name\":\"table_cell\",\"schema_version\":\"");
     try writer.writeAll(schema_version);
     try writer.writeAll("\",\"record_type\":\"table_cell\"");
@@ -1250,7 +1277,7 @@ fn writeCellJson(writer: anytype, document_id: []const u8, source_id: ?[]const u
     try writer.writeAll(",\"bbox\":");
     try writeBBoxJson(writer, cell.bounds.bbox);
     try writer.writeAll(",\"source_span_ids\":");
-    try writeCellSpanIdArray(writer, result, cell, offsets);
+    try writeSpanIdArray(writer, cell_span_ids.items);
     try writeProvenancePrefix(writer, .{
         .document_id = document_id,
         .source_id = source_id,
@@ -1262,7 +1289,7 @@ fn writeCellJson(writer: anytype, document_id: []const u8, source_id: ?[]const u
         .source_kind = "table_model",
         .confidence = cell.confidence,
     });
-    try writeCellSpanIdArray(writer, result, cell, offsets);
+    try writeSpanIdArray(writer, cell_span_ids.items);
     try writer.writeAll(",\"block_ids\":[]");
     try writer.writeAll(",\"chunk_ids\":[]");
     try writeMatchedRouteProvenance(writer, result, cell.bounds.page_index, cell.bounds.bbox, offsets, stream);
@@ -1767,8 +1794,32 @@ fn writeSpanIdsInBBox(writer: anytype, result: anytype, page_index: u32, bbox: l
     try writer.writeByte(']');
 }
 
-fn writeCellSpanIdArray(writer: anytype, result: anytype, cell: layout.TableCell, offsets: RecordOffsets) !void {
-    try writeSpanIdsInBBox(writer, result, cell.bounds.page_index, cell.bounds.bbox, offsets);
+fn collectCellSpanIds(allocator: std.mem.Allocator, span_ids: *std.ArrayList(u32), result: anytype, cell: layout.TableCell, offsets: RecordOffsets) !void {
+    span_ids.clearRetainingCapacity();
+    if (offsets.span_lookup) |lookup| {
+        if (lookup.spanRange(cell.bounds.page_index)) |range| {
+            try collectSpanIdsInRange(allocator, span_ids, result.reconciled.spans[range.start..range.end], range.start, cell.bounds.page_index, cell.bounds.bbox, offsets.span_base);
+        }
+        return;
+    }
+    try collectSpanIdsInRange(allocator, span_ids, result.reconciled.spans, 0, cell.bounds.page_index, cell.bounds.bbox, offsets.span_base);
+}
+
+fn collectSpanIdsInRange(allocator: std.mem.Allocator, span_ids: *std.ArrayList(u32), spans: anytype, start_index: usize, page_index: u32, bbox: layout.BBox, span_base: u32) !void {
+    for (spans, start_index..) |span, span_index| {
+        if (span.span.page_index != page_index) continue;
+        if (!centerInside(span.span.bbox, bbox)) continue;
+        try span_ids.append(allocator, span_base + @as(u32, @intCast(span_index)));
+    }
+}
+
+fn writeSpanIdArray(writer: anytype, span_ids: []const u32) !void {
+    try writer.writeByte('[');
+    for (span_ids, 0..) |span_id, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.print("\"span-{d}\"", .{span_id});
+    }
+    try writer.writeByte(']');
 }
 
 fn writeNormalizedJsonEscaped(writer: anytype, text: []const u8) !void {

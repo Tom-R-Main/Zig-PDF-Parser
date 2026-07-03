@@ -205,17 +205,19 @@ fn writePageArtifacts(
         try writer.writeByte('\n');
     }
 
+    var table_scratch: schema.TableRenderScratch = .{};
+    defer table_scratch.deinit(allocator);
     for (result.tables, 0..) |table, local_index| {
         if (table.page_index != page_index) continue;
         const global_table_index = offsets.table_base + @as(u32, @intCast(local_index));
         var stream_table = table;
         table_context.apply(&stream_table, global_table_index);
-        try schema.writeTableStreamRecord(writer, document_id, source_id, input_sha256, result, stream_table, global_table_index, offsets, .{
+        try schema.writeTableStreamRecord(allocator, writer, document_id, source_id, input_sha256, result, stream_table, global_table_index, offsets, .{
             .event_type = "table",
             .event_index = event_index.*,
             .page_index = page_index,
             .sequence_scope = "page",
-        });
+        }, &table_scratch);
         event_index.* += 1;
         counts.tables += 1;
         try writer.writeByte('\n');
