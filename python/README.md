@@ -1,6 +1,8 @@
 # pdf-parser Python bindings
 
-High-performance PDF text extraction powered by Zig.
+Python bindings for the Zig pdf-parser library. The package is named
+`pdf-parser`, while the import path remains `zpdf` for compatibility with the
+inherited API.
 
 ## Install
 
@@ -43,14 +45,20 @@ with Document(data) as doc:
 
 ## Benchmark
 
-Text extraction on Apple M4 Pro:
+Build the native library in ReleaseFast mode, then use the repository benchmark
+harness for current timings:
 
-| Document | Pages | zpdf | MuPDF | Speedup |
-|----------|------:|-----:|------:|--------:|
-| Intel SDM | 5,252 | 582ms | 2,152ms | 3.7x |
-| Pandas Docs | 3,743 | 640ms | 1,130ms | 1.8x |
-| C++ Standard | 2,134 | 438ms | 1,007ms | 2.3x |
-| PDF Reference | 1,310 | 236ms | 1,481ms | 6.3x |
+```bash
+zig build -Doptimize=ReleaseFast --summary all
+.venv/bin/python benchmark/eval/compare.py \
+  --pdf-parser-adaptive \
+  --tools pdf-parser,pymupdf,pypdfium2,pdfplumber \
+  --ensure-releasefast \
+  --manifest benchmark/eval/corpus/manifest.tsv
+```
+
+Avoid copying old prose timing tables into reports. Use generated scorecards
+and profiler JSONL from the corpus and machine you are evaluating.
 
 ## License
 

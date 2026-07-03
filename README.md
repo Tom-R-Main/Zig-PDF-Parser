@@ -1,7 +1,21 @@
-# pdf-parser (alpha stage)
+# pdf-parser
 
-A Zig PDF text extraction library evolving from a fast native extraction
-kernel into a hybrid, adaptive parser.
+A capable Zig PDF extraction engine for deterministic text, layout, tables,
+OCR routing, and versioned JSON/JSONL artifacts.
+
+## Status
+
+This is a capable parser with real project surfaces: the native parser,
+adaptive extraction CLI, versioned artifact schema, streaming JSONL, C ABI,
+Python bindings, benchmark runner, known-password decryption, OCR routing,
+structured tables, forms, provenance, visual review assets, and specialist
+protocol all have test coverage.
+
+The project is still pre-1.0, so public schema and API details may change until
+the output contract graduates to `1.0.0`. The deterministic native path and
+artifact JSONL shape are the primary integration surfaces today. Non-OCR
+specialist execution, formula recognition, and the remaining hard-document
+accuracy work are active development areas.
 
 ## Features
 
@@ -28,18 +42,46 @@ kernel into a hybrid, adaptive parser.
 - Corpus benchmark scorecards for parser versions, external tools, private
   manifests, and CI quality gates
 
-## Performance Benchmark
+## Benchmarking And Optimization
 
-Text extraction performance on Apple M4 Pro (reading order):
+Performance claims should be generated from ReleaseFast artifacts and checked
+against byte-stable output, not copied from one-off local timings. Build the
+optimized parser once, then profile the extraction lanes separately:
 
-| Document | Pages | pdf-parser | MuPDF | Speedup |
-|----------|------:|-----:|------:|--------:|
-| [Intel SDM](https://cdrdv2.intel.com/v1/dl/getContent/671200) | 5,252 | **582ms** | 2,152ms | 3.7x |
-| [Pandas Docs](https://pandas.pydata.org/pandas-docs/version/1.4/pandas.pdf) | 3,743 | **640ms** | 1,130ms | 1.8x |
-| [C++ Standard](https://open-std.org/jtc1/sc22/wg21/docs/papers/2023/n4950.pdf) | 2,134 | **438ms** | 1,007ms | 2.3x |
-| [PDF Reference 1.7](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/pdfreference1.7old.pdf) | 1,310 | **236ms** | 1,481ms | 6.3x |
+```bash
+zig build -Doptimize=ReleaseFast --summary all
+.venv/bin/python benchmark/eval/profile_lanes.py \
+  --manifest benchmark/eval/large/manifest.tsv \
+  --lanes native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
+  --repeat 3 \
+  --hash-output \
+  --output benchmark/eval/outputs/profile/baseline-large.jsonl
+.venv/bin/python benchmark/eval/analyze_baseline.py \
+  --profile-jsonl benchmark/eval/outputs/profile/baseline-large.jsonl \
+  --manifest benchmark/eval/large/manifest.tsv \
+  --output benchmark/eval/outputs/profile/baseline-report.json \
+  --table-output benchmark/eval/outputs/profile/baseline-report.md
+```
 
-*Build with `zig build -Doptimize=ReleaseFast` for best performance.*
+Use the tiny checked-in corpus for correctness gates and the ignored large
+cache for performance work. The large manifest is designed to cover 100-page,
+1k-page, image-heavy, object-stream-heavy, encrypted, and table-heavy PDFs
+without committing large third-party documents.
+
+Recent local ReleaseFast optimization checks on Apple M4 Pro kept output hashes
+unchanged while improving the measured hot paths:
+
+| Optimization | Fixture / lane | Before | After |
+|--------------|----------------|-------:|------:|
+| Reused decoded content streams | PDF Reference 1k / native text | 461.0ms | 329.2ms |
+| Indexed route/provenance lookups | table-heavy SEC / artifact JSONL | 731.6ms | 555.1ms |
+| Bucketed body-font estimation | table-heavy SEC / native text | 232.3ms | 224.6ms |
+| Bucketed body-font estimation | table-heavy SEC / artifact JSONL | 480.2ms | 464.8ms |
+
+Treat these as local regression evidence, not universal parser rankings. For
+external comparisons, use `benchmark/eval/compare.py --ensure-releasefast` so
+the `pdf-parser` lane runs `zig-out/bin/pdf-parser-eval` instead of rebuilding
+inside each document timing.
 
 ## Evaluation Corpus
 
