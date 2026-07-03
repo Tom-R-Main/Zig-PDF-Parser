@@ -274,7 +274,12 @@ pub fn extractDocument(
             .y1 = page.media_box[3],
         };
 
-        const spans = try document.extractTextWithBounds(page_idx, allocator);
+        var content_scratch_arena = std.heap.ArenaAllocator.init(allocator);
+        defer content_scratch_arena.deinit();
+        const content_scratch_allocator = content_scratch_arena.allocator();
+        const page_content = document.getPageContentForScratch(page_idx, content_scratch_allocator) catch &.{};
+
+        const spans = try document.extractTextWithBoundsFromContent(page_idx, allocator, content_scratch_allocator, page_content);
         try native_pages.append(allocator, spans);
         try trace_records.append(allocator, .{
             .page_index = page_index,
@@ -282,7 +287,7 @@ pub fn extractDocument(
             .span_count = spans.len,
         });
 
-        const images = try document.getPageImages(page_idx, allocator);
+        const images = try document.getPageImagesFromContent(page_idx, allocator, content_scratch_allocator, page_content);
         defer allocator.free(images);
 
         const image_boxes = try allocator.alloc(complexity.ImageBox, images.len);
@@ -372,7 +377,7 @@ pub fn extractDocument(
             }
         }
 
-        const ruling_lines = try document.getPageRulingLines(page_idx, allocator);
+        const ruling_lines = try document.getPageRulingLinesFromContent(page_idx, allocator, content_scratch_allocator, page_content);
         defer allocator.free(ruling_lines);
 
         const page_width = page.media_box[2] - page.media_box[0];

@@ -696,22 +696,41 @@ pub const Document = struct {
     pub fn extractTextWithBounds(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]TextSpan {
         if (page_num >= self.pages.items.len) return error.PageNotFound;
 
-        const page = self.pages.items[page_num];
-        const parse_allocator = self.parsing_arena.allocator();
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContentsWithSecurity(
-            parse_allocator,
+        const content = self.getPageContentForScratch(page_num, scratch_allocator) catch return &.{};
+        return self.extractTextWithBoundsFromContent(page_num, allocator, scratch_allocator, content);
+    }
+
+    /// Return decoded page contents allocated from caller-owned scratch memory.
+    /// The returned slice is valid while scratch_allocator's backing storage lives.
+    pub fn getPageContentForScratch(self: *Document, page_num: usize, scratch_allocator: std.mem.Allocator) ![]const u8 {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+
+        const page = self.pages.items[page_num];
+        return pagetree.getPageContentsWithSecurity(
+            self.parsing_arena.allocator(),
             scratch_allocator,
             self.data,
             &self.xref_table,
             page,
             &self.object_cache,
             self.securityHandler(),
-        ) catch return &.{};
+        );
+    }
 
+    /// Extract text with bounding boxes from already-decoded page content.
+    /// This lets adaptive extraction reuse one page content decode across passes.
+    pub fn extractTextWithBoundsFromContent(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+    ) ![]TextSpan {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
         if (content.len == 0) return &.{};
 
         // Lazy-load fonts for this page (needed for proper text decoding)
@@ -1889,24 +1908,27 @@ pub const Document = struct {
     pub fn getPageImages(self: *Document, page_idx: usize, allocator: std.mem.Allocator) ![]ImageInfo {
         if (page_idx >= self.pages.items.len) return error.PageNotFound;
 
-        const arena = self.parsing_arena.allocator();
-        const page = self.pages.items[page_idx];
-
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContentsWithSecurity(
-            arena,
-            scratch_allocator,
-            self.data,
-            &self.xref_table,
-            page,
-            &self.object_cache,
-            self.securityHandler(),
-        ) catch return allocator.alloc(ImageInfo, 0);
+        const content = self.getPageContentForScratch(page_idx, scratch_allocator) catch return allocator.alloc(ImageInfo, 0);
+        return self.getPageImagesFromContent(page_idx, allocator, scratch_allocator, content);
+    }
+
+    /// Detect images from already-decoded page content.
+    pub fn getPageImagesFromContent(
+        self: *Document,
+        page_idx: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+    ) ![]ImageInfo {
+        if (page_idx >= self.pages.items.len) return error.PageNotFound;
 
         if (content.len == 0) return allocator.alloc(ImageInfo, 0);
+
+        const page = self.pages.items[page_idx];
 
         // Parse content stream for Do operators and track CTM
         var images: std.ArrayList(ImageInfo) = .empty;
@@ -2021,22 +2043,23 @@ pub const Document = struct {
     pub fn getPageRulingLines(self: *Document, page_idx: usize, allocator: std.mem.Allocator) ![]specialists.RulingLine {
         if (page_idx >= self.pages.items.len) return error.PageNotFound;
 
-        const arena = self.parsing_arena.allocator();
-        const page = self.pages.items[page_idx];
-
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const content = pagetree.getPageContentsWithSecurity(
-            arena,
-            scratch_allocator,
-            self.data,
-            &self.xref_table,
-            page,
-            &self.object_cache,
-            self.securityHandler(),
-        ) catch return allocator.alloc(specialists.RulingLine, 0);
+        const content = self.getPageContentForScratch(page_idx, scratch_allocator) catch return allocator.alloc(specialists.RulingLine, 0);
+        return self.getPageRulingLinesFromContent(page_idx, allocator, scratch_allocator, content);
+    }
+
+    /// Detect stroked horizontal/vertical ruling lines from already-decoded content.
+    pub fn getPageRulingLinesFromContent(
+        self: *Document,
+        page_idx: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+    ) ![]specialists.RulingLine {
+        if (page_idx >= self.pages.items.len) return error.PageNotFound;
 
         if (content.len == 0) return allocator.alloc(specialists.RulingLine, 0);
 
