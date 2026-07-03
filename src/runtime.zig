@@ -2,6 +2,8 @@ const std = @import("std");
 
 /// Zig 0.16 runtime helpers shared by CLI tools, tests, and FFI entrypoints.
 pub const File = std.Io.File;
+/// Large JSONL extraction streams are hundreds of MB on benchmark documents.
+pub const large_output_buffer_size = 64 * 1024;
 
 var current_io: ?std.Io = null;
 

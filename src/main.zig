@@ -622,7 +622,7 @@ fn doAdaptiveExtract(
                 return;
             };
         }
-        var write_buf: [4096]u8 = undefined;
+        var write_buf: [runtime.large_output_buffer_size]u8 = undefined;
         if (output_handle) |h| {
             var file_writer = runtime.fileWriter(h, &write_buf);
             const writer = &file_writer.interface;
@@ -675,7 +675,7 @@ fn doAdaptiveExtract(
     }
 
     if (!trace and output_format == .artifact_jsonl) {
-        var write_buf: [4096]u8 = undefined;
+        var write_buf: [runtime.large_output_buffer_size]u8 = undefined;
         if (output_handle) |h| {
             var file_writer = runtime.fileWriter(h, &write_buf);
             const writer = &file_writer.interface;
@@ -861,7 +861,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
         null;
     defer if (output_handle) |h| runtime.closeFile(h);
 
-    var write_buf: [4096]u8 = undefined;
+    var write_buf: [runtime.large_output_buffer_size]u8 = undefined;
     if (output_handle) |h| {
         var file_writer = runtime.fileWriter(h, &write_buf);
         const writer = &file_writer.interface;
