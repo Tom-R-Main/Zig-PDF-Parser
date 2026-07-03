@@ -2279,9 +2279,18 @@ fn writeOptionalI32(writer: anytype, value: ?i32) !void {
 }
 
 fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
-    for (text) |byte| {
+    var clean_start: usize = 0;
+    for (text, 0..) |byte, index| {
+        if (!jsonNeedsEscape(byte)) continue;
+        if (index > clean_start) try writer.writeAll(text[clean_start..index]);
         try writeJsonEscapedByte(writer, byte);
+        clean_start = index + 1;
     }
+    if (clean_start < text.len) try writer.writeAll(text[clean_start..]);
+}
+
+fn jsonNeedsEscape(byte: u8) bool {
+    return byte < 0x20 or byte == '"' or byte == '\\';
 }
 
 fn writeJsonEscapedByte(writer: anytype, byte: u8) !void {
