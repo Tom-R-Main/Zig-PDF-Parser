@@ -1026,15 +1026,6 @@ pub fn appendRouteTraces(
     span_count: usize,
     block_count: usize,
 ) !void {
-    try traces.append(allocator, .{
-        .page_index = page_index,
-        .region_index = region_index,
-        .stage = .route_decision,
-        .route = route,
-        .reason_mask = reason_mask,
-        .span_count = span_count,
-        .block_count = block_count,
-    });
     if (route.needs_ocr) {
         try traces.append(allocator, .{
             .page_index = page_index,
@@ -1438,9 +1429,8 @@ test "route traces emit OCR stub when route needs OCR" {
     const mask = reasonBit(.ocr_route_stub);
     try appendRouteTraces(std.testing.allocator, &traces, 2, null, route, mask, 0, 0);
 
-    try std.testing.expectEqual(@as(usize, 2), traces.items.len);
-    try std.testing.expectEqual(TraceStage.route_decision, traces.items[0].stage);
-    try std.testing.expectEqual(TraceStage.ocr_route_stub, traces.items[1].stage);
+    try std.testing.expectEqual(@as(usize, 1), traces.items.len);
+    try std.testing.expectEqual(TraceStage.ocr_route_stub, traces.items[0].stage);
 }
 
 test "debug svg marks low-confidence review regions" {
