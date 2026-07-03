@@ -110,10 +110,12 @@ pub fn scoreRegion(input: PageInput, region: BBox) RegionScore {
 
 fn decideRoute(signals: SignalScores, span_count: usize, char_count: usize) RouteDecision {
     var route = RouteDecision{ .max_signal = signals.max() };
-    const sparse_image_needs_ocr = signals.sparse_text >= 0.85 and
+    const image_only_needs_ocr = span_count == 0 and signals.image_dominance >= 0.45;
+    const sparse_image_needs_ocr = span_count > 0 and
+        signals.sparse_text >= 0.85 and
         signals.image_dominance >= 0.20 and
         (char_count < 40 or signals.missing_tounicode >= 0.35);
-    route.needs_ocr = span_count == 0 or
+    route.needs_ocr = image_only_needs_ocr or
         signals.bad_unicode >= 0.35 or
         signals.hidden_ocr >= 0.45 or
         sparse_image_needs_ocr;
@@ -497,6 +499,34 @@ test "image-dominant sparse region routes to OCR" {
     try std.testing.expect(page.score.signals.sparse_text >= 0.85);
     try std.testing.expect(page.score.signals.image_dominance >= 0.65);
     try std.testing.expect(page.score.route.needs_ocr);
+}
+
+test "image-only full-page scan routes to OCR" {
+    const images = [_]ImageBox{
+        .{ .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 590, .y1 = 760 }, .pixel_width = 1600, .pixel_height = 2200 },
+    };
+
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .images = &images,
+    });
+
+    try std.testing.expect(page.score.signals.image_dominance >= 0.65);
+    try std.testing.expect(page.score.route.needs_ocr);
+}
+
+test "image-only low-coverage page avoids OCR" {
+    const images = [_]ImageBox{
+        .{ .bbox = .{ .x0 = 40, .y0 = 40, .x1 = 300, .y1 = 480 }, .pixel_width = 800, .pixel_height = 1200 },
+    };
+
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .images = &images,
+    });
+
+    try std.testing.expect(page.score.signals.image_dominance < 0.45);
+    try std.testing.expect(!page.score.route.needs_ocr);
 }
 
 test "image-dominant sparse page with usable native text avoids OCR" {
