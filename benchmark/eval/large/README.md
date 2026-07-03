@@ -17,11 +17,15 @@ corpus.
 .venv/bin/python benchmark/eval/profile_lanes.py \
   --manifest benchmark/eval/large/manifest.tsv \
   --lanes native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
+  --ocr-pages 1-10 \
   --output benchmark/eval/outputs/profile/large.jsonl
 ```
 
-OCR profiling uses 200 DPI grayscale rasterization by default. Add
-`--ocr-color` for a compatibility A/B run against the older RGB raster path.
+Adaptive JSONL lanes disable OCR by default so full scanned documents do not
+hide renderer costs behind Tesseract subprocess time. OCR profiling uses 200 DPI
+grayscale rasterization by default, and `--ocr-pages` bounds only the
+`ocr-routed` lane. Add `--ocr-color` for a compatibility A/B run against the
+older RGB raster path.
 
 The encrypted derivative uses the known benchmark password
 `benchmark-password`. This is not a secret; it exists only to exercise

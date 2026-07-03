@@ -154,7 +154,25 @@ class BenchmarkHygieneTests(unittest.TestCase):
             page_count=100,
         )
 
-        cmd = profile_lanes.build_lane_command(
+        adaptive_cmd = profile_lanes.build_lane_command(
+            Path("/repo/zig-out/bin/pdf-parser"),
+            entry,
+            "adaptive-artifact-jsonl",
+            Path("/tmp/out.jsonl"),
+            "tesseract",
+            "pdftoppm",
+            200,
+            False,
+            False,
+            None,
+        )
+
+        self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract-adaptive"], adaptive_cmd[:2])
+        self.assertIn("artifact-jsonl", adaptive_cmd)
+        self.assertIn("--no-ocr", adaptive_cmd)
+        self.assertNotIn("--ocr-dpi", adaptive_cmd)
+
+        ocr_cmd = profile_lanes.build_lane_command(
             Path("/repo/zig-out/bin/pdf-parser"),
             entry,
             "ocr-routed",
@@ -163,17 +181,25 @@ class BenchmarkHygieneTests(unittest.TestCase):
             "pdftoppm",
             200,
             True,
+            False,
             "1-10",
         )
 
-        self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract-adaptive"], cmd[:2])
-        self.assertIn("stream-jsonl", cmd)
-        self.assertIn("--password", cmd)
-        self.assertIn("--ocr-dpi", cmd)
-        self.assertIn("200", cmd)
-        self.assertIn("--ocr-color", cmd)
-        self.assertIn("--pages", cmd)
-        self.assertIn("1-10", cmd)
+        self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract-adaptive"], ocr_cmd[:2])
+        self.assertIn("stream-jsonl", ocr_cmd)
+        self.assertIn("--password", ocr_cmd)
+        self.assertIn("--ocr-dpi", ocr_cmd)
+        self.assertIn("200", ocr_cmd)
+        self.assertIn("--ocr-color", ocr_cmd)
+        self.assertIn("--pages", ocr_cmd)
+        self.assertIn("1-10", ocr_cmd)
+        self.assertNotIn("--no-ocr", ocr_cmd)
+
+    def test_profile_lane_pages_can_bound_only_ocr_lane(self) -> None:
+        self.assertEqual("1-10", profile_lanes.lane_pages("ocr-routed", None, "1-10"))
+        self.assertEqual("5-6", profile_lanes.lane_pages("ocr-routed", "5-6", None))
+        self.assertEqual("5-6", profile_lanes.lane_pages("adaptive-stream-jsonl", "5-6", "1-10"))
+        self.assertIsNone(profile_lanes.lane_pages("adaptive-artifact-jsonl", None, "1-10"))
 
     def test_profile_output_jsonl_parses_line_by_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

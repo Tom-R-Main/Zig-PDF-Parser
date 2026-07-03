@@ -250,6 +250,7 @@ Profile extraction surfaces before tuning parser internals:
 .venv/bin/python benchmark/eval/profile_lanes.py \
   --manifest benchmark/eval/large/manifest.tsv \
   --lanes native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
+  --ocr-pages 1-10 \
   --repeat 3 \
   --output benchmark/eval/outputs/profile/large.jsonl
 ```
@@ -260,10 +261,15 @@ stream parser latency when the lane emits a `document_finished` record. Its
 default `--ensure-releasefast` mode also rebuilds ReleaseFast before measuring,
 so profiler output stays comparable after local Debug builds. Use the tiny
 checked-in manifest for CI smoke tests and the large manifest after populating
-`raw_cache/large`. OCR profiling defaults to `--ocr-dpi 200` with grayscale
-rasterization; use `--ocr-dpi 300` when comparing against older high-resolution
-runs or validating harder low-quality scans, and `--ocr-color` to preserve the
-older RGB raster path for an A/B run.
+`raw_cache/large`. Adaptive JSONL lanes pass `--no-ocr` by default so structured
+rendering and OCR subprocess overhead stay separate; add
+`--enable-ocr-in-adaptive-lanes` only when intentionally measuring the combined
+path. `--ocr-pages` bounds only the OCR lane, which keeps full-manifest native
+and adaptive runs useful without OCRing every scanned page. OCR profiling
+defaults to `--ocr-dpi 200` with grayscale rasterization; use `--ocr-dpi 300`
+when comparing against older high-resolution runs or validating harder
+low-quality scans, and `--ocr-color` to preserve the older RGB raster path for
+an A/B run.
 
 For the full baseline workflow, use the wrapper:
 

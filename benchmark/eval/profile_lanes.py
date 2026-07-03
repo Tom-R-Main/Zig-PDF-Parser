@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PROFILE_SCHEMA_VERSION = "0.1.0"
+PROFILE_SCHEMA_VERSION = "0.2.0"
 DEFAULT_LANES = ("native-text", "adaptive-artifact-jsonl", "adaptive-stream-jsonl", "ocr-routed")
 
 
@@ -50,6 +50,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude-doc-id", action="append", default=[], help="Skip matching doc id; repeatable")
     parser.add_argument("--exclude-category", action="append", default=[], help="Skip matching category; repeatable")
     parser.add_argument("--pages", help="Optional page range passed through to pdf-parser commands")
+    parser.add_argument("--ocr-pages", help="Optional page range passed only to the ocr-routed lane")
     parser.add_argument("--pdf-parser-command", default="zig-out/bin/pdf-parser")
     parser.add_argument("--ensure-releasefast", dest="ensure_releasefast", action="store_true")
     parser.add_argument("--no-ensure-releasefast", dest="ensure_releasefast", action="store_false")
@@ -58,6 +59,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--ocr-rasterizer", default="pdftoppm")
     parser.add_argument("--ocr-dpi", type=int, default=200)
     parser.add_argument("--ocr-color", action="store_true", help="Rasterize OCR pages as RGB instead of default grayscale")
+    parser.add_argument(
+        "--enable-ocr-in-adaptive-lanes",
+        action="store_true",
+        help="Allow adaptive-artifact-jsonl and adaptive-stream-jsonl lanes to invoke OCR; by default OCR is isolated to ocr-routed",
+    )
     parser.set_defaults(ensure_releasefast=True)
     args = parser.parse_args(argv)
 
@@ -94,7 +100,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                         ocr_rasterizer=args.ocr_rasterizer,
                         ocr_dpi=args.ocr_dpi,
                         ocr_color=args.ocr_color,
+                        enable_ocr_in_adaptive_lanes=args.enable_ocr_in_adaptive_lanes,
                         pages=args.pages,
+                        ocr_pages=args.ocr_pages,
                     )
                     if row["status"] != "ok":
                         failure_count += 1
@@ -193,7 +201,9 @@ def run_lane(
     ocr_rasterizer: str,
     ocr_dpi: int,
     ocr_color: bool,
+    enable_ocr_in_adaptive_lanes: bool,
     pages: str | None,
+    ocr_pages: str | None,
 ) -> dict[str, object]:
     if not entry.pdf_path.exists():
         return skipped(entry, lane, repeat_index, f"missing input: {entry.pdf_path}")
@@ -209,7 +219,18 @@ def run_lane(
     with tempfile.NamedTemporaryFile(prefix=f"pdf-parser-{lane}-", suffix=".out", delete=False) as handle:
         output_path = Path(handle.name)
     try:
-        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, ocr_dpi, ocr_color, pages)
+        cmd = build_lane_command(
+            parser_command,
+            entry,
+            lane,
+            output_path,
+            ocr_executable,
+            ocr_rasterizer,
+            ocr_dpi,
+            ocr_color,
+            enable_ocr_in_adaptive_lanes,
+            lane_pages(lane, pages, ocr_pages),
+        )
         started = time.perf_counter()
         proc = run_timed(cmd, cwd=repo_root)
         wall_ms = (time.perf_counter() - started) * 1000.0
@@ -228,13 +249,14 @@ def run_lane(
             "reason": reason,
             "input_sha256": input_sha256,
             "pages": entry.page_count,
-            "page_range": pages,
+            "page_range": lane_pages(lane, pages, ocr_pages),
             "wall_ms": wall_ms,
             "parser_latency_ms": parser_latency_ms,
             "peak_rss_mb": proc.peak_rss_mb,
             "output_bytes": output_bytes,
             "ocr_dpi": ocr_dpi if lane == "ocr-routed" else None,
             "ocr_color": ocr_color if lane == "ocr-routed" else None,
+            "adaptive_ocr_enabled": enable_ocr_in_adaptive_lanes if lane.startswith("adaptive-") else None,
             "source_note": entry.source_note,
         }
     finally:
@@ -257,6 +279,7 @@ def build_lane_command(
     ocr_rasterizer: str,
     ocr_dpi: int,
     ocr_color: bool,
+    enable_ocr_in_adaptive_lanes: bool,
     pages: str | None,
 ) -> list[str]:
     base = [str(parser_command)]
@@ -272,6 +295,8 @@ def build_lane_command(
             "--output",
             str(output_path),
         ]
+        if not enable_ocr_in_adaptive_lanes:
+            cmd.append("--no-ocr")
     elif lane == "adaptive-stream-jsonl":
         cmd = base + [
             "extract-adaptive",
@@ -282,6 +307,8 @@ def build_lane_command(
             "--output",
             str(output_path),
         ]
+        if not enable_ocr_in_adaptive_lanes:
+            cmd.append("--no-ocr")
     elif lane == "ocr-routed":
         cmd = base + [
             "extract-adaptive",
@@ -307,6 +334,12 @@ def build_lane_command(
     if pages:
         cmd.extend(["--pages", pages])
     return cmd
+
+
+def lane_pages(lane: str, pages: str | None, ocr_pages: str | None) -> str | None:
+    if lane == "ocr-routed" and ocr_pages:
+        return ocr_pages
+    return pages
 
 
 @dataclass(frozen=True)
