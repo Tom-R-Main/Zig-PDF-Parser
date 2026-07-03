@@ -623,6 +623,73 @@ pub fn generateActualTextRepairPdf(allocator: std.mem.Allocator) ![]u8 {
     return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
 }
 
+/// Generate a page-level rotation fixture for render-backed geometry checks.
+pub fn generateRotatedPageTextPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 18 Tf\n100 100 Td\n(Rotated page text) Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a page with a clipping path that hides part of extractable text.
+pub fn generateClippedTextPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n/F1 12 Tf\n72 740 Td\n(Clipped fixture) Tj\nET\n" ++
+        "q\n100 690 50 24 re W n\n" ++
+        "BT\n/F1 18 Tf\n100 700 Td\n(Clipped hidden tail) Tj\nET\n" ++
+        "Q\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
+/// Generate white-on-white text that mimics a hidden OCR layer.
+pub fn generateInvisibleOcrLayerPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n/F1 12 Tf\n72 740 Td\n(Visible anchor) Tj\nET\n" ++
+        "1 1 1 rg\n" ++
+        "BT\n/F1 14 Tf\n72 700 Td\n(Invisible OCR Layer) Tj\nET\n" ++
+        "0 0 0 rg\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
 /// Generate a deterministic Type3 font fixture using WinAnsi text mapping.
 pub fn generateType3SimplePdf(allocator: std.mem.Allocator) ![]u8 {
     const widths = try repeatedWidths(allocator, 91, "600");

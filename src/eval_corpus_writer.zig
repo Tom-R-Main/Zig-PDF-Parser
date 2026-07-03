@@ -23,6 +23,8 @@ const Fixture = struct {
     form_json_truth: ?[]const u8 = null,
     font_truth: ?[]const u8 = null,
     font_case_tags: []const []const u8 = &.{},
+    render_truth: ?[]const u8 = null,
+    visual_case_tags: []const []const u8 = &.{},
     generate: *const fn (std.mem.Allocator) anyerror![]u8,
 };
 
@@ -606,6 +608,129 @@ const fixtures = [_]Fixture{
         .generate = testpdf.generateIdentityVVerticalCjkPdf,
     },
     .{
+        .category = "visual_truth",
+        .doc_id = "rotated-page-text",
+        .pdf_name = "rotated-page-text.pdf",
+        .source_note = "synthetic rotated page fixture for render-backed geometry checks",
+        .truth =
+        \\Rotated page text
+        \\
+        ,
+        .render_truth =
+        \\{
+        \\  "expected_page_count": 1,
+        \\  "expected_issue_tags": ["rotated_geometry"],
+        \\  "min_text_bbox_coverage": 0.0,
+        \\  "max_blank_bbox_rate": 1.0,
+        \\  "min_ruling_pixel_coverage": 0.0,
+        \\  "min_image_region_overlap": 0.0
+        \\}
+        \\
+        ,
+        .visual_case_tags = &.{"rotated_geometry"},
+        .generate = testpdf.generateRotatedPageTextPdf,
+    },
+    .{
+        .category = "visual_truth",
+        .doc_id = "clipped-text",
+        .pdf_name = "clipped-text.pdf",
+        .source_note = "synthetic clipping fixture where extracted text geometry may exceed rendered ink",
+        .truth =
+        \\Clipped fixture
+        \\Clipped hidden tail
+        \\
+        ,
+        .render_truth =
+        \\{
+        \\  "expected_page_count": 1,
+        \\  "expected_issue_tags": ["clipped_text"],
+        \\  "min_text_bbox_coverage": 0.0,
+        \\  "max_blank_bbox_rate": 1.0,
+        \\  "min_ruling_pixel_coverage": 0.0,
+        \\  "min_image_region_overlap": 0.0
+        \\}
+        \\
+        ,
+        .visual_case_tags = &.{"clipped_text"},
+        .generate = testpdf.generateClippedTextPdf,
+    },
+    .{
+        .category = "visual_truth",
+        .doc_id = "invisible-ocr-layer",
+        .pdf_name = "invisible-ocr-layer.pdf",
+        .source_note = "synthetic white-on-white text fixture modeling hidden OCR layers",
+        .truth =
+        \\Visible anchor
+        \\Invisible OCR Layer
+        \\
+        ,
+        .render_truth =
+        \\{
+        \\  "expected_page_count": 1,
+        \\  "expected_issue_tags": ["invisible_text"],
+        \\  "min_text_bbox_coverage": 0.0,
+        \\  "max_blank_bbox_rate": 1.0,
+        \\  "min_ruling_pixel_coverage": 0.0,
+        \\  "min_image_region_overlap": 0.0
+        \\}
+        \\
+        ,
+        .visual_case_tags = &.{"invisible_text"},
+        .generate = testpdf.generateInvisibleOcrLayerPdf,
+    },
+    .{
+        .category = "visual_truth",
+        .doc_id = "ruled-table-pixels",
+        .pdf_name = "ruled-table-pixels.pdf",
+        .source_note = "synthetic ruled table fixture for rendered ruling-line verification",
+        .expected_table_regions = 3,
+        .truth =
+        \\Ruled Statement
+        \\Account Q1 Q2
+        \\Cash 1,000 (200)
+        \\Debt -50 (75)
+        \\
+        ,
+        .render_truth =
+        \\{
+        \\  "expected_page_count": 1,
+        \\  "expected_issue_tags": ["ruling_lines"],
+        \\  "min_text_bbox_coverage": 0.2,
+        \\  "max_blank_bbox_rate": 0.8,
+        \\  "min_ruling_pixel_coverage": 0.2,
+        \\  "min_image_region_overlap": 0.0
+        \\}
+        \\
+        ,
+        .visual_case_tags = &.{"ruling_lines"},
+        .generate = testpdf.generateRuledFinancialTablePdf,
+    },
+    .{
+        .category = "visual_truth",
+        .doc_id = "mixed-image-region",
+        .pdf_name = "mixed-image-region.pdf",
+        .source_note = "synthetic native text plus scanned image region fixture for crop verification",
+        .expected_ocr_pages = 1,
+        .truth =
+        \\Native cover text
+        \\SCANNED TYPEWRITTEN
+        \\
+        ,
+        .render_truth =
+        \\{
+        \\  "expected_page_count": 1,
+        \\  "expected_issue_tags": ["image_region"],
+        \\  "min_text_bbox_coverage": 0.1,
+        \\  "max_blank_bbox_rate": 0.9,
+        \\  "min_ruling_pixel_coverage": 0.0,
+        \\  "min_image_region_overlap": 0.0
+        \\}
+        \\
+        ,
+        .visual_case_tags = &.{"image_region"},
+        .generate = testpdf.generateMixedNativeScanPdf,
+    },
+    .{
         .category = "adversarial_corrupt",
         .doc_id = "missing-page-type",
         .pdf_name = "missing-page-type.pdf",
@@ -733,7 +858,17 @@ fn writeFixtures(allocator: std.mem.Allocator, root: []const u8) !void {
             fixture.font_truth,
         );
         defer if (font_truth_path) |path| allocator.free(path);
-        try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, font_truth_path, pdf);
+        const render_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "render_oracle",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.render_truth,
+        );
+        defer if (render_truth_path) |path| allocator.free(path);
+        try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, font_truth_path, render_truth_path, pdf);
         try writeOptionalManifestFields(
             manifest_writer,
             &.{ table_truth_path, reading_order_truth_path, formula_truth_path, formula_json_truth_path, form_json_truth_path },
@@ -756,6 +891,7 @@ fn writeFixtureMetadata(
     pdf_path: []const u8,
     truth_path: []const u8,
     font_truth_path: ?[]const u8,
+    render_truth_path: ?[]const u8,
     pdf: []const u8,
 ) !void {
     var digest: [32]u8 = undefined;
@@ -775,6 +911,10 @@ fn writeFixtureMetadata(
         try writer.writeAll("\",\"font_truth_path\":\"");
         try writeJsonEscaped(writer, path);
     }
+    if (render_truth_path) |path| {
+        try writer.writeAll("\",\"render_truth_path\":\"");
+        try writeJsonEscaped(writer, path);
+    }
     try writer.writeAll("\",\"source_note\":\"");
     try writeJsonEscaped(writer, fixture.source_note);
     try writer.writeAll("\",\"license_status\":\"");
@@ -787,6 +927,13 @@ fn writeFixtureMetadata(
         fixture.expected_formula_regions,
     });
     for (fixture.font_case_tags, 0..) |tag, index| {
+        if (index > 0) try writer.writeByte(',');
+        try writer.writeByte('"');
+        try writeJsonEscaped(writer, tag);
+        try writer.writeByte('"');
+    }
+    try writer.writeAll("],\"visual_case_tags\":[");
+    for (fixture.visual_case_tags, 0..) |tag, index| {
         if (index > 0) try writer.writeByte(',');
         try writer.writeByte('"');
         try writeJsonEscaped(writer, tag);

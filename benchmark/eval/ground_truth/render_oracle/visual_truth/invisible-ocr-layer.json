@@ -1,0 +1,8 @@
+{
+  "expected_page_count": 1,
+  "expected_issue_tags": ["invisible_text"],
+  "min_text_bbox_coverage": 0.0,
+  "max_blank_bbox_rate": 1.0,
+  "min_ruling_pixel_coverage": 0.0,
+  "min_image_region_overlap": 0.0
+}

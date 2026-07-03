@@ -33,7 +33,7 @@ zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
 That command emits one JSONL record for each current fixture category:
 clean born-digital text, academic two-column layout, scientific math notation,
 scanned/typewritten image-only input, financial tables, forms, weird-font
-fixtures, and adversarial page-tree recovery.
+fixtures, visual truth fixtures, and adversarial page-tree recovery.
 
 `benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
 checked-in corpus. Each row records the fixture id, source note, redistribution
@@ -62,6 +62,30 @@ Use `--require-baselines` when missing Python baselines should fail the run.
 This is a differential accuracy harness: the sidecar truth defines the expected
 behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an
 absolute oracle.
+
+Render-oracle sidecars live under
+`benchmark/eval/ground_truth/render_oracle/`. They keep visual expectations out
+of the main manifest while allowing optional pixel-backed checks for rotated
+pages, clipped text, invisible OCR-style layers, ruled tables, and mixed image
+regions:
+
+```sh
+.venv/bin/python benchmark/eval/render_oracle.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --category visual_truth \
+  --output /tmp/pdf-parser-render-oracle.jsonl
+```
+
+The render oracle is benchmark evidence, not parser core code. It requires
+Pillow in the Python environment, then runs
+`pdf-parser extract-adaptive --format artifact-jsonl --debug-assets-dir ...`,
+renders pages with Poppler `pdftoppm` at 144 DPI by default, maps public
+PDF-coordinate bboxes into raster pixels using the materialized page overlay
+SVG `viewBox`, and emits JSONL records with coverage signals. Optional
+renderers are available through `--renderer all` when pypdfium2 or `mutool draw`
+are installed; use `--require-renderers` when missing optional engines should
+fail. `--materialize-dir` writes rendered pages and low-coverage crops for
+review, but generated PNGs/crops are local outputs and should not be committed.
 
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
@@ -131,6 +155,7 @@ benchmark/eval/
     manuals/
     forms/
     weird_fonts/
+    visual_truth/
     adversarial_corrupt/
   ground_truth/
     page_text/
@@ -140,6 +165,7 @@ benchmark/eval/
     formulas_json/
     form_fields/
     fonts/
+    render_oracle/
     reading_order/
   outputs/
     pdf-parser/
