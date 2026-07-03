@@ -201,6 +201,25 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual("5-6", profile_lanes.lane_pages("adaptive-stream-jsonl", "5-6", "1-10"))
         self.assertIsNone(profile_lanes.lane_pages("adaptive-artifact-jsonl", None, "1-10"))
 
+    def test_profile_lane_requires_explicit_full_scanned_ocr(self) -> None:
+        scanned = profile_lanes.Entry(
+            category="scanned_typewritten",
+            doc_id="scan",
+            pdf_path=Path("/tmp/scan.pdf"),
+        )
+        text = profile_lanes.Entry(
+            category="clean_born_digital",
+            doc_id="text",
+            pdf_path=Path("/tmp/text.pdf"),
+        )
+
+        self.assertTrue(profile_lanes.ocr_full_run_guard(scanned, "ocr-routed", None, None, False))
+        self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "ocr-routed", None, "1-10", False))
+        self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "ocr-routed", "1-10", None, False))
+        self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "ocr-routed", None, None, True))
+        self.assertFalse(profile_lanes.ocr_full_run_guard(text, "ocr-routed", None, None, False))
+        self.assertFalse(profile_lanes.ocr_full_run_guard(scanned, "adaptive-stream-jsonl", None, None, False))
+
     def test_profile_output_jsonl_parses_line_by_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "missing.pdf"

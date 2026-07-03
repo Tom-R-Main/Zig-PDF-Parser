@@ -51,6 +51,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--exclude-category", action="append", default=[], help="Skip matching category; repeatable")
     parser.add_argument("--pages", help="Optional page range passed through to pdf-parser commands")
     parser.add_argument("--ocr-pages", help="Optional page range passed only to the ocr-routed lane")
+    parser.add_argument(
+        "--allow-full-ocr",
+        action="store_true",
+        help="Allow unbounded ocr-routed runs on scanned documents; otherwise scanned OCR requires --pages or --ocr-pages",
+    )
     parser.add_argument("--pdf-parser-command", default="zig-out/bin/pdf-parser")
     parser.add_argument("--ensure-releasefast", dest="ensure_releasefast", action="store_true")
     parser.add_argument("--no-ensure-releasefast", dest="ensure_releasefast", action="store_false")
@@ -103,6 +108,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                         enable_ocr_in_adaptive_lanes=args.enable_ocr_in_adaptive_lanes,
                         pages=args.pages,
                         ocr_pages=args.ocr_pages,
+                        allow_full_ocr=args.allow_full_ocr,
                     )
                     if row["status"] != "ok":
                         failure_count += 1
@@ -204,9 +210,17 @@ def run_lane(
     enable_ocr_in_adaptive_lanes: bool,
     pages: str | None,
     ocr_pages: str | None,
+    allow_full_ocr: bool,
 ) -> dict[str, object]:
     if not entry.pdf_path.exists():
         return skipped(entry, lane, repeat_index, f"missing input: {entry.pdf_path}")
+    if ocr_full_run_guard(entry, lane, pages, ocr_pages, allow_full_ocr):
+        return skipped(
+            entry,
+            lane,
+            repeat_index,
+            "unbounded scanned OCR profile requires --ocr-pages, --pages, or --allow-full-ocr",
+        )
     if lane == "ocr-routed" and not tools_available((ocr_executable, ocr_rasterizer)):
         reason = f"missing OCR tools: {ocr_executable}, {ocr_rasterizer}"
         if require_tools:
@@ -340,6 +354,16 @@ def lane_pages(lane: str, pages: str | None, ocr_pages: str | None) -> str | Non
     if lane == "ocr-routed" and ocr_pages:
         return ocr_pages
     return pages
+
+
+def ocr_full_run_guard(entry: Entry, lane: str, pages: str | None, ocr_pages: str | None, allow_full_ocr: bool) -> bool:
+    if lane != "ocr-routed":
+        return False
+    if allow_full_ocr:
+        return False
+    if lane_pages(lane, pages, ocr_pages) is not None:
+        return False
+    return entry.category == "scanned_typewritten"
 
 
 @dataclass(frozen=True)

@@ -24,8 +24,10 @@ corpus.
 Adaptive JSONL lanes disable OCR by default so full scanned documents do not
 hide renderer costs behind Tesseract subprocess time. OCR profiling uses 200 DPI
 grayscale rasterization by default, and `--ocr-pages` bounds only the
-`ocr-routed` lane. Add `--ocr-color` for a compatibility A/B run against the
-older RGB raster path.
+`ocr-routed` lane. Unbounded `ocr-routed` runs for scanned documents are skipped
+unless `--allow-full-ocr` is supplied, because a full scanned book can turn a
+routine baseline into a long OCR benchmark. Add `--ocr-color` for a
+compatibility A/B run against the older RGB raster path.
 
 The encrypted derivative uses the known benchmark password
 `benchmark-password`. This is not a secret; it exists only to exercise

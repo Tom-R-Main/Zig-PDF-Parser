@@ -265,11 +265,13 @@ checked-in manifest for CI smoke tests and the large manifest after populating
 rendering and OCR subprocess overhead stay separate; add
 `--enable-ocr-in-adaptive-lanes` only when intentionally measuring the combined
 path. `--ocr-pages` bounds only the OCR lane, which keeps full-manifest native
-and adaptive runs useful without OCRing every scanned page. OCR profiling
-defaults to `--ocr-dpi 200` with grayscale rasterization; use `--ocr-dpi 300`
-when comparing against older high-resolution runs or validating harder
-low-quality scans, and `--ocr-color` to preserve the older RGB raster path for
-an A/B run.
+and adaptive runs useful without OCRing every scanned page. The profiler skips
+unbounded `ocr-routed` runs for `scanned_typewritten` documents unless `--pages`,
+`--ocr-pages`, or `--allow-full-ocr` is supplied; this prevents an accidental
+full-book OCR run from dominating a routine baseline. OCR profiling defaults to
+`--ocr-dpi 200` with grayscale rasterization; use `--ocr-dpi 300` when
+comparing against older high-resolution runs or validating harder low-quality
+scans, and `--ocr-color` to preserve the older RGB raster path for an A/B run.
 
 For the full baseline workflow, use the wrapper:
 
