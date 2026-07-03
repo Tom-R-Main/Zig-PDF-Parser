@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PROFILE_SCHEMA_VERSION = "0.2.0"
+PROFILE_SCHEMA_VERSION = "0.3.0"
 DEFAULT_LANES = ("native-text", "adaptive-artifact-jsonl", "adaptive-stream-jsonl", "ocr-routed")
 
 
@@ -65,6 +65,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--ocr-dpi", type=int, default=200)
     parser.add_argument("--ocr-color", action="store_true", help="Rasterize OCR pages as RGB instead of default grayscale")
     parser.add_argument(
+        "--hash-output",
+        action="store_true",
+        help="Compute output_sha256 after timing each lane; useful for byte-stability checks but can add profiling wall-clock overhead",
+    )
+    parser.add_argument(
         "--enable-ocr-in-adaptive-lanes",
         action="store_true",
         help="Allow adaptive-artifact-jsonl and adaptive-stream-jsonl lanes to invoke OCR; by default OCR is isolated to ocr-routed",
@@ -105,6 +110,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                         ocr_rasterizer=args.ocr_rasterizer,
                         ocr_dpi=args.ocr_dpi,
                         ocr_color=args.ocr_color,
+                        hash_output=args.hash_output,
                         enable_ocr_in_adaptive_lanes=args.enable_ocr_in_adaptive_lanes,
                         pages=args.pages,
                         ocr_pages=args.ocr_pages,
@@ -207,6 +213,7 @@ def run_lane(
     ocr_rasterizer: str,
     ocr_dpi: int,
     ocr_color: bool,
+    hash_output: bool,
     enable_ocr_in_adaptive_lanes: bool,
     pages: str | None,
     ocr_pages: str | None,
@@ -249,6 +256,7 @@ def run_lane(
         proc = run_timed(cmd, cwd=repo_root)
         wall_ms = (time.perf_counter() - started) * 1000.0
         output_bytes = output_path.stat().st_size if output_path.exists() else 0
+        output_sha256 = sha256_file(output_path) if hash_output and output_path.exists() else None
         parser_latency_ms = extract_parser_latency(output_path, lane)
         status = "ok" if proc.returncode == 0 else "failed"
         reason = None if proc.returncode == 0 else (proc.stderr.strip() or f"exit {proc.returncode}")
@@ -268,6 +276,7 @@ def run_lane(
             "parser_latency_ms": parser_latency_ms,
             "peak_rss_mb": proc.peak_rss_mb,
             "output_bytes": output_bytes,
+            "output_sha256": output_sha256,
             "ocr_dpi": ocr_dpi if lane == "ocr-routed" else None,
             "ocr_color": ocr_color if lane == "ocr-routed" else None,
             "adaptive_ocr_enabled": enable_ocr_in_adaptive_lanes if lane.startswith("adaptive-") else None,
@@ -450,6 +459,7 @@ def base_record(entry: Entry, lane: str, repeat_index: int) -> dict[str, object]
         "parser_latency_ms": None,
         "peak_rss_mb": None,
         "output_bytes": 0,
+        "output_sha256": None,
         "input_sha256": None,
         "source_note": entry.source_note,
     }

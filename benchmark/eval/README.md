@@ -272,6 +272,10 @@ full-book OCR run from dominating a routine baseline. OCR profiling defaults to
 `--ocr-dpi 200` with grayscale rasterization; use `--ocr-dpi 300` when
 comparing against older high-resolution runs or validating harder low-quality
 scans, and `--ocr-color` to preserve the older RGB raster path for an A/B run.
+Use `--hash-output` for optimization validation runs where byte-for-byte output
+stability matters. The hash is computed after each timed subprocess completes,
+so it does not change `wall_ms`, but it can add total profiler runtime on very
+large JSONL outputs.
 
 For the full baseline workflow, use the wrapper:
 

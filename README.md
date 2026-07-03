@@ -106,7 +106,9 @@ default: adaptive JSONL lanes pass `--no-ocr`, while `ocr-routed` invokes
 Tesseract and can be bounded with `--ocr-pages`. OCR routes default to 200 DPI
 for the local Tesseract path and grayscale rasterization; pass `--ocr-dpi 300`
 when validating high-resolution scan tradeoffs, or `--ocr-color` when comparing
-against the older RGB raster path. `benchmark/eval/analyze_baseline.py`
+against the older RGB raster path. Add `--hash-output` during optimization
+validation runs when byte-for-byte output stability matters; hashes are computed
+after the timed subprocess exits. `benchmark/eval/analyze_baseline.py`
 turns comparator and profiler JSONL into grouped JSON/Markdown reports and
 records whether manifest PDFs are locally present. It also ranks measured
 optimization candidates and next actions, so the next slice is chosen from

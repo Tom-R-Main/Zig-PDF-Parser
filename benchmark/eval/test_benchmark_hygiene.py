@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -245,6 +246,54 @@ class BenchmarkHygieneTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual("profile_lane_result", records[0]["record_type"])
+            self.assertIn("output_sha256", records[0])
+            self.assertIsNone(records[0]["output_sha256"])
+
+    def test_profile_output_hash_is_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "fixture.pdf"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            parser_path = temp_path / "fake-parser"
+            parser_path.write_text(
+                "#!/bin/sh\n"
+                "out=''\n"
+                "previous=''\n"
+                "for arg in \"$@\"; do\n"
+                "  if [ \"$previous\" = '-o' ] || [ \"$previous\" = '--output' ]; then out=\"$arg\"; fi\n"
+                "  previous=\"$arg\"\n"
+                "done\n"
+                "printf 'profile-output\\n' > \"$out\"\n",
+                encoding="utf-8",
+            )
+            parser_path.chmod(0o755)
+            entry = profile_lanes.Entry(
+                category="clean_born_digital",
+                doc_id="fixture",
+                pdf_path=pdf_path,
+                page_count=1,
+            )
+
+            row = profile_lanes.run_lane(
+                repo_root=ROOT,
+                parser_command=parser_path,
+                entry=entry,
+                lane="native-text",
+                repeat_index=0,
+                require_tools=False,
+                ocr_executable="tesseract",
+                ocr_rasterizer="pdftoppm",
+                ocr_dpi=200,
+                ocr_color=False,
+                hash_output=True,
+                enable_ocr_in_adaptive_lanes=False,
+                pages=None,
+                ocr_pages=None,
+                allow_full_ocr=False,
+            )
+
+            self.assertEqual("ok", row["status"])
+            self.assertEqual(hashlib.sha256(b"profile-output\n").hexdigest(), row["output_sha256"])
 
     def test_analyze_baseline_summarizes_compare_and_profile_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
