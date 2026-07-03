@@ -46,6 +46,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-tiny-profile", action="store_true")
     parser.add_argument("--skip-ocr-profile", action="store_true")
     parser.add_argument("--skip-releasefast", action="store_true")
+    parser.add_argument(
+        "--hash-output",
+        action="store_true",
+        help="Pass --hash-output to profiler runs so baseline reports can summarize byte stability",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without running them")
     args = parser.parse_args(argv)
 
@@ -72,7 +77,8 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if not args.skip_tiny_profile:
         commands.append(
-            [
+            profile_command(
+                args,
                 python,
                 "benchmark/eval/profile_lanes.py",
                 "--manifest",
@@ -83,13 +89,14 @@ def run_cli(argv: list[str] | None = None) -> int:
                 str(args.repeat),
                 "--output",
                 args.tiny_profile_output,
-            ]
+            )
         )
 
     if not args.skip_ocr_profile:
         if ocr_tools_available():
             commands.append(
-                [
+                profile_command(
+                    args,
                     python,
                     "benchmark/eval/profile_lanes.py",
                     "--manifest",
@@ -100,7 +107,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     "1",
                     "--output",
                     args.ocr_profile_output,
-                ]
+                )
             )
         else:
             print("Skipping OCR profile: tesseract or pdftoppm is unavailable", file=sys.stderr, flush=True)
@@ -108,7 +115,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     large_ready = manifest_inputs_present(repo_root / args.large_manifest, repo_root)
     if args.large and large_ready:
         commands.append(
-            [
+            profile_command(
+                args,
                 python,
                 "benchmark/eval/profile_lanes.py",
                 "--manifest",
@@ -121,11 +129,12 @@ def run_cli(argv: list[str] | None = None) -> int:
                 str(args.repeat),
                 "--output",
                 args.large_profile_output,
-            ]
+            )
         )
         if args.large_ocr_pages:
             commands.append(
-                [
+                profile_command(
+                    args,
                     python,
                     "benchmark/eval/profile_lanes.py",
                     "--manifest",
@@ -140,7 +149,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     "1",
                     "--output",
                     args.large_ocr_profile_output,
-                ]
+                )
             )
     elif args.large:
         message = f"Large manifest inputs are missing; run fetch_large_corpus.py --download --derive first: {args.large_manifest}"
@@ -226,6 +235,13 @@ def add_existing_jsonl(
 
 def print_command(cmd: list[str]) -> None:
     print("+ " + " ".join(shell_quote(part) for part in cmd), flush=True)
+
+
+def profile_command(args: argparse.Namespace, *parts: str) -> list[str]:
+    cmd = list(parts)
+    if args.hash_output:
+        cmd.append("--hash-output")
+    return cmd
 
 
 def shell_quote(value: str) -> str:

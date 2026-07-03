@@ -292,7 +292,8 @@ large native/adaptive profile excludes the scanned corpus class by default, then
 adds a bounded scanned OCR sample with `--large-ocr-pages 1-10`; this keeps the
 baseline representative without OCRing a 295-page scanned book multiple times.
 Add `--require-large` when CI should fail instead of skipping missing local
-cache inputs.
+cache inputs. Add `--hash-output` to the wrapper when you want every profiler
+lane in the baseline report to include byte-stability hashes.
 
 Summarize comparator and profiler output before choosing an optimization target:
 

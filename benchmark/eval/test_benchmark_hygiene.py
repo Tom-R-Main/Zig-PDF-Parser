@@ -393,15 +393,29 @@ class BenchmarkHygieneTests(unittest.TestCase):
     def test_analyze_profile_hash_summary_detects_drift(self) -> None:
         summary = analyze_baseline.summarize_profile_group(
             [
-                {"status": "ok", "wall_ms": 1.0, "output_sha256": "aaa"},
-                {"status": "ok", "wall_ms": 1.1, "output_sha256": "bbb"},
-                {"status": "ok", "wall_ms": 1.2},
+                {"status": "ok", "doc_id": "same-doc", "wall_ms": 1.0, "output_sha256": "aaa"},
+                {"status": "ok", "doc_id": "same-doc", "wall_ms": 1.1, "output_sha256": "bbb"},
+                {"status": "ok", "doc_id": "same-doc", "wall_ms": 1.2},
             ]
         )
 
         self.assertEqual(2, summary["output_hashes"]["count"])
         self.assertEqual(2, summary["output_hashes"]["distinct_count"])
+        self.assertEqual(["same-doc"], summary["output_hashes"]["unstable_keys"])
         self.assertFalse(summary["output_hashes"]["stable"])
+
+    def test_analyze_profile_hash_summary_allows_distinct_document_hashes(self) -> None:
+        summary = analyze_baseline.summarize_profile_group(
+            [
+                {"status": "ok", "doc_id": "doc-a", "wall_ms": 1.0, "output_sha256": "aaa"},
+                {"status": "ok", "doc_id": "doc-b", "wall_ms": 1.1, "output_sha256": "bbb"},
+            ]
+        )
+
+        self.assertEqual(2, summary["output_hashes"]["count"])
+        self.assertEqual(2, summary["output_hashes"]["distinct_count"])
+        self.assertEqual([], summary["output_hashes"]["unstable_keys"])
+        self.assertTrue(summary["output_hashes"]["stable"])
 
     def test_run_baseline_dry_run_prints_pipeline_commands(self) -> None:
         stdout = io.StringIO()
@@ -419,6 +433,31 @@ class BenchmarkHygieneTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertIn("benchmark/eval/compare.py", stdout.getvalue())
+
+    def test_run_baseline_hash_output_reaches_profile_commands(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exit_code = run_baseline.main_with_args_for_test(
+                [
+                    "--dry-run",
+                    "--skip-releasefast",
+                    "--skip-compare",
+                    "--skip-ocr-profile",
+                    "--repeat",
+                    "1",
+                    "--hash-output",
+                ]
+            )
+
+        self.assertEqual(0, exit_code)
+        lines = stdout.getvalue().splitlines()
+        profile_lines = [line for line in lines if "benchmark/eval/profile_lanes.py" in line]
+        analyze_lines = [line for line in lines if "benchmark/eval/analyze_baseline.py" in line]
+        self.assertTrue(profile_lines)
+        self.assertTrue(all("--hash-output" in line for line in profile_lines))
+        self.assertTrue(analyze_lines)
+        self.assertTrue(all("--hash-output" not in line for line in analyze_lines))
 
     def test_run_baseline_manifest_inputs_present_detects_missing_large_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

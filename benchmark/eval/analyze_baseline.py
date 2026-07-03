@@ -208,6 +208,7 @@ class Summary:
     peak_rss_mb: list[float] = field(default_factory=list)
     output_bytes: list[float] = field(default_factory=list)
     output_sha256: set[str] = field(default_factory=set)
+    output_hashes_by_key: dict[str, set[str]] = field(default_factory=dict)
     output_hash_count: int = 0
     metrics: dict[str, list[float]] = field(default_factory=dict)
 
@@ -232,11 +233,13 @@ class Summary:
             return
         self.metrics.setdefault(name, []).append(number)
 
-    def add_output_hash(self, value: object) -> None:
+    def add_output_hash(self, key: object, value: object) -> None:
         if not isinstance(value, str) or not value:
             return
+        group_key = str(key) if key is not None else "unknown"
         self.output_hash_count += 1
         self.output_sha256.add(value)
+        self.output_hashes_by_key.setdefault(group_key, set()).add(value)
 
     def to_record(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -252,13 +255,18 @@ class Summary:
             "output_hashes": {
                 "count": self.output_hash_count,
                 "distinct_count": len(self.output_sha256),
-                "stable": self.output_hash_count == 0 or len(self.output_sha256) <= 1,
+                "stable": len(self.unstable_output_hash_keys()) == 0,
+                "unstable_key_count": len(self.unstable_output_hash_keys()),
+                "unstable_keys": self.unstable_output_hash_keys()[:5],
                 "samples": sorted(self.output_sha256)[:3],
             },
         }
         if self.metrics:
             result["metrics"] = {key: numeric_summary(values) for key, values in sorted(self.metrics.items())}
         return result
+
+    def unstable_output_hash_keys(self) -> list[str]:
+        return sorted(key for key, values in self.output_hashes_by_key.items() if len(values) > 1)
 
 
 def summarize_compare(records: list[dict[str, object]]) -> dict[str, object]:
@@ -305,7 +313,7 @@ def summarize_profile_group(records: list[dict[str, object]]) -> dict[str, objec
         summary.add_number("parser_latency_ms", record.get("parser_latency_ms"))
         summary.add_number("peak_rss_mb", record.get("peak_rss_mb"))
         summary.add_number("output_bytes", record.get("output_bytes"))
-        summary.add_output_hash(record.get("output_sha256"))
+        summary.add_output_hash(record.get("doc_id"), record.get("output_sha256"))
     return summary.to_record()
 
 
