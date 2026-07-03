@@ -380,7 +380,7 @@ pub fn renderTraceJsonWithOptions(allocator: std.mem.Allocator, result: anytype,
     try writer.writeAll("],\"trace\":[");
     for (result.trace_records, 0..) |record, index| {
         if (index > 0) try writer.writeByte(',');
-        try writeTraceRecord(writer, options.document_id, options.source_id, options.input_sha256, result, record, @intCast(result.page_routes.len + result.region_routes.len + index), null);
+        try writeTraceRecord(writer, options.document_id, options.source_id, options.input_sha256, result, record, @intCast(result.page_routes.len + result.region_routes.len + index), null, .{});
     }
     try writer.writeAll("]}");
     return output.toOwnedSlice(allocator);
@@ -1375,7 +1375,7 @@ fn writeRouteTraceRecords(writer: anytype, document_id: []const u8, source_id: ?
             if (jsonl) try writer.writeByte('\n') else try writer.writeByte(',');
         }
         const stream_meta = nextRouteStreamMeta(stream_event_index, record.page_index);
-        try writeTraceRecord(writer, document_id, source_id, input_sha256, result, record, trace_base + @as(u32, @intCast(index)), stream_meta);
+        try writeTraceRecord(writer, document_id, source_id, input_sha256, result, record, trace_base + @as(u32, @intCast(index)), stream_meta, offsets);
         wrote = true;
     }
     if (jsonl and wrote) try writer.writeByte('\n');
@@ -1463,7 +1463,7 @@ fn writeRegionRouteRecord(writer: anytype, document_id: []const u8, source_id: ?
     try writer.writeByte('}');
 }
 
-fn writeTraceRecord(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, record: anytype, trace_index: u32, stream_meta: ?StreamRecordMeta) !void {
+fn writeTraceRecord(writer: anytype, document_id: []const u8, source_id: ?[]const u8, input_sha256: ?[]const u8, result: anytype, record: anytype, trace_index: u32, stream_meta: ?StreamRecordMeta, offsets: RecordOffsets) !void {
     try writeRecordHeader(writer, "route_trace");
     if (stream_meta) |meta| try writeStreamMeta(writer, meta);
     try writeDocumentId(writer, document_id);
@@ -1478,7 +1478,7 @@ fn writeTraceRecord(writer: anytype, document_id: []const u8, source_id: ?[]cons
     try writer.writeAll(",\"stage\":\"");
     try writer.writeAll(@tagName(record.stage));
     try writer.writeByte('"');
-    const bbox = traceBBox(result, record);
+    const bbox = traceBBox(result, record, offsets);
     try writeRouteFields(writer, record.route, record.reason_mask, record.span_count, record.block_count, 0, 0, null, bbox);
     try specialist_protocol.writeRouteTraceSpecialistFieldsWithReason(writer, record.route, record.reason_mask, record.page_index, record.region_index);
     try writeProvenancePrefix(writer, .{
@@ -1956,7 +1956,7 @@ fn findMatchedRoute(result: anytype, page_index: u32, bbox: layout.BBox, offsets
     const trace_base = region_base + @as(u32, @intCast(result.region_routes.len));
     for (result.trace_records, 0..) |record, index| {
         if (record.page_index != page_index) continue;
-        if (traceBBox(result, record)) |box| {
+        if (traceBBox(result, record, offsets)) |box| {
             if (!boxesIntersect(box, bbox)) continue;
         }
         return .{
@@ -1999,7 +1999,7 @@ fn findMatchedRouteIndexed(result: anytype, page_index: u32, bbox: layout.BBox, 
     const trace_base = region_base + @as(u32, @intCast(result.region_routes.len));
     if (lookup.traceRange(page_index)) |range| {
         for (result.trace_records[range.start..range.end], range.start..) |record, index| {
-            if (traceBBox(result, record)) |box| {
+            if (traceBBox(result, record, offsets)) |box| {
                 if (!boxesIntersect(box, bbox)) continue;
             }
             return .{
@@ -2403,7 +2403,20 @@ fn findManualSpanForField(result: anytype, field: anytype) ?usize {
     return null;
 }
 
-fn traceBBox(result: anytype, record: anytype) ?layout.BBox {
+fn traceBBox(result: anytype, record: anytype, offsets: RecordOffsets) ?layout.BBox {
+    if (offsets.route_lookup) |lookup| {
+        if (record.region_index) |region_index| {
+            if (lookup.regionRange(record.page_index)) |range| {
+                for (result.region_routes[range.start..range.end]) |route| {
+                    if (route.region_index == region_index) return route.bbox;
+                }
+            }
+        }
+        if (lookup.pageRouteIndex(record.page_index)) |index| {
+            return result.page_routes[index].bbox;
+        }
+    }
+
     if (record.region_index) |region_index| {
         for (result.region_routes) |route| {
             if (route.region_index == region_index) return route.bbox;
