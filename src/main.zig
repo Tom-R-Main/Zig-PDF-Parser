@@ -673,6 +673,28 @@ fn doAdaptiveExtract(
         };
     }
 
+    if (!trace and output_format == .artifact_jsonl) {
+        var write_buf: [4096]u8 = undefined;
+        if (output_handle) |h| {
+            var file_writer = runtime.fileWriter(h, &write_buf);
+            const writer = &file_writer.interface;
+            defer writer.flush() catch {};
+            zpdf.schema.writeArtifactJsonl(allocator, writer, &result, schema_options) catch |err| {
+                std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
+                return;
+            };
+        } else {
+            var stdout_writer = runtime.stdoutWriter(&write_buf);
+            const writer = &stdout_writer.interface;
+            defer writer.flush() catch {};
+            zpdf.schema.writeArtifactJsonl(allocator, writer, &result, schema_options) catch |err| {
+                std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
+                return;
+            };
+        }
+        return;
+    }
+
     const rendered = if (trace)
         zpdf.schema.renderTraceJsonWithOptions(allocator, &result, schema_options) catch |err| {
             std.debug.print("Error rendering adaptive trace: {}\n", .{err});
@@ -684,10 +706,7 @@ fn doAdaptiveExtract(
             return;
         }
     else if (output_format == .artifact_jsonl)
-        zpdf.schema.renderArtifactJsonl(allocator, &result, schema_options) catch |err| {
-            std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
-            return;
-        }
+        unreachable
     else
         result.render(allocator, toAdaptiveOutputFormat(output_format)) catch |err| {
             std.debug.print("Error rendering adaptive output as {s}: {}\n", .{ outputFormatName(output_format), err });

@@ -59,14 +59,6 @@ pub fn collectEncryptionWarnings(
     return storage[0..count];
 }
 
-pub const RecordOffsets = struct {
-    span_base: u32 = 0,
-    block_base: u32 = 0,
-    table_base: u32 = 0,
-    chunk_base: u32 = 0,
-    route_base: u32 = 0,
-};
-
 pub const StreamCounts = struct {
     spans: usize = 0,
     blocks: usize = 0,
@@ -77,6 +69,140 @@ pub const StreamCounts = struct {
     specialist_results: usize = 0,
     rag_chunks: usize = 0,
     debug_assets: usize = 0,
+};
+
+pub const IndexRange = struct {
+    start: usize = std.math.maxInt(usize),
+    end: usize = 0,
+
+    fn add(self: *IndexRange, index: usize) void {
+        self.start = @min(self.start, index);
+        self.end = @max(self.end, index + 1);
+    }
+
+    fn slice(self: IndexRange) ?IndexRange {
+        if (self.start == std.math.maxInt(usize)) return null;
+        return self;
+    }
+};
+
+pub const RouteLookup = struct {
+    allocator: std.mem.Allocator,
+    page_route_indices: []?usize,
+    region_ranges: []IndexRange,
+    trace_ranges: []IndexRange,
+
+    fn init(allocator: std.mem.Allocator, result: anytype) !RouteLookup {
+        const page_count = routeLookupPageCount(result);
+        const page_route_indices = try allocator.alloc(?usize, page_count);
+        errdefer allocator.free(page_route_indices);
+        @memset(page_route_indices, null);
+
+        const region_ranges = try allocator.alloc(IndexRange, page_count);
+        errdefer allocator.free(region_ranges);
+        @memset(region_ranges, .{});
+
+        const trace_ranges = try allocator.alloc(IndexRange, page_count);
+        errdefer allocator.free(trace_ranges);
+        @memset(trace_ranges, .{});
+
+        for (result.page_routes, 0..) |route, index| {
+            if (route.page_index < page_route_indices.len and page_route_indices[route.page_index] == null) {
+                page_route_indices[route.page_index] = index;
+            }
+        }
+        for (result.region_routes, 0..) |route, index| {
+            if (route.page_index < region_ranges.len) region_ranges[route.page_index].add(index);
+        }
+        for (result.trace_records, 0..) |record, index| {
+            if (record.page_index < trace_ranges.len) trace_ranges[record.page_index].add(index);
+        }
+
+        return .{
+            .allocator = allocator,
+            .page_route_indices = page_route_indices,
+            .region_ranges = region_ranges,
+            .trace_ranges = trace_ranges,
+        };
+    }
+
+    fn deinit(self: *RouteLookup) void {
+        self.allocator.free(self.page_route_indices);
+        self.allocator.free(self.region_ranges);
+        self.allocator.free(self.trace_ranges);
+        self.* = undefined;
+    }
+
+    fn pageRouteIndex(self: *const RouteLookup, page_index: u32) ?usize {
+        if (page_index >= self.page_route_indices.len) return null;
+        return self.page_route_indices[page_index];
+    }
+
+    fn regionRange(self: *const RouteLookup, page_index: u32) ?IndexRange {
+        if (page_index >= self.region_ranges.len) return null;
+        return self.region_ranges[page_index].slice();
+    }
+
+    fn traceRange(self: *const RouteLookup, page_index: u32) ?IndexRange {
+        if (page_index >= self.trace_ranges.len) return null;
+        return self.trace_ranges[page_index].slice();
+    }
+};
+
+pub const SpanLookup = struct {
+    allocator: std.mem.Allocator,
+    span_ranges: []IndexRange,
+
+    fn init(allocator: std.mem.Allocator, result: anytype) !SpanLookup {
+        const page_count = spanLookupPageCount(result);
+        const span_ranges = try allocator.alloc(IndexRange, page_count);
+        errdefer allocator.free(span_ranges);
+        @memset(span_ranges, .{});
+
+        for (result.reconciled.spans, 0..) |span, index| {
+            const page_index = span.span.page_index;
+            if (page_index < span_ranges.len) span_ranges[page_index].add(index);
+        }
+
+        return .{
+            .allocator = allocator,
+            .span_ranges = span_ranges,
+        };
+    }
+
+    fn deinit(self: *SpanLookup) void {
+        self.allocator.free(self.span_ranges);
+        self.* = undefined;
+    }
+
+    fn spanRange(self: *const SpanLookup, page_index: u32) ?IndexRange {
+        if (page_index >= self.span_ranges.len) return null;
+        return self.span_ranges[page_index].slice();
+    }
+};
+
+fn routeLookupPageCount(result: anytype) usize {
+    var page_count: usize = 0;
+    for (result.page_routes) |route| page_count = @max(page_count, @as(usize, @intCast(route.page_index)) + 1);
+    for (result.region_routes) |route| page_count = @max(page_count, @as(usize, @intCast(route.page_index)) + 1);
+    for (result.trace_records) |record| page_count = @max(page_count, @as(usize, @intCast(record.page_index)) + 1);
+    return page_count;
+}
+
+fn spanLookupPageCount(result: anytype) usize {
+    var page_count: usize = 0;
+    for (result.reconciled.spans) |span| page_count = @max(page_count, @as(usize, @intCast(span.span.page_index)) + 1);
+    return page_count;
+}
+
+pub const RecordOffsets = struct {
+    span_base: u32 = 0,
+    block_base: u32 = 0,
+    table_base: u32 = 0,
+    chunk_base: u32 = 0,
+    route_base: u32 = 0,
+    route_lookup: ?*const RouteLookup = null,
+    span_lookup: ?*const SpanLookup = null,
 };
 
 pub const RouteTotals = struct {
@@ -145,25 +271,36 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
 }
 
 pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, options: RenderOptions) ![]u8 {
-    const debug_assets = try visual_assets.collectBatch(allocator, result, options.debug_assets_dir, options.include_debug_asset_refs);
-    defer visual_assets.deinitRecords(allocator, debug_assets);
-
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     const writer = runtime.arrayListWriter(&output, allocator);
 
+    try writeArtifactJsonl(allocator, writer, result, options);
+
+    return output.toOwnedSlice(allocator);
+}
+
+pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result: anytype, options: RenderOptions) !void {
+    const debug_assets = try visual_assets.collectBatch(allocator, result, options.debug_assets_dir, options.include_debug_asset_refs);
+    defer visual_assets.deinitRecords(allocator, debug_assets);
+    var route_lookup = try RouteLookup.init(allocator, result);
+    defer route_lookup.deinit();
+    var span_lookup = try SpanLookup.init(allocator, result);
+    defer span_lookup.deinit();
+    const offsets = RecordOffsets{ .route_lookup = &route_lookup, .span_lookup = &span_lookup };
+
     try writeDocumentManifestRecord(writer, result, options);
     try writer.writeByte('\n');
     for (result.reconciled.spans, 0..) |span, index| {
-        try writeSpanRecord(writer, result, options.document_id, options.source_id, options.input_sha256, span, @intCast(index), .{}, null);
+        try writeSpanRecord(writer, result, options.document_id, options.source_id, options.input_sha256, span, @intCast(index), offsets, null);
         try writer.writeByte('\n');
     }
     for (result.reconciled.blocks) |block| {
-        try writeBlockRecord(writer, result, options.document_id, options.source_id, options.input_sha256, block, 0, .{}, null);
+        try writeBlockRecord(writer, result, options.document_id, options.source_id, options.input_sha256, block, 0, offsets, null);
         try writer.writeByte('\n');
     }
     for (result.tables, 0..) |table, index| {
-        try writeTableRecord(writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), .{}, null);
+        try writeTableRecord(writer, options.document_id, options.source_id, options.input_sha256, result, table, @intCast(index), offsets, null);
         try writer.writeByte('\n');
     }
     for (result.form_fields, 0..) |field, index| {
@@ -173,12 +310,10 @@ pub fn renderArtifactJsonl(allocator: std.mem.Allocator, result: anytype, option
     try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, true, .{}, null);
     _ = try specialist_protocol.writeArtifactJsonl(writer, result, specialistContext(options));
     for (result.reconciled.chunks) |chunk| {
-        try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, .{}, null);
+        try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, offsets, null);
         try writer.writeByte('\n');
     }
     try writeDebugAssetRecords(writer, options.document_id, options.source_id, options.input_sha256, debug_assets, true, null);
-
-    return output.toOwnedSlice(allocator);
 }
 
 pub fn renderComplexityJson(allocator: std.mem.Allocator, result: anytype, document_id: []const u8) ![]u8 {
@@ -1050,7 +1185,7 @@ fn writeTableRecord(writer: anytype, document_id: []const u8, source_id: ?[]cons
     try writer.writeAll(",\"bbox\":");
     try writeBBoxJson(writer, table.bounds.bbox);
     try writer.writeAll(",\"source_span_ids\":");
-    try writeSpanIdsInBBox(writer, result, table.page_index, table.bounds.bbox, offsets.span_base);
+    try writeSpanIdsInBBox(writer, result, table.page_index, table.bounds.bbox, offsets);
     try writer.writeAll(",\"rows\":[");
     for (table.rows, 0..) |row, row_index| {
         if (row_index > 0) try writer.writeByte(',');
@@ -1115,7 +1250,7 @@ fn writeCellJson(writer: anytype, document_id: []const u8, source_id: ?[]const u
     try writer.writeAll(",\"bbox\":");
     try writeBBoxJson(writer, cell.bounds.bbox);
     try writer.writeAll(",\"source_span_ids\":");
-    try writeCellSpanIdArray(writer, result, cell, offsets.span_base);
+    try writeCellSpanIdArray(writer, result, cell, offsets);
     try writeProvenancePrefix(writer, .{
         .document_id = document_id,
         .source_id = source_id,
@@ -1127,7 +1262,7 @@ fn writeCellJson(writer: anytype, document_id: []const u8, source_id: ?[]const u
         .source_kind = "table_model",
         .confidence = cell.confidence,
     });
-    try writeCellSpanIdArray(writer, result, cell, offsets.span_base);
+    try writeCellSpanIdArray(writer, result, cell, offsets);
     try writer.writeAll(",\"block_ids\":[]");
     try writer.writeAll(",\"chunk_ids\":[]");
     try writeMatchedRouteProvenance(writer, result, cell.bounds.page_index, cell.bounds.bbox, offsets, stream);
@@ -1606,21 +1741,34 @@ fn writeOptionalTableId(writer: anytype, table_index: ?u32) !void {
     }
 }
 
-fn writeSpanIdsInBBox(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, span_base: u32) !void {
+fn writeSpanIdsInBBox(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, offsets: RecordOffsets) !void {
     try writer.writeByte('[');
     var first = true;
+    if (offsets.span_lookup) |lookup| {
+        if (lookup.spanRange(page_index)) |range| {
+            for (result.reconciled.spans[range.start..range.end], range.start..) |span, span_index| {
+                if (span.span.page_index != page_index) continue;
+                if (!centerInside(span.span.bbox, bbox)) continue;
+                if (!first) try writer.writeByte(',');
+                try writer.print("\"span-{d}\"", .{offsets.span_base + @as(u32, @intCast(span_index))});
+                first = false;
+            }
+        }
+        try writer.writeByte(']');
+        return;
+    }
     for (result.reconciled.spans, 0..) |span, span_index| {
         if (span.span.page_index != page_index) continue;
         if (!centerInside(span.span.bbox, bbox)) continue;
         if (!first) try writer.writeByte(',');
-        try writer.print("\"span-{d}\"", .{span_base + @as(u32, @intCast(span_index))});
+        try writer.print("\"span-{d}\"", .{offsets.span_base + @as(u32, @intCast(span_index))});
         first = false;
     }
     try writer.writeByte(']');
 }
 
-fn writeCellSpanIdArray(writer: anytype, result: anytype, cell: layout.TableCell, span_base: u32) !void {
-    try writeSpanIdsInBBox(writer, result, cell.bounds.page_index, cell.bounds.bbox, span_base);
+fn writeCellSpanIdArray(writer: anytype, result: anytype, cell: layout.TableCell, offsets: RecordOffsets) !void {
+    try writeSpanIdsInBBox(writer, result, cell.bounds.page_index, cell.bounds.bbox, offsets);
 }
 
 fn writeNormalizedJsonEscaped(writer: anytype, text: []const u8) !void {
@@ -1724,6 +1872,10 @@ fn writeEmptyRouteProvenance(writer: anytype) !void {
 }
 
 fn findMatchedRoute(result: anytype, page_index: u32, bbox: layout.BBox, offsets: RecordOffsets, stream: bool) ?MatchedRoute {
+    if (offsets.route_lookup) |lookup| {
+        if (findMatchedRouteIndexed(result, page_index, bbox, offsets, stream, lookup)) |route| return route;
+    }
+
     const region_base = offsets.route_base + @as(u32, @intCast(result.page_routes.len));
     var best_region: ?MatchedRoute = null;
     var best_area = std.math.inf(f64);
@@ -1761,6 +1913,50 @@ fn findMatchedRoute(result: anytype, page_index: u32, bbox: layout.BBox, offsets
             .id_index = trace_base + @as(u32, @intCast(index)),
             .reason_mask = record.reason_mask,
         };
+    }
+    return null;
+}
+
+fn findMatchedRouteIndexed(result: anytype, page_index: u32, bbox: layout.BBox, offsets: RecordOffsets, stream: bool, lookup: *const RouteLookup) ?MatchedRoute {
+    const region_base = offsets.route_base + @as(u32, @intCast(result.page_routes.len));
+    var best_region: ?MatchedRoute = null;
+    var best_area = std.math.inf(f64);
+    if (lookup.regionRange(page_index)) |range| {
+        for (result.region_routes[range.start..range.end], range.start..) |route, index| {
+            if (!boxesIntersect(route.bbox, bbox)) continue;
+            const area = boxArea(route.bbox);
+            if (area >= best_area) continue;
+            best_area = area;
+            best_region = .{
+                .id_prefix = if (stream) "route" else "route-region",
+                .id_index = if (stream) region_base + @as(u32, @intCast(index)) else route.region_index,
+                .reason_mask = route.reason_mask,
+            };
+        }
+    }
+    if (best_region) |route| return route;
+
+    if (lookup.pageRouteIndex(page_index)) |index| {
+        const route = result.page_routes[index];
+        return .{
+            .id_prefix = if (stream) "route" else "route-page",
+            .id_index = if (stream) offsets.route_base + @as(u32, @intCast(index)) else route.page_index,
+            .reason_mask = route.reason_mask,
+        };
+    }
+
+    const trace_base = region_base + @as(u32, @intCast(result.region_routes.len));
+    if (lookup.traceRange(page_index)) |range| {
+        for (result.trace_records[range.start..range.end], range.start..) |record, index| {
+            if (traceBBox(result, record)) |box| {
+                if (!boxesIntersect(box, bbox)) continue;
+            }
+            return .{
+                .id_prefix = if (stream) "route" else "trace",
+                .id_index = trace_base + @as(u32, @intCast(index)),
+                .reason_mask = record.reason_mask,
+            };
+        }
     }
     return null;
 }

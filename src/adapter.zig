@@ -97,9 +97,14 @@ pub fn extractAdaptive(
         try writeSpecialistRequestsFile(allocator, requests_path, &result, render_options);
     }
 
+    if (options.format == .artifact_jsonl) {
+        try schema.writeArtifactJsonl(allocator, writer, &result, render_options);
+        return .{ .format = options.format };
+    }
+
     const rendered = switch (options.format) {
         .json => try schema.renderArtifactJson(allocator, &result, render_options),
-        .artifact_jsonl => try schema.renderArtifactJsonl(allocator, &result, render_options),
+        .artifact_jsonl => unreachable,
         .trace_json => try schema.renderTraceJsonWithOptions(allocator, &result, render_options),
         .stream_jsonl => unreachable,
     };
