@@ -650,7 +650,7 @@ pub fn analyzeLayoutWithRulings(
     }
     current_line_spans.deinit(allocator);
 
-    const body_font_size = estimateBodyFontSize(result_spans.items);
+    const body_font_size = try estimateBodyFontSize(allocator, result_spans.items);
     classifyLines(lines.items, body_font_size);
 
     // Build column structure
@@ -861,24 +861,40 @@ fn makeLine(allocator: std.mem.Allocator, spans: []const TextSpan) !TextLine {
     };
 }
 
-fn estimateBodyFontSize(spans: []const TextSpan) f64 {
+const FontSizeBucket = struct {
+    key: i64,
+    first_size: f64,
+    weight: usize,
+};
+
+fn estimateBodyFontSize(allocator: std.mem.Allocator, spans: []const TextSpan) !f64 {
     if (spans.len == 0) return 12;
+
+    var buckets = try std.ArrayList(FontSizeBucket).initCapacity(allocator, 8);
+    defer buckets.deinit(allocator);
+
+    for (spans) |span| {
+        const key: i64 = @intFromFloat(@round(span.font_size * 2));
+        for (buckets.items) |*bucket| {
+            if (bucket.key == key) {
+                bucket.weight += span.text.len;
+                break;
+            }
+        } else {
+            try buckets.append(allocator, .{
+                .key = key,
+                .first_size = span.font_size,
+                .weight = span.text.len,
+            });
+        }
+    }
 
     var best_size = spans[0].font_size;
     var best_weight: usize = 0;
-
-    for (spans) |candidate| {
-        const bucket = @round(candidate.font_size * 2) / 2;
-        var weight: usize = 0;
-        for (spans) |span| {
-            const span_bucket = @round(span.font_size * 2) / 2;
-            if (@abs(span_bucket - bucket) < 0.01) {
-                weight += span.text.len;
-            }
-        }
-        if (weight > best_weight) {
-            best_weight = weight;
-            best_size = candidate.font_size;
+    for (buckets.items) |bucket| {
+        if (bucket.weight > best_weight) {
+            best_weight = bucket.weight;
+            best_size = bucket.first_size;
         }
     }
 
