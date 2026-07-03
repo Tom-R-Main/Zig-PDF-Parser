@@ -102,6 +102,9 @@ pub fn reconcile(
         spans.deinit(allocator);
     }
 
+    var duplicate_index = DuplicateIndex.init(allocator);
+    defer duplicate_index.deinit();
+
     for (layers) |layer| {
         for (layer.spans) |span| {
             if (span.text.len == 0) continue;
@@ -109,11 +112,17 @@ pub fn reconcile(
             const source = layer.source orelse span.source;
             const candidate = try copySpan(allocator, span, source, layer.trust);
 
-            if (findDuplicate(spans.items, candidate, options.overlap_threshold)) |index| {
+            if (findDuplicate(spans.items, &duplicate_index, candidate, options.overlap_threshold)) |index| {
                 mergeDuplicate(allocator, &spans.items[index], candidate);
             } else {
                 spans.append(allocator, candidate) catch |err| {
                     freeReconciledSpan(allocator, candidate);
+                    return err;
+                };
+                duplicate_index.add(candidate.span.page_index, spans.items.len - 1) catch |err| {
+                    const appended = spans.items[spans.items.len - 1];
+                    spans.items.len -= 1;
+                    freeReconciledSpan(allocator, appended);
                     return err;
                 };
             }
@@ -602,9 +611,39 @@ fn freeOwnedSpan(allocator: std.mem.Allocator, span: TextSpan) void {
     if (span.font.encoding) |encoding| allocator.free(@constCast(encoding));
 }
 
-fn findDuplicate(spans: []const ReconciledSpan, candidate: ReconciledSpan, overlap_threshold: f64) ?usize {
-    for (spans, 0..) |existing, index| {
-        if (existing.span.page_index != candidate.span.page_index) continue;
+const DuplicateIndex = struct {
+    allocator: std.mem.Allocator,
+    pages: std.AutoHashMap(u32, std.ArrayList(usize)),
+
+    fn init(allocator: std.mem.Allocator) DuplicateIndex {
+        return .{
+            .allocator = allocator,
+            .pages = std.AutoHashMap(u32, std.ArrayList(usize)).init(allocator),
+        };
+    }
+
+    fn deinit(self: *DuplicateIndex) void {
+        var values = self.pages.valueIterator();
+        while (values.next()) |indices| indices.deinit(self.allocator);
+        self.pages.deinit();
+    }
+
+    fn add(self: *DuplicateIndex, page_index: u32, span_index: usize) !void {
+        const entry = try self.pages.getOrPut(page_index);
+        if (!entry.found_existing) entry.value_ptr.* = .empty;
+        try entry.value_ptr.append(self.allocator, span_index);
+    }
+
+    fn indicesForPage(self: *const DuplicateIndex, page_index: u32) ?[]const usize {
+        const indices = self.pages.getPtr(page_index) orelse return null;
+        return indices.items;
+    }
+};
+
+fn findDuplicate(spans: []const ReconciledSpan, duplicate_index: *const DuplicateIndex, candidate: ReconciledSpan, overlap_threshold: f64) ?usize {
+    const same_page_indices = duplicate_index.indicesForPage(candidate.span.page_index) orelse return null;
+    for (same_page_indices) |index| {
+        const existing = spans[index];
         if (existing.span.mcid != null and candidate.span.mcid != null and existing.span.mcid.? == candidate.span.mcid.?) {
             return index;
         }
@@ -961,6 +1000,41 @@ test "reconciler deduplicates same text and preserves provenance" {
     try std.testing.expect(hasSource(doc.spans[0].source_mask, .fresh_ocr));
     try std.testing.expectEqual(SourceKind.native_pdf, doc.spans[0].chosen_source);
     try std.testing.expectEqual(@as(u32, 1), doc.spans[0].duplicate_count);
+}
+
+test "reconciler duplicate index keeps page identity" {
+    const page0 = testSpan("Total", .native_pdf, 10, 700, 50, 712);
+    var page1 = testSpan("Total", .native_pdf, 10, 700, 50, 712);
+    page1.page_index = 1;
+    const page0_ocr = testSpan(" Total ", .fresh_ocr, 10.5, 700, 50.5, 712);
+
+    const native = [_]TextSpan{ page0, page1 };
+    const ocr = [_]TextSpan{page0_ocr};
+
+    var doc = try reconcile(std.testing.allocator, &.{
+        .{ .source = .native_pdf, .spans = &native },
+        .{ .source = .fresh_ocr, .spans = &ocr },
+    }, .{});
+    defer doc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), doc.spans.len);
+    var merged_page0 = false;
+    var untouched_page1 = false;
+    for (doc.spans) |span| {
+        if (span.span.page_index == 0) {
+            try std.testing.expect(hasSource(span.source_mask, .native_pdf));
+            try std.testing.expect(hasSource(span.source_mask, .fresh_ocr));
+            try std.testing.expectEqual(@as(u32, 1), span.duplicate_count);
+            merged_page0 = true;
+        } else if (span.span.page_index == 1) {
+            try std.testing.expect(hasSource(span.source_mask, .native_pdf));
+            try std.testing.expect(!hasSource(span.source_mask, .fresh_ocr));
+            try std.testing.expectEqual(@as(u32, 0), span.duplicate_count);
+            untouched_page1 = true;
+        }
+    }
+    try std.testing.expect(merged_page0);
+    try std.testing.expect(untouched_page1);
 }
 
 test "reconciler emits specialist blocks and rag jsonl chunks" {
