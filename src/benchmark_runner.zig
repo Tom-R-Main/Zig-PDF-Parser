@@ -410,6 +410,7 @@ fn printUsage() !void {
         \\  --jsonl FILE             Record-oriented scorecard JSONL path
         \\  --ocr-executable FILE    Tesseract executable for adaptive lanes
         \\  --ocr-rasterizer FILE    pdftoppm-compatible rasterizer for adaptive lanes
+        \\  --ocr-dpi N              Rasterization DPI for adaptive OCR lanes (default: 200)
         \\
         \\Tool lanes:
         \\  pdf-parser:native

@@ -56,6 +56,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--require-tools", action="store_true")
     parser.add_argument("--ocr-executable", default="tesseract")
     parser.add_argument("--ocr-rasterizer", default="pdftoppm")
+    parser.add_argument("--ocr-dpi", type=int, default=200)
     parser.set_defaults(ensure_releasefast=True)
     args = parser.parse_args(argv)
 
@@ -90,6 +91,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                         require_tools=args.require_tools,
                         ocr_executable=args.ocr_executable,
                         ocr_rasterizer=args.ocr_rasterizer,
+                        ocr_dpi=args.ocr_dpi,
                         pages=args.pages,
                     )
                     if row["status"] != "ok":
@@ -187,6 +189,7 @@ def run_lane(
     require_tools: bool,
     ocr_executable: str,
     ocr_rasterizer: str,
+    ocr_dpi: int,
     pages: str | None,
 ) -> dict[str, object]:
     if not entry.pdf_path.exists():
@@ -203,7 +206,7 @@ def run_lane(
     with tempfile.NamedTemporaryFile(prefix=f"pdf-parser-{lane}-", suffix=".out", delete=False) as handle:
         output_path = Path(handle.name)
     try:
-        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, pages)
+        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, ocr_dpi, pages)
         started = time.perf_counter()
         proc = run_timed(cmd, cwd=repo_root)
         wall_ms = (time.perf_counter() - started) * 1000.0
@@ -227,6 +230,7 @@ def run_lane(
             "parser_latency_ms": parser_latency_ms,
             "peak_rss_mb": proc.peak_rss_mb,
             "output_bytes": output_bytes,
+            "ocr_dpi": ocr_dpi if lane == "ocr-routed" else None,
             "source_note": entry.source_note,
         }
     finally:
@@ -247,6 +251,7 @@ def build_lane_command(
     output_path: Path,
     ocr_executable: str,
     ocr_rasterizer: str,
+    ocr_dpi: int,
     pages: str | None,
 ) -> list[str]:
     base = [str(parser_command)]
@@ -283,6 +288,8 @@ def build_lane_command(
             ocr_executable,
             "--ocr-rasterizer",
             ocr_rasterizer,
+            "--ocr-dpi",
+            str(ocr_dpi),
             "--output",
             str(output_path),
         ]

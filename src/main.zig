@@ -87,6 +87,7 @@ fn printUsage() !void {
         \\                  Tesseract executable for adaptive OCR routes
         \\  --ocr-rasterizer FILE
         \\                  pdftoppm-compatible rasterizer for adaptive OCR routes
+        \\  --ocr-dpi N     Rasterization DPI for adaptive OCR routes (default: 200)
         \\  --no-ocr        Disable adaptive OCR subprocess routing
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs

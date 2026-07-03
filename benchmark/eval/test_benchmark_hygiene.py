@@ -157,16 +157,19 @@ class BenchmarkHygieneTests(unittest.TestCase):
         cmd = profile_lanes.build_lane_command(
             Path("/repo/zig-out/bin/pdf-parser"),
             entry,
-            "adaptive-stream-jsonl",
+            "ocr-routed",
             Path("/tmp/out.jsonl"),
             "tesseract",
             "pdftoppm",
+            200,
             "1-10",
         )
 
         self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract-adaptive"], cmd[:2])
         self.assertIn("stream-jsonl", cmd)
         self.assertIn("--password", cmd)
+        self.assertIn("--ocr-dpi", cmd)
+        self.assertIn("200", cmd)
         self.assertIn("--pages", cmd)
         self.assertIn("1-10", cmd)
 

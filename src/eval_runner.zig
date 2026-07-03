@@ -1238,7 +1238,7 @@ fn printUsage() !void {
         \\  --ocr-executable FILE   Tesseract executable for adaptive OCR
         \\  --ocr-rasterizer FILE   pdftoppm-compatible rasterizer for adaptive OCR
         \\  --ocr-lang LANG         Tesseract language code (default: eng)
-        \\  --ocr-dpi N             Rasterization DPI for adaptive OCR
+        \\  --ocr-dpi N             Rasterization DPI for adaptive OCR (default: 200)
         \\  -o, --output FILE       Write one JSONL record to file
         \\  --reading-order-score N External reading-order score, 0..1
         \\  --table-f1 N            External table detection F1, 0..1
