@@ -128,9 +128,10 @@ pub const GlyphWidths = struct {
             .last_char = 255,
             .allocator = allocator,
         };
-        // Default to monospace-like widths
+        // Simple base fonts often omit /Widths. Use the historical 0.5em
+        // extraction fallback until a PDF supplies explicit widths.
         for (&widths.simple_widths) |*w| {
-            w.* = 600;
+            w.* = 500;
         }
         return widths;
     }
@@ -213,6 +214,20 @@ pub const FontEncoding = struct {
         bytes_consumed: u8,
     };
 
+    pub const DecodedGlyph = struct {
+        source_code: u32,
+        source_bytes: []const u8,
+        bytes_consumed: u8,
+        utf8_text: []const u8,
+        glyph_width: f64,
+        cid_or_gid: ?u32 = null,
+        unicode_map_error: bool = false,
+        multi_char_mapping: bool = false,
+        writing_mode: u8 = 0,
+        ascender: f64 = 800,
+        descender: f64 = -200,
+    };
+
     pub fn init(allocator: std.mem.Allocator) FontEncoding {
         var enc = FontEncoding{
             .codepoint_map = undefined,
@@ -266,55 +281,121 @@ pub const FontEncoding = struct {
 
     /// Decode a string to Unicode using this encoding
     pub fn decode(self: *const FontEncoding, data: []const u8, writer: anytype) !void {
+        var sink = DecodeWriter(@TypeOf(writer)){ .writer = writer };
+        try self.decodeRecords(data, &sink);
+    }
+
+    pub fn decodeRecords(self: *const FontEncoding, data: []const u8, sink: anytype) !void {
         if (self.is_cid) {
-            // For CID fonts, use CID decoding even without CMap ranges
-            // (Identity encoding uses UTF-16BE directly)
-            try self.decodeCID(data, writer);
+            try self.decodeCIDRecords(data, sink);
         } else {
-            try self.decodeSimple(data, writer);
+            try self.decodeSimpleRecords(data, sink);
         }
     }
 
-    fn decodeSimple(self: *const FontEncoding, data: []const u8, writer: anytype) !void {
-        for (data) |byte| {
+    fn DecodeWriter(comptime Writer: type) type {
+        return struct {
+            writer: Writer,
+
+            pub fn writeDecodedGlyph(self: *@This(), glyph: DecodedGlyph) !void {
+                try self.writer.writeAll(glyph.utf8_text);
+            }
+        };
+    }
+
+    fn decodeSimpleRecords(self: *const FontEncoding, data: []const u8, sink: anytype) !void {
+        for (data, 0..) |byte, index| {
             // Check for multi-character mapping first (ligatures)
             if (self.cmap_multi.get(byte)) |utf8_str| {
-                try writer.writeAll(utf8_str);
+                try sink.writeDecodedGlyph(.{
+                    .source_code = byte,
+                    .source_bytes = data[index .. index + 1],
+                    .bytes_consumed = 1,
+                    .utf8_text = utf8_str,
+                    .glyph_width = self.widths.getWidth(byte),
+                    .multi_char_mapping = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
                 continue;
             }
 
             const codepoint = self.codepoint_map[byte];
+            var buf: [4]u8 = undefined;
             if (codepoint == 0) {
                 // No mapping - output replacement character or space
-                try writer.writeByte(' ');
+                try sink.writeDecodedGlyph(.{
+                    .source_code = byte,
+                    .source_bytes = data[index .. index + 1],
+                    .bytes_consumed = 1,
+                    .utf8_text = " ",
+                    .glyph_width = self.widths.getWidth(byte),
+                    .unicode_map_error = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
             } else {
-                var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(codepoint, &buf) catch 1;
-                try writer.writeAll(buf[0..len]);
+                try sink.writeDecodedGlyph(.{
+                    .source_code = byte,
+                    .source_bytes = data[index .. index + 1],
+                    .bytes_consumed = 1,
+                    .utf8_text = buf[0..len],
+                    .glyph_width = self.widths.getWidth(byte),
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
             }
         }
     }
 
-    fn decodeCID(self: *const FontEncoding, data: []const u8, writer: anytype) !void {
+    fn decodeCIDRecords(self: *const FontEncoding, data: []const u8, sink: anytype) !void {
         var i: usize = 0;
 
         while (i < data.len) {
             // Try to read character code (1-4 bytes depending on font)
             const code = self.readCharCode(data[i..]) orelse {
+                try sink.writeDecodedGlyph(.{
+                    .source_code = data[i],
+                    .source_bytes = data[i .. i + 1],
+                    .bytes_consumed = 1,
+                    .utf8_text = " ",
+                    .glyph_width = self.widths.default_width,
+                    .unicode_map_error = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
                 i += 1;
                 continue;
             };
 
+            const source_start = i;
             i += code.bytes_consumed;
 
             // Check for multi-character mapping first (ligatures)
             if (self.cmap_multi.get(code.value)) |utf8_str| {
-                try writer.writeAll(utf8_str);
+                try sink.writeDecodedGlyph(.{
+                    .source_code = code.value,
+                    .source_bytes = data[source_start..i],
+                    .bytes_consumed = code.bytes_consumed,
+                    .utf8_text = utf8_str,
+                    .glyph_width = self.widths.getCIDWidth(code.value),
+                    .cid_or_gid = code.value,
+                    .multi_char_mapping = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
                 continue;
             }
 
             // Look up in CMap ranges first
             var codepoint = self.lookupCMap(code.value);
+            var unicode_map_error = false;
 
             // If no CMap mapping, try CFF lookup if available
             if (codepoint == null) {
@@ -354,17 +435,54 @@ pub const FontEncoding = struct {
                 }
             }
 
+            if (codepoint == null and !self.cid_system_info.isIdentity()) {
+                unicode_map_error = true;
+            }
+
             const final_codepoint = codepoint orelse code.value;
+            var buf: [4]u8 = undefined;
 
             if (final_codepoint == 0) {
-                try writer.writeByte(' ');
+                try sink.writeDecodedGlyph(.{
+                    .source_code = code.value,
+                    .source_bytes = data[source_start..i],
+                    .bytes_consumed = @intCast(i - source_start),
+                    .utf8_text = " ",
+                    .glyph_width = self.widths.getCIDWidth(code.value),
+                    .cid_or_gid = code.value,
+                    .unicode_map_error = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
             } else if (final_codepoint <= 0x10FFFF) {
-                var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(@intCast(final_codepoint), &buf) catch 1;
-                try writer.writeAll(buf[0..len]);
+                try sink.writeDecodedGlyph(.{
+                    .source_code = code.value,
+                    .source_bytes = data[source_start..i],
+                    .bytes_consumed = @intCast(i - source_start),
+                    .utf8_text = buf[0..len],
+                    .glyph_width = self.widths.getCIDWidth(code.value),
+                    .cid_or_gid = code.value,
+                    .unicode_map_error = unicode_map_error,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
             } else {
                 // Invalid codepoint
-                try writer.writeByte(' ');
+                try sink.writeDecodedGlyph(.{
+                    .source_code = code.value,
+                    .source_bytes = data[source_start..i],
+                    .bytes_consumed = @intCast(i - source_start),
+                    .utf8_text = " ",
+                    .glyph_width = self.widths.getCIDWidth(code.value),
+                    .cid_or_gid = code.value,
+                    .unicode_map_error = true,
+                    .writing_mode = self.wmode,
+                    .ascender = self.metrics.ascender,
+                    .descender = self.metrics.descender,
+                });
             }
         }
     }
@@ -1838,6 +1956,90 @@ test "glyph widths" {
 
     try std.testing.expectEqual(@as(f64, 750), widths.getWidth(65));
     try std.testing.expectEqual(@as(f64, 250), widths.getWidth(32));
+}
+
+test "decode records expose simple glyph widths and unicode map errors" {
+    const allocator = std.testing.allocator;
+    var enc = FontEncoding.init(allocator);
+    defer enc.deinit();
+    enc.widths.simple_widths['A'] = 750;
+    enc.codepoint_map[0] = 0;
+
+    var sink = struct {
+        count: usize = 0,
+        text: std.ArrayList(u8) = .empty,
+        first_width: f64 = 0,
+        saw_map_error: bool = false,
+
+        fn writeDecodedGlyph(self: *@This(), glyph: FontEncoding.DecodedGlyph) !void {
+            if (self.count == 0) self.first_width = glyph.glyph_width;
+            self.saw_map_error = self.saw_map_error or glyph.unicode_map_error;
+            self.count += 1;
+            try self.text.appendSlice(std.testing.allocator, glyph.utf8_text);
+        }
+    }{};
+    defer sink.text.deinit(allocator);
+
+    try enc.decodeRecords(&[_]u8{ 'A', 0 }, &sink);
+
+    try std.testing.expectEqual(@as(usize, 2), sink.count);
+    try std.testing.expectEqual(@as(f64, 750), sink.first_width);
+    try std.testing.expect(sink.saw_map_error);
+    try std.testing.expectEqualStrings("A ", sink.text.items);
+}
+
+test "decode records preserve ligature and CID metadata" {
+    const allocator = std.testing.allocator;
+    var enc = FontEncoding.init(allocator);
+    defer enc.deinit();
+    const ligature = try allocator.dupe(u8, "fi");
+    try enc.cmap_multi.put(allocator, 'f', ligature);
+
+    var simple_sink = struct {
+        count: usize = 0,
+        multi: bool = false,
+        text: std.ArrayList(u8) = .empty,
+
+        fn writeDecodedGlyph(self: *@This(), glyph: FontEncoding.DecodedGlyph) !void {
+            self.count += 1;
+            self.multi = self.multi or glyph.multi_char_mapping;
+            try self.text.appendSlice(std.testing.allocator, glyph.utf8_text);
+        }
+    }{};
+    defer simple_sink.text.deinit(allocator);
+    try enc.decodeRecords(&[_]u8{'f'}, &simple_sink);
+    try std.testing.expectEqual(@as(usize, 1), simple_sink.count);
+    try std.testing.expect(simple_sink.multi);
+    try std.testing.expectEqualStrings("fi", simple_sink.text.items);
+
+    var cid = FontEncoding.init(allocator);
+    defer cid.deinit();
+    cid.is_cid = true;
+    cid.bytes_per_char = 2;
+    cid.wmode = 1;
+    try cid.cmap_hash.put(allocator, 0x0041, 'A');
+    cid.widths.default_width = 880;
+
+    var cid_sink = struct {
+        text: std.ArrayList(u8) = .empty,
+        width: f64 = 0,
+        cid_value: ?u32 = null,
+        writing_mode: u8 = 0,
+
+        fn writeDecodedGlyph(self: *@This(), glyph: FontEncoding.DecodedGlyph) !void {
+            self.width = glyph.glyph_width;
+            self.cid_value = glyph.cid_or_gid;
+            self.writing_mode = glyph.writing_mode;
+            try self.text.appendSlice(std.testing.allocator, glyph.utf8_text);
+        }
+    }{};
+    defer cid_sink.text.deinit(allocator);
+
+    try cid.decodeRecords(&[_]u8{ 0x00, 0x41 }, &cid_sink);
+    try std.testing.expectEqualStrings("A", cid_sink.text.items);
+    try std.testing.expectEqual(@as(f64, 880), cid_sink.width);
+    try std.testing.expectEqual(@as(?u32, 0x0041), cid_sink.cid_value);
+    try std.testing.expectEqual(@as(u8, 1), cid_sink.writing_mode);
 }
 
 test "font metrics defaults" {

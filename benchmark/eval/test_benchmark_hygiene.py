@@ -29,6 +29,7 @@ fetch_large_corpus = load_module("fetch_large_corpus", EVAL_DIR / "fetch_large_c
 profile_lanes = load_module("profile_lanes", EVAL_DIR / "profile_lanes.py")
 analyze_baseline = load_module("analyze_baseline", EVAL_DIR / "analyze_baseline.py")
 run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
+structural_compare = load_module("structural_compare", EVAL_DIR / "structural_compare.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
@@ -133,6 +134,42 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual(9.5, row["wall_ms"])
         self.assertIn("wall_ms", compare.render_table([row]).splitlines()[0])
         self.assertEqual(9.5, json.loads(compare.render_jsonl([row]))["wall_ms"])
+
+    def test_structural_compare_classifies_parser_and_qpdf_outcomes(self) -> None:
+        self.assertEqual("both_ok", structural_compare.classify(0, "ok", 0, 0))
+        self.assertEqual("both_warn", structural_compare.classify(0, "recovered", 3, 1))
+        self.assertEqual("pdf_parser_more_strict", structural_compare.classify(0, "recovered", 0, 0))
+        self.assertEqual("qpdf_more_strict", structural_compare.classify(0, "ok", 3, 1))
+        self.assertEqual("parser_failed", structural_compare.classify(1, None, 0, 0))
+
+    def test_structural_compare_ignores_qpdf_success_footer(self) -> None:
+        warnings = structural_compare.qpdf_warning_lines(
+            "No syntax or stream encoding errors found; the file may still contain\n"
+            "errors that qpdf cannot detect\n",
+            "",
+        )
+        self.assertEqual([], warnings)
+
+    def test_structural_compare_manifest_and_jsonl_are_stable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "fixture.pdf"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            manifest_path = temp_path / "manifest.tsv"
+            manifest_path.write_text(
+                f"adversarial_corrupt\tbad-startxref\t{pdf_path}\tignored-truth.txt\n",
+                encoding="utf-8",
+            )
+
+            entries = structural_compare.load_manifest(manifest_path, ROOT)
+            self.assertEqual(1, len(entries))
+            self.assertEqual("bad-startxref", entries[0].doc_id)
+
+            row = structural_compare.skipped_record(entries[0], "missing_qpdf", "qpdf unavailable")
+            rendered = structural_compare.render_jsonl([row])
+            record = json.loads(rendered)
+            self.assertEqual("structural_compare", record["record_type"])
+            self.assertEqual("skipped", record["classification"])
 
     def test_fetch_large_corpus_parses_sources_and_qpdf_recipes(self) -> None:
         rows = fetch_large_corpus.load_sources(EVAL_DIR / "large" / "sources.tsv", ROOT)

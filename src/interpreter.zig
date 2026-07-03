@@ -25,6 +25,40 @@ const Object = parser.Object;
 const ObjRef = parser.ObjRef;
 const FontEncoding = encoding_mod.FontEncoding;
 
+pub const GlyphSpan = struct {
+    page_index: u32 = 0,
+    bbox: layout.BBox = .{},
+    text_matrix: [6]f64 = .{ 1, 0, 0, 1, 0, 0 },
+    font_name: ?[]const u8 = null,
+    font_size: f64 = 0,
+    source_code: u32 = 0,
+    source_bytes: [4]u8 = .{ 0, 0, 0, 0 },
+    source_byte_count: u8 = 0,
+    text: []const u8 = "",
+    advance: f64 = 0,
+    unicode_map_error: bool = false,
+    generated: bool = false,
+    hyphen: bool = false,
+    mcid: ?i32 = null,
+    writing_mode: u8 = 0,
+};
+
+pub const CharSpan = struct {
+    page_index: u32 = 0,
+    glyph_index: u32 = 0,
+    bbox: layout.BBox = .{},
+    text_matrix: [6]f64 = .{ 1, 0, 0, 1, 0, 0 },
+    font_name: ?[]const u8 = null,
+    font_size: f64 = 0,
+    source_code: u32 = 0,
+    text: []const u8 = "",
+    unicode_map_error: bool = false,
+    generated: bool = false,
+    hyphen: bool = false,
+    mcid: ?i32 = null,
+    writing_mode: u8 = 0,
+};
+
 /// Text state within a content stream
 const TextState = struct {
     /// Character spacing (Tc)
@@ -403,6 +437,8 @@ pub fn ContentInterpreter(comptime Writer: type) type {
 
 pub const SpanCollector = struct {
     spans: std.ArrayList(TextSpan),
+    glyphs: std.ArrayList(GlyphSpan),
+    chars: std.ArrayList(CharSpan),
     text_buffer: std.ArrayList(u8),
     allocator: std.mem.Allocator,
     current_x: f64 = 0,
@@ -410,15 +446,25 @@ pub const SpanCollector = struct {
     current_font_size: f64 = 12,
     current_font_name: ?[]const u8 = null,
     current_font_has_to_unicode: ?bool = null,
+    current_text_matrix: [6]f64 = .{ 1, 0, 0, 1, 0, 0 },
+    current_char_spacing: f64 = 0,
+    current_word_spacing: f64 = 0,
+    current_horizontal_scale: f64 = 100,
+    current_text_rise: f64 = 0,
+    current_writing_mode: u8 = 0,
     page_index: u32 = 0,
     current_block_id: u32 = 0,
     current_line_id: u32 = 0,
     current_mcid: ?i32 = null,
+    pending_bbox: ?layout.BBox = null,
+    pending_unicode_map_error: bool = false,
     avg_char_width: f64 = 0.5,
 
     pub fn init(allocator: std.mem.Allocator, page_index: u32) SpanCollector {
         return .{
             .spans = .empty,
+            .glyphs = .empty,
+            .chars = .empty,
             .text_buffer = .empty,
             .allocator = allocator,
             .page_index = page_index,
@@ -434,7 +480,17 @@ pub const SpanCollector = struct {
                 self.allocator.free(@constCast(name));
             }
         }
+        for (self.glyphs.items) |glyph| {
+            if (glyph.text.len > 0) self.allocator.free(@constCast(glyph.text));
+            if (glyph.font_name) |name| self.allocator.free(@constCast(name));
+        }
+        for (self.chars.items) |char| {
+            if (char.text.len > 0) self.allocator.free(@constCast(char.text));
+            if (char.font_name) |name| self.allocator.free(@constCast(name));
+        }
         self.spans.deinit(self.allocator);
+        self.glyphs.deinit(self.allocator);
+        self.chars.deinit(self.allocator);
         self.text_buffer.deinit(self.allocator);
     }
 
@@ -456,6 +512,22 @@ pub const SpanCollector = struct {
         self.current_font_has_to_unicode = has_to_unicode;
     }
 
+    pub fn setTextState(self: *SpanCollector, args: struct {
+        char_spacing: f64,
+        word_spacing: f64,
+        horizontal_scale: f64,
+        text_rise: f64,
+    }) void {
+        self.current_char_spacing = args.char_spacing;
+        self.current_word_spacing = args.word_spacing;
+        self.current_horizontal_scale = args.horizontal_scale;
+        self.current_text_rise = args.text_rise;
+    }
+
+    pub fn setTextMatrix(self: *SpanCollector, matrix: [6]f64) void {
+        self.current_text_matrix = matrix;
+    }
+
     pub fn setMcid(self: *SpanCollector, mcid: ?i32) void {
         self.current_mcid = mcid;
     }
@@ -470,6 +542,91 @@ pub const SpanCollector = struct {
 
     pub fn print(_: *SpanCollector, comptime _: []const u8, _: anytype) !void {}
 
+    pub fn writeDecodedGlyph(self: *SpanCollector, decoded: encoding_mod.FontEncoding.DecodedGlyph) !void {
+        self.current_writing_mode = decoded.writing_mode;
+        const advance = self.scaledAdvance(decoded);
+        const bbox = self.currentGlyphBBox(advance, decoded);
+        const text = try self.allocator.dupe(u8, decoded.utf8_text);
+        errdefer self.allocator.free(text);
+        const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
+        errdefer if (font_name) |name| self.allocator.free(name);
+
+        var source_bytes: [4]u8 = .{ 0, 0, 0, 0 };
+        const source_len = @min(decoded.source_bytes.len, source_bytes.len);
+        @memcpy(source_bytes[0..source_len], decoded.source_bytes[0..source_len]);
+
+        const glyph_index: u32 = @intCast(self.glyphs.items.len);
+        try self.glyphs.append(self.allocator, .{
+            .page_index = self.page_index,
+            .bbox = bbox,
+            .text_matrix = self.current_text_matrix,
+            .font_name = font_name,
+            .font_size = self.current_font_size,
+            .source_code = decoded.source_code,
+            .source_bytes = source_bytes,
+            .source_byte_count = @intCast(source_len),
+            .text = text,
+            .advance = advance,
+            .unicode_map_error = decoded.unicode_map_error,
+            .generated = false,
+            .hyphen = isHyphenText(decoded.utf8_text),
+            .mcid = self.current_mcid,
+            .writing_mode = decoded.writing_mode,
+        });
+
+        try self.appendCharsForGlyph(glyph_index, bbox, decoded.source_code, decoded.utf8_text, decoded.unicode_map_error, false, decoded.writing_mode);
+        try self.text_buffer.appendSlice(self.allocator, decoded.utf8_text);
+        self.pending_bbox = unionOptionalBBox(self.pending_bbox, bbox);
+        self.pending_unicode_map_error = self.pending_unicode_map_error or decoded.unicode_map_error;
+
+        if (decoded.writing_mode == 1) {
+            self.current_y -= advance;
+        } else {
+            self.current_x += advance;
+        }
+        self.current_text_matrix[4] = self.current_x;
+        self.current_text_matrix[5] = self.current_y;
+    }
+
+    pub fn appendFallbackBytes(self: *SpanCollector, data: []const u8) !void {
+        for (data) |byte| {
+            if (byte == 0) continue;
+            var buf: [4]u8 = undefined;
+            const text = if (byte >= 32 and byte < 127) blk: {
+                buf[0] = byte;
+                break :blk buf[0..1];
+            } else blk: {
+                const codepoint = encoding_mod.win_ansi_encoding[byte];
+                if (codepoint == 0) continue;
+                const len = std.unicode.utf8Encode(codepoint, &buf) catch 1;
+                break :blk buf[0..len];
+            };
+            try self.writeDecodedGlyph(.{
+                .source_code = byte,
+                .source_bytes = data[0..0],
+                .bytes_consumed = 1,
+                .utf8_text = text,
+                .glyph_width = 600,
+                .unicode_map_error = byte >= 128,
+                .writing_mode = self.current_writing_mode,
+            });
+        }
+    }
+
+    pub fn advanceByTextAdjustment(self: *SpanCollector, adjustment: f64) !void {
+        if (adjustment > self.current_font_size * 0.15) {
+            try self.flush();
+            try self.appendGeneratedSpace(adjustment);
+        }
+        if (self.current_writing_mode == 1) {
+            self.current_y += adjustment;
+        } else {
+            self.current_x += adjustment;
+        }
+        self.current_text_matrix[4] = self.current_x;
+        self.current_text_matrix[5] = self.current_y;
+    }
+
     pub fn flush(self: *SpanCollector) !void {
         if (self.text_buffer.items.len == 0) return;
 
@@ -477,36 +634,146 @@ pub const SpanCollector = struct {
         errdefer self.allocator.free(text);
         const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
         errdefer if (font_name) |name| self.allocator.free(name);
-        const width = @as(f64, @floatFromInt(text.len)) * self.current_font_size * self.avg_char_width;
-        const height = self.current_font_size * 1.2;
+        const bbox = self.pending_bbox orelse fallbackBBox(self.current_x, self.current_y, @as(f64, @floatFromInt(text.len)) * self.current_font_size * self.avg_char_width, self.current_font_size);
 
         try self.spans.append(self.allocator, TextSpan.init(.{
             .page_index = self.page_index,
-            .bbox = .{
-                .x0 = self.current_x,
-                .y0 = self.current_y,
-                .x1 = self.current_x + width,
-                .y1 = self.current_y + height,
-            },
+            .bbox = bbox,
             .text = text,
             .source = .native_pdf,
-            .confidence = 1.0,
+            .confidence = if (self.pending_unicode_map_error) 0.82 else 1.0,
             .font = .{ .name = font_name, .size = self.current_font_size, .has_to_unicode = self.current_font_has_to_unicode },
             .block_id = self.current_block_id,
             .line_id = self.current_line_id,
             .mcid = self.current_mcid,
+            .unicode_map_error = self.pending_unicode_map_error,
         }));
 
-        self.current_x += width;
         self.text_buffer.clearRetainingCapacity();
+        self.pending_bbox = null;
+        self.pending_unicode_map_error = false;
     }
 
     pub fn getSpans(self: *SpanCollector) []const TextSpan {
         return self.spans.items;
     }
 
+    pub fn getGlyphs(self: *SpanCollector) []const GlyphSpan {
+        return self.glyphs.items;
+    }
+
+    pub fn getChars(self: *SpanCollector) []const CharSpan {
+        return self.chars.items;
+    }
+
     pub fn toOwnedSlice(self: *SpanCollector) ![]TextSpan {
         return self.spans.toOwnedSlice(self.allocator);
+    }
+
+    fn appendGeneratedSpace(self: *SpanCollector, advance: f64) !void {
+        const bbox = if (self.current_writing_mode == 1)
+            layout.BBox{ .x0 = self.current_x, .y0 = self.current_y - advance, .x1 = self.current_x + self.current_font_size * 0.35, .y1 = self.current_y }
+        else
+            layout.BBox{ .x0 = self.current_x, .y0 = self.current_y, .x1 = self.current_x + advance, .y1 = self.current_y + self.current_font_size };
+        const text = try self.allocator.dupe(u8, " ");
+        errdefer self.allocator.free(text);
+        const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
+        errdefer if (font_name) |name| self.allocator.free(name);
+        const glyph_index: u32 = @intCast(self.glyphs.items.len);
+        try self.glyphs.append(self.allocator, .{
+            .page_index = self.page_index,
+            .bbox = bbox,
+            .text_matrix = self.current_text_matrix,
+            .font_name = font_name,
+            .font_size = self.current_font_size,
+            .text = text,
+            .advance = advance,
+            .generated = true,
+            .mcid = self.current_mcid,
+            .writing_mode = self.current_writing_mode,
+        });
+        try self.appendCharsForGlyph(glyph_index, bbox, ' ', " ", false, true, self.current_writing_mode);
+    }
+
+    fn appendCharsForGlyph(self: *SpanCollector, glyph_index: u32, bbox: layout.BBox, source_code: u32, text: []const u8, unicode_map_error: bool, generated: bool, writing_mode: u8) !void {
+        var index: usize = 0;
+        while (index < text.len) {
+            const len = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
+            const end = @min(text.len, index + len);
+            const char_text = try self.allocator.dupe(u8, text[index..end]);
+            errdefer self.allocator.free(char_text);
+            const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
+            errdefer if (font_name) |name| self.allocator.free(name);
+            try self.chars.append(self.allocator, .{
+                .page_index = self.page_index,
+                .glyph_index = glyph_index,
+                .bbox = bbox,
+                .text_matrix = self.current_text_matrix,
+                .font_name = font_name,
+                .font_size = self.current_font_size,
+                .source_code = source_code,
+                .text = char_text,
+                .unicode_map_error = unicode_map_error,
+                .generated = generated,
+                .hyphen = isHyphenText(char_text),
+                .mcid = self.current_mcid,
+                .writing_mode = writing_mode,
+            });
+            index = end;
+        }
+    }
+
+    fn scaledAdvance(self: *const SpanCollector, decoded: encoding_mod.FontEncoding.DecodedGlyph) f64 {
+        var advance = decoded.glyph_width / 1000.0 * self.current_font_size * (self.current_horizontal_scale / 100.0);
+        if (advance <= 0) advance = self.current_font_size * self.avg_char_width;
+        advance += self.current_char_spacing;
+        if (std.mem.eql(u8, decoded.utf8_text, " ")) advance += self.current_word_spacing;
+        return advance;
+    }
+
+    fn currentGlyphBBox(self: *const SpanCollector, advance: f64, decoded: encoding_mod.FontEncoding.DecodedGlyph) layout.BBox {
+        const ascender = decoded.ascender / 1000.0 * self.current_font_size;
+        const descender = decoded.descender / 1000.0 * self.current_font_size;
+        const y0 = self.current_y + self.current_text_rise + descender;
+        const y1 = self.current_y + self.current_text_rise + ascender;
+        if (decoded.writing_mode == 1) {
+            return .{
+                .x0 = self.current_x + descender,
+                .y0 = self.current_y - advance,
+                .x1 = self.current_x + ascender,
+                .y1 = self.current_y,
+            };
+        }
+        return .{
+            .x0 = self.current_x,
+            .y0 = y0,
+            .x1 = self.current_x + advance,
+            .y1 = y1,
+        };
+    }
+
+    fn unionOptionalBBox(existing: ?layout.BBox, next: layout.BBox) ?layout.BBox {
+        if (existing) |box| {
+            return .{
+                .x0 = @min(box.x0, next.x0),
+                .y0 = @min(box.y0, next.y0),
+                .x1 = @max(box.x1, next.x1),
+                .y1 = @max(box.y1, next.y1),
+            };
+        }
+        return next;
+    }
+
+    fn fallbackBBox(x: f64, y: f64, width: f64, font_size: f64) layout.BBox {
+        return .{ .x0 = x, .y0 = y - font_size * 0.2, .x1 = x + width, .y1 = y + font_size };
+    }
+
+    fn isHyphenText(text: []const u8) bool {
+        return std.mem.eql(u8, text, "-") or
+            std.mem.eql(u8, text, "\xC2\xAD") or
+            std.mem.eql(u8, text, "\xE2\x80\x90") or
+            std.mem.eql(u8, text, "\xE2\x80\x91") or
+            std.mem.eql(u8, text, "\xE2\x88\x92");
     }
 };
 
@@ -1138,4 +1405,57 @@ test "content interpreter applies leading and line text operators" {
 
     try interp.process(content);
     try std.testing.expectEqualStrings("Line1\nLine2\nLine3\nLine4", output.items);
+}
+
+test "span collector derives bounds from decoded glyph advances" {
+    var collector = SpanCollector.init(std.testing.allocator, 0);
+    defer collector.deinit();
+
+    collector.setPosition(100, 200);
+    collector.setFont("F1", 10, true);
+    collector.setTextMatrix(.{ 1, 0, 0, 1, 100, 200 });
+    try collector.writeDecodedGlyph(.{
+        .source_code = 'A',
+        .source_bytes = "A",
+        .bytes_consumed = 1,
+        .utf8_text = "A",
+        .glyph_width = 750,
+        .ascender = 800,
+        .descender = -200,
+    });
+    try collector.flush();
+
+    try std.testing.expectEqual(@as(usize, 1), collector.getSpans().len);
+    try std.testing.expectEqual(@as(usize, 1), collector.getGlyphs().len);
+    try std.testing.expectEqual(@as(usize, 1), collector.getChars().len);
+
+    const span = collector.getSpans()[0];
+    try std.testing.expectApproxEqAbs(@as(f64, 7.5), span.bbox.x1 - span.bbox.x0, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 10.0), span.bbox.y1 - span.bbox.y0, 0.001);
+    try std.testing.expectEqualStrings("A", span.text);
+}
+
+test "span collector records generated gaps and vertical glyph movement" {
+    var collector = SpanCollector.init(std.testing.allocator, 0);
+    defer collector.deinit();
+
+    collector.setPosition(50, 300);
+    collector.setFont("Fv", 12, true);
+    try collector.writeDecodedGlyph(.{
+        .source_code = 0x41,
+        .source_bytes = &[_]u8{ 0x00, 0x41 },
+        .bytes_consumed = 2,
+        .utf8_text = "A",
+        .glyph_width = 1000,
+        .writing_mode = 1,
+    });
+    try collector.advanceByTextAdjustment(6);
+    try collector.flush();
+
+    try std.testing.expect(collector.current_y < 300);
+    var saw_generated = false;
+    for (collector.getChars()) |char| {
+        if (char.generated and std.mem.eql(u8, char.text, " ")) saw_generated = true;
+    }
+    try std.testing.expect(saw_generated);
 }

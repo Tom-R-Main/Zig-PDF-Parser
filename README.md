@@ -108,6 +108,9 @@ pdf-parser benchmark \
   --tools pdf-parser,pymupdf,pypdfium2,pdfplumber \
   --ensure-releasefast \
   --manifest benchmark/eval/corpus/manifest.tsv
+.venv/bin/python benchmark/eval/structural_compare.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --output /tmp/pdf-parser-structural.jsonl
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
 .venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
@@ -137,6 +140,21 @@ neutral: use `pdf-parser:native`, `pdf-parser:adaptive`, or
 `command:<id>=<command template with {pdf}>`. `--candidate-command` and
 `--baseline-command` compare two pdf-parser-compatible executables and
 `--fail-on-regression` makes the scorecard usable as a CI ingestion gate.
+
+For structural parser hardening, use the qpdf differential lane:
+
+```bash
+pdf-parser check --format json doc.pdf
+pdf-parser inspect structure --format json doc.pdf
+.venv/bin/python benchmark/eval/structural_compare.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --output benchmark/eval/outputs/structural/tiny-corpus.jsonl
+```
+
+The structural report records input hash, page count, xref/trailer summary,
+encryption presence, stable diagnostic codes, recovery actions, and
+`status: ok|recovered|failed`. qpdf remains an external oracle for
+benchmarking and fixture derivation; extraction never shells out to qpdf.
 
 `benchmark/eval/corpus` is the tiny checked-in correctness and regression
 corpus. Large public or private PDFs belong under ignored

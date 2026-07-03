@@ -142,6 +142,7 @@ const RegionStats = struct {
     text_area: f64 = 0,
     image_area: f64 = 0,
     invalid_utf8_spans: usize = 0,
+    unicode_map_error_spans: usize = 0,
     replacement_chars: usize = 0,
     control_chars: usize = 0,
     known_tounicode_fonts: usize = 0,
@@ -187,6 +188,7 @@ const RegionStats = struct {
             self.addXBucket(xBucket(text_span.x0));
 
             if (!std.unicode.utf8ValidateSlice(text_span.text)) self.invalid_utf8_spans += 1;
+            if (text_span.unicode_map_error or text_span.confidence < 0.9) self.unicode_map_error_spans += 1;
             self.replacement_chars += countNeedle(text_span.text, "\xEF\xBF\xBD");
 
             for (text_span.text) |byte| {
@@ -289,9 +291,10 @@ fn scoreImageDominance(stats: *const RegionStats) f32 {
 fn scoreBadUnicode(stats: *const RegionStats) f32 {
     if (stats.span_count == 0 or stats.char_count == 0) return 0;
     const invalid_ratio = @as(f64, @floatFromInt(stats.invalid_utf8_spans)) / @as(f64, @floatFromInt(stats.span_count));
+    const map_error_ratio = @as(f64, @floatFromInt(stats.unicode_map_error_spans)) / @as(f64, @floatFromInt(stats.span_count));
     const replacement_ratio = @as(f64, @floatFromInt(stats.replacement_chars * 3)) / @as(f64, @floatFromInt(stats.char_count));
     const control_ratio = @as(f64, @floatFromInt(stats.control_chars)) / @as(f64, @floatFromInt(stats.char_count));
-    return f32Clamp(@max(invalid_ratio, @max(replacement_ratio * 3.0, control_ratio * 5.0)));
+    return f32Clamp(@max(map_error_ratio, @max(invalid_ratio, @max(replacement_ratio * 3.0, control_ratio * 5.0))));
 }
 
 fn scoreMissingToUnicode(stats: *const RegionStats) f32 {
@@ -593,6 +596,26 @@ test "bad unicode and hidden OCR layer are OCR signals" {
     try std.testing.expect(page.score.signals.bad_unicode >= 0.35);
     try std.testing.expect(page.score.signals.hidden_ocr >= 0.9);
     try std.testing.expect(page.score.signals.missing_tounicode >= 0.9);
+    try std.testing.expect(page.score.route.needs_ocr);
+}
+
+test "unicode map error spans contribute to bad unicode routing signal" {
+    const spans = [_]TextSpan{
+        TextSpan.init(.{
+            .bbox = .{ .x0 = 10, .y0 = 10, .x1 = 30, .y1 = 22 },
+            .text = " ",
+            .confidence = 0.82,
+            .font = .{ .name = "BadCID", .size = 12, .has_to_unicode = false },
+            .unicode_map_error = true,
+        }),
+    };
+
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 100 },
+        .spans = &spans,
+    });
+
+    try std.testing.expect(page.score.signals.bad_unicode >= 0.9);
     try std.testing.expect(page.score.route.needs_ocr);
 }
 

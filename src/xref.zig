@@ -10,6 +10,7 @@ const std = @import("std");
 const parser = @import("parser.zig");
 const decompress = @import("decompress.zig");
 const simd = @import("simd.zig");
+const structural = @import("structural.zig");
 
 const Object = parser.Object;
 const ObjRef = parser.ObjRef;
@@ -65,54 +66,159 @@ pub const XRefParseError = error{
     OutOfMemory,
 };
 
+pub const ParseOptions = struct {
+    recover: bool = true,
+    diagnostics: ?*std.ArrayList(structural.Diagnostic) = null,
+    diagnostic_allocator: ?std.mem.Allocator = null,
+};
+
+const max_prev_chain = 256;
+
 /// Parse XRef from PDF data, starting from EOF
 /// hash_allocator: used for XRefTable.entries HashMap
 /// parse_allocator: used for parsing objects (can be arena)
 pub fn parseXRef(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8) XRefParseError!XRefTable {
+    return parseXRefWithOptions(hash_allocator, parse_allocator, data, .{});
+}
+
+pub fn parseXRefWithOptions(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8, options: ParseOptions) XRefParseError!XRefTable {
     // Prefer startxref, but recover by scanning for a traditional xref table
     // when the pointer is missing, corrupt, or points into unrelated bytes.
     const startxref_offset = readStartXref(data) catch |err| {
+        emit(hash_allocator, options, .{
+            .code = if (err == XRefParseError.StartXrefNotFound) .missing_startxref else .invalid_startxref,
+            .severity = if (options.recover) .warning else .error_,
+            .stage = .xref,
+            .action = if (options.recover) .recovered else .failed,
+            .message = if (err == XRefParseError.StartXrefNotFound) "Missing startxref marker" else "Invalid startxref value",
+        });
+        if (!options.recover) return err;
         const recovered = findRecoverableXrefOffset(data) orelse return err;
-        return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered);
+        emit(hash_allocator, options, .{
+            .code = .recovered_xref_offset,
+            .severity = .warning,
+            .stage = .xref,
+            .offset = recovered,
+            .action = .recovered,
+            .message = "Recovered by scanning for a traditional xref table",
+        });
+        return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered, options);
     };
 
-    return parseXRefFromOffset(hash_allocator, parse_allocator, data, startxref_offset) catch |err| switch (err) {
+    return parseXRefFromOffset(hash_allocator, parse_allocator, data, startxref_offset, options) catch |err| switch (err) {
         XRefParseError.InvalidXrefOffset,
         XRefParseError.XrefSectionNotFound,
         XRefParseError.InvalidXrefTable,
         XRefParseError.InvalidXrefStream,
         XRefParseError.InvalidTrailer,
         => {
+            emit(hash_allocator, options, .{
+                .code = if (err == XRefParseError.InvalidXrefOffset) .invalid_xref_offset else .invalid_startxref,
+                .severity = if (options.recover) .warning else .error_,
+                .stage = .xref,
+                .offset = startxref_offset,
+                .action = if (options.recover) .recovered else .failed,
+                .message = "startxref did not resolve to a usable xref section",
+            });
+            if (!options.recover) return err;
             const recovered = findRecoverableXrefOffset(data) orelse return err;
             if (recovered == startxref_offset) return err;
-            return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered);
+            emit(hash_allocator, options, .{
+                .code = .recovered_xref_offset,
+                .severity = .warning,
+                .stage = .xref,
+                .offset = recovered,
+                .action = .recovered,
+                .message = "Recovered by scanning for a fallback xref table",
+            });
+            return parseXRefFromOffset(hash_allocator, parse_allocator, data, recovered, options);
         },
         else => return err,
     };
 }
 
-fn parseXRefFromOffset(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8, startxref_offset: u64) XRefParseError!XRefTable {
+fn parseXRefFromOffset(hash_allocator: std.mem.Allocator, parse_allocator: std.mem.Allocator, data: []const u8, startxref_offset: u64, options: ParseOptions) XRefParseError!XRefTable {
     var xref = XRefTable.init(hash_allocator);
     errdefer xref.deinit();
 
     // Parse XRef chain (following /Prev links for incremental updates)
     var current_offset: ?u64 = startxref_offset;
+    var seen_offsets = std.AutoHashMap(u64, void).init(hash_allocator);
+    defer seen_offsets.deinit();
+    var chain_count: usize = 0;
 
     while (current_offset) |offset| {
-        if (offset >= data.len) return XRefParseError.InvalidXrefOffset;
+        if (chain_count >= max_prev_chain) {
+            emit(hash_allocator, options, .{
+                .code = .prev_chain_too_deep,
+                .severity = .error_,
+                .stage = .xref,
+                .offset = offset,
+                .action = .failed,
+                .message = "XRef /Prev chain exceeded maximum depth",
+            });
+            return XRefParseError.InvalidXrefOffset;
+        }
+        chain_count += 1;
+
+        if (seen_offsets.contains(offset)) {
+            emit(hash_allocator, options, .{
+                .code = .prev_cycle,
+                .severity = .error_,
+                .stage = .xref,
+                .offset = offset,
+                .action = .failed,
+                .message = "XRef /Prev chain contains a cycle",
+            });
+            return XRefParseError.InvalidXrefOffset;
+        }
+        seen_offsets.put(offset, {}) catch return XRefParseError.OutOfMemory;
+
+        if (offset >= data.len) {
+            emit(hash_allocator, options, .{
+                .code = .invalid_prev_offset,
+                .severity = .error_,
+                .stage = .xref,
+                .offset = offset,
+                .action = .failed,
+                .message = "XRef offset points beyond end of file",
+            });
+            return XRefParseError.InvalidXrefOffset;
+        }
 
         const xref_start = data[@intCast(offset)..];
 
         if (std.mem.startsWith(u8, xref_start, "xref")) {
             // Traditional xref table
-            const trailer = try parseXrefTable(parse_allocator, data, offset, &xref);
+            const trailer = try parseXrefTable(parse_allocator, data, offset, &xref, false, options);
+            if (getTrailerXRefStm(trailer)) |stream_offset| {
+                emit(hash_allocator, options, .{
+                    .code = .hybrid_xref_stream,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = stream_offset,
+                    .action = .recovered,
+                    .message = "Parsed hybrid /XRefStm stream referenced by xref table",
+                });
+                _ = parseXrefStream(parse_allocator, data, stream_offset, &xref, true, options) catch |err| {
+                    emit(hash_allocator, options, .{
+                        .code = .malformed_xref_stream_row,
+                        .severity = if (options.recover) .warning else .error_,
+                        .stage = .xref,
+                        .offset = stream_offset,
+                        .action = if (options.recover) .skipped else .failed,
+                        .message = "Failed to parse hybrid /XRefStm stream",
+                    });
+                    if (!options.recover) return err;
+                };
+            }
             if (xref.trailer.entries.len == 0) {
                 xref.trailer = trailer;
             }
             current_offset = getTrailerPrev(trailer);
         } else if (looksLikeIndirectObject(xref_start)) {
             // XRef stream (starts with object definition like "10 0 obj")
-            const trailer = try parseXrefStream(parse_allocator, data, offset, &xref);
+            const trailer = try parseXrefStream(parse_allocator, data, offset, &xref, false, options);
             if (xref.trailer.entries.len == 0) {
                 xref.trailer = trailer;
             }
@@ -123,6 +229,10 @@ fn parseXRefFromOffset(hash_allocator: std.mem.Allocator, parse_allocator: std.m
     }
 
     return xref;
+}
+
+fn emit(allocator: std.mem.Allocator, options: ParseOptions, diagnostic: structural.Diagnostic) void {
+    structural.appendDiagnostic(options.diagnostic_allocator orelse allocator, options.diagnostics, diagnostic);
 }
 
 fn findRecoverableXrefOffset(data: []const u8) ?u64 {
@@ -225,6 +335,8 @@ fn parseXrefTable(
     data: []const u8,
     offset: u64,
     xref: *XRefTable,
+    overwrite: bool,
+    options: ParseOptions,
 ) XRefParseError!Object.Dict {
     var pos: usize = @intCast(offset);
 
@@ -244,7 +356,11 @@ fn parseXrefTable(
             pos += 7;
             while (pos < data.len and isWhitespace(data[pos])) pos += 1;
 
-            var p = parser.Parser.initAt(allocator, data, pos);
+            var p = parser.Parser.initAtWithOptions(allocator, data, pos, .{
+                .recover_stream_lengths = options.recover,
+                .diagnostics = options.diagnostics,
+                .diagnostic_allocator = options.diagnostic_allocator,
+            });
             const trailer_obj = p.parseObject() catch return XRefParseError.InvalidTrailer;
 
             return switch (trailer_obj) {
@@ -266,10 +382,28 @@ fn parseXrefTable(
         // Parse entries (each is 20 bytes: "oooooooooo ggggg n|f\r\n" or similar)
         var i: u64 = 0;
         while (i < count) : (i += 1) {
-            if (pos + 17 > data.len) break;
+            if (pos + 17 > data.len) {
+                emit(allocator, options, .{
+                    .code = .truncated_xref_row,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = @intCast(pos),
+                    .action = .skipped,
+                    .message = "Truncated xref table row",
+                });
+                break;
+            }
 
             // Parse 10-digit offset
             const entry_offset = parseFixedUint(data[pos..][0..10]) orelse {
+                emit(allocator, options, .{
+                    .code = .truncated_xref_row,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = @intCast(pos),
+                    .action = .skipped,
+                    .message = "Malformed xref table row offset",
+                });
                 pos += 20;
                 continue;
             };
@@ -280,6 +414,14 @@ fn parseXrefTable(
 
             // Parse 5-digit generation
             const gen = parseFixedUint(data[pos..][0..5]) orelse {
+                emit(allocator, options, .{
+                    .code = .truncated_xref_row,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = @intCast(pos),
+                    .action = .skipped,
+                    .message = "Malformed xref table row generation",
+                });
                 pos += 10;
                 continue;
             };
@@ -302,14 +444,11 @@ fn parseXrefTable(
 
             const obj_num: u32 = @intCast(first_obj + i);
 
-            // Only add if not already present (first occurrence wins for incremental updates)
-            if (!xref.entries.contains(obj_num)) {
-                xref.entries.put(obj_num, .{
-                    .offset = entry_offset,
-                    .gen_or_index = @intCast(gen),
-                    .entry_type = entry_type,
-                }) catch return XRefParseError.OutOfMemory;
-            }
+            try putEntry(xref, obj_num, .{
+                .offset = entry_offset,
+                .gen_or_index = @intCast(gen),
+                .entry_type = entry_type,
+            }, overwrite, options);
         }
     }
 
@@ -322,9 +461,15 @@ fn parseXrefStream(
     data: []const u8,
     offset: u64,
     xref: *XRefTable,
+    overwrite: bool,
+    options: ParseOptions,
 ) XRefParseError!Object.Dict {
     // Parse the stream object
-    var p = parser.Parser.initAt(allocator, data, @intCast(offset));
+    var p = parser.Parser.initAtWithOptions(allocator, data, @intCast(offset), .{
+        .recover_stream_lengths = options.recover,
+        .diagnostics = options.diagnostics,
+        .diagnostic_allocator = options.diagnostic_allocator,
+    });
     const indirect = p.parseIndirectObject() catch return XRefParseError.InvalidXrefStream;
 
     const stream = switch (indirect.obj) {
@@ -403,7 +548,17 @@ fn parseXrefStream(
             count -= 1;
             obj_num += 1;
         }) {
-            if (data_pos + entry_size > decoded.len) break;
+            if (data_pos + entry_size > decoded.len) {
+                emit(allocator, options, .{
+                    .code = .malformed_xref_stream_row,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = offset,
+                    .action = .skipped,
+                    .message = "XRef stream data ended before all declared entries",
+                });
+                break;
+            }
 
             // Read type field (default 1 if w0 == 0)
             const entry_type_val: u64 = if (w0 > 0)
@@ -441,23 +596,52 @@ fn parseXrefStream(
                     .gen_or_index = @intCast(field3), // Index within stream
                     .entry_type = .compressed,
                 },
-                else => continue,
+                else => {
+                    emit(allocator, options, .{
+                        .code = .unknown_xref_stream_entry,
+                        .severity = .warning,
+                        .stage = .xref,
+                        .offset = offset,
+                        .action = .skipped,
+                        .message = "Skipped unknown xref stream entry type",
+                    });
+                    continue;
+                },
             };
 
             const num: u32 = @intCast(obj_num);
-            if (!xref.entries.contains(num)) {
-                xref.entries.put(num, entry) catch return XRefParseError.OutOfMemory;
-            }
+            try putEntry(xref, num, entry, overwrite, options);
         }
     }
 
     return dict;
 }
 
+fn putEntry(xref: *XRefTable, obj_num: u32, entry: XRefEntry, overwrite: bool, options: ParseOptions) XRefParseError!void {
+    if (xref.entries.contains(obj_num)) {
+        emit(xref.allocator, options, .{
+            .code = .duplicate_xref_entry,
+            .severity = .info,
+            .stage = .xref,
+            .object_ref = .{ .num = obj_num, .gen = @intCast(@min(entry.gen_or_index, std.math.maxInt(u16))) },
+            .action = if (overwrite) .recovered else .skipped,
+            .message = if (overwrite) "Replaced duplicate xref entry with newer entry" else "Skipped duplicate xref entry",
+        });
+        if (!overwrite) return;
+    }
+    xref.entries.put(obj_num, entry) catch return XRefParseError.OutOfMemory;
+}
+
 fn getTrailerPrev(trailer: Object.Dict) ?u64 {
     const prev = trailer.getInt("Prev") orelse return null;
     if (prev < 0) return null;
     return @intCast(prev);
+}
+
+fn getTrailerXRefStm(trailer: Object.Dict) ?u64 {
+    const offset = trailer.getInt("XRefStm") orelse return null;
+    if (offset < 0) return null;
+    return @intCast(offset);
 }
 
 fn parseUint(data: []const u8, pos: *usize) ?u64 {
@@ -627,6 +811,51 @@ test "parse xref recovers when startxref is absent" {
 
     try std.testing.expect(recovered.entries.contains(1));
     try std.testing.expectEqual(@as(i64, 2), recovered.trailer.getInt("Size").?);
+}
+
+test "parse xref table merges hybrid XRefStm stream entries" {
+    var pdf: std.ArrayList(u8) = .empty;
+    defer pdf.deinit(std.testing.allocator);
+    var writer = @import("runtime.zig").arrayListWriter(&pdf, std.testing.allocator);
+
+    try writer.writeAll("%PDF-1.5\n");
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+
+    const xref_stream_offset = pdf.items.len;
+    try writer.writeAll("9 0 obj\n");
+    try writer.writeAll("<< /Type /XRef /Size 2 /Index [0 2] /W [1 1 1] /Length 6 /Root 1 0 R >>\nstream\n");
+    try writer.writeAll(&[_]u8{ 0, 0, 0, 1, 7, 0 });
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 2\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("trailer\n<< /Size 10 /Root 1 0 R /XRefStm {} >>\n", .{xref_stream_offset});
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostics: std.ArrayList(structural.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+
+    var parsed = try parseXRefWithOptions(std.testing.allocator, arena.allocator(), pdf.items, .{
+        .diagnostics = &diagnostics,
+        .diagnostic_allocator = std.testing.allocator,
+    });
+    defer parsed.deinit();
+
+    const entry = parsed.get(1).?;
+    try std.testing.expectEqual(XRefEntry.EntryType.in_use, entry.entry_type);
+    try std.testing.expectEqual(@as(u64, 7), entry.offset);
+    try std.testing.expectEqual(@as(u32, 0), entry.gen_or_index);
+
+    var saw_hybrid = false;
+    for (diagnostics.items) |diagnostic| {
+        if (diagnostic.code == .hybrid_xref_stream) saw_hybrid = true;
+    }
+    try std.testing.expect(saw_hybrid);
 }
 
 test "parse xref rejects malformed trailer deterministically" {

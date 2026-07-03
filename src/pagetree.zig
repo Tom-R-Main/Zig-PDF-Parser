@@ -9,6 +9,7 @@ const std = @import("std");
 const parser = @import("parser.zig");
 const xref_mod = @import("xref.zig");
 const encryption = @import("encryption.zig");
+const structural = @import("structural.zig");
 
 const Object = parser.Object;
 const ObjRef = parser.ObjRef;
@@ -38,6 +39,13 @@ pub const PageTreeError = error{
     OutOfMemory,
 };
 
+pub const BuildOptions = struct {
+    security: ?*const encryption.SecurityHandler = null,
+    diagnostics: ?*std.ArrayList(structural.Diagnostic) = null,
+    diagnostic_allocator: ?std.mem.Allocator = null,
+    recover: bool = true,
+};
+
 /// Resolve object reference using XRef table
 pub fn resolveRef(
     allocator: std.mem.Allocator,
@@ -46,7 +54,7 @@ pub fn resolveRef(
     ref: ObjRef,
     resolved_cache: *std.AutoHashMap(u32, Object),
 ) !Object {
-    return resolveRefWithSecurity(allocator, data, xref, ref, resolved_cache, null);
+    return resolveRefWithOptions(allocator, data, xref, ref, resolved_cache, .{});
 }
 
 /// Resolve object reference using XRef table, optionally decrypting the
@@ -59,21 +67,68 @@ pub fn resolveRefWithSecurity(
     resolved_cache: *std.AutoHashMap(u32, Object),
     security: ?*const encryption.SecurityHandler,
 ) !Object {
+    return resolveRefWithOptions(allocator, data, xref, ref, resolved_cache, .{ .security = security });
+}
+
+pub fn resolveRefWithOptions(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    ref: ObjRef,
+    resolved_cache: *std.AutoHashMap(u32, Object),
+    options: BuildOptions,
+) !Object {
     // Check cache first
     if (resolved_cache.get(ref.num)) |cached| {
         return cached;
     }
 
-    const entry = xref.get(ref.num) orelse return Object{ .null = {} };
+    const entry = xref.get(ref.num) orelse {
+        emit(allocator, options, .{
+            .code = .missing_object,
+            .severity = .warning,
+            .stage = .object,
+            .object_ref = .{ .num = ref.num, .gen = ref.gen },
+            .action = .skipped,
+            .message = "Object reference is missing from xref table",
+        });
+        return Object{ .null = {} };
+    };
 
     switch (entry.entry_type) {
         .free => return Object{ .null = {} },
         .in_use => {
-            if (entry.offset >= data.len) return Object{ .null = {} };
+            if (entry.offset >= data.len) {
+                emit(allocator, options, .{
+                    .code = .missing_object,
+                    .severity = .warning,
+                    .stage = .object,
+                    .offset = entry.offset,
+                    .object_ref = .{ .num = ref.num, .gen = ref.gen },
+                    .action = .skipped,
+                    .message = "Object offset points beyond end of file",
+                });
+                return Object{ .null = {} };
+            }
 
-            var p = parser.Parser.initAt(allocator, data, @intCast(entry.offset));
-            const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
-            const object = if (security) |handler|
+            var p = parser.Parser.initAtWithOptions(allocator, data, @intCast(entry.offset), .{
+                .recover_stream_lengths = options.recover,
+                .diagnostics = options.diagnostics,
+                .diagnostic_allocator = options.diagnostic_allocator,
+            });
+            const indirect = p.parseIndirectObject() catch {
+                emit(allocator, options, .{
+                    .code = .missing_object,
+                    .severity = .warning,
+                    .stage = .object,
+                    .offset = entry.offset,
+                    .object_ref = .{ .num = ref.num, .gen = ref.gen },
+                    .action = .skipped,
+                    .message = "Failed to parse indirect object",
+                });
+                return Object{ .null = {} };
+            };
+            const object = if (options.security) |handler|
                 handler.decryptObject(allocator, .{ .num = indirect.num, .gen = indirect.gen }, indirect.obj) catch return Object{ .null = {} }
             else
                 indirect.obj;
@@ -83,7 +138,7 @@ pub fn resolveRefWithSecurity(
         },
         .compressed => {
             // Object is inside an object stream
-            return resolveCompressedObject(allocator, data, xref, entry, resolved_cache, security);
+            return resolveCompressedObject(allocator, data, xref, entry, resolved_cache, options);
         },
     }
 }
@@ -94,27 +149,46 @@ fn resolveCompressedObject(
     xref: *const XRefTable,
     entry: xref_mod.XRefEntry,
     resolved_cache: *std.AutoHashMap(u32, Object),
-    security: ?*const encryption.SecurityHandler,
+    options: BuildOptions,
 ) !Object {
     const objstm_num: u32 = @intCast(entry.offset);
     const index = entry.gen_or_index;
 
     // Get the object stream
-    const objstm_entry = xref.get(objstm_num) orelse return Object{ .null = {} };
-    if (objstm_entry.entry_type != .in_use) return Object{ .null = {} };
-    if (objstm_entry.offset >= data.len) return Object{ .null = {} };
+    const objstm_entry = xref.get(objstm_num) orelse {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, null, "Object stream reference is missing"));
+        return Object{ .null = {} };
+    };
+    if (objstm_entry.entry_type != .in_use) {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, null, "Object stream entry is not an in-use object"));
+        return Object{ .null = {} };
+    }
+    if (objstm_entry.offset >= data.len) {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream offset points beyond EOF"));
+        return Object{ .null = {} };
+    }
 
-    var p = parser.Parser.initAt(allocator, data, @intCast(objstm_entry.offset));
-    const indirect = p.parseIndirectObject() catch return Object{ .null = {} };
+    var p = parser.Parser.initAtWithOptions(allocator, data, @intCast(objstm_entry.offset), .{
+        .recover_stream_lengths = options.recover,
+        .diagnostics = options.diagnostics,
+        .diagnostic_allocator = options.diagnostic_allocator,
+    });
+    const indirect = p.parseIndirectObject() catch {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Failed to parse object stream object"));
+        return Object{ .null = {} };
+    };
 
-    const objstm_obj = if (security) |handler|
+    const objstm_obj = if (options.security) |handler|
         handler.decryptObject(allocator, .{ .num = indirect.num, .gen = indirect.gen }, indirect.obj) catch return Object{ .null = {} }
     else
         indirect.obj;
 
     const stream = switch (objstm_obj) {
         .stream => |s| s,
-        else => return Object{ .null = {} },
+        else => {
+            emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream reference did not resolve to a stream"));
+            return Object{ .null = {} };
+        },
     };
 
     // Decompress stream (arena-allocated, no need to free)
@@ -124,13 +198,25 @@ fn resolveCompressedObject(
         stream.data,
         stream.dict.get("Filter"),
         stream.dict.get("DecodeParms"),
-    ) catch return Object{ .null = {} };
+    ) catch {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Failed to decompress object stream"));
+        return Object{ .null = {} };
+    };
 
     // Parse object stream header
-    const n = stream.dict.getInt("N") orelse return Object{ .null = {} };
-    const first = stream.dict.getInt("First") orelse return Object{ .null = {} };
+    const n = stream.dict.getInt("N") orelse {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream is missing /N"));
+        return Object{ .null = {} };
+    };
+    const first = stream.dict.getInt("First") orelse {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream is missing /First"));
+        return Object{ .null = {} };
+    };
 
-    if (n <= 0 or first < 0) return Object{ .null = {} };
+    if (n <= 0 or first < 0 or first >= decoded.len) {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream has invalid /N or /First"));
+        return Object{ .null = {} };
+    }
 
     // Parse offset pairs from header
     var header_parser = parser.Parser.init(allocator, decoded);
@@ -139,13 +225,19 @@ fn resolveCompressedObject(
 
     var i: i64 = 0;
     while (i < n) : (i += 1) {
-        const obj = header_parser.parseObject() catch break;
+        const obj = header_parser.parseObject() catch {
+            emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream header ended early"));
+            break;
+        };
         const num: u32 = switch (obj) {
             .integer => |int| @intCast(int),
             else => break,
         };
 
-        const offset_obj = header_parser.parseObject() catch break;
+        const offset_obj = header_parser.parseObject() catch {
+            emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream header offset ended early"));
+            break;
+        };
         const offset: u64 = switch (offset_obj) {
             .integer => |int| @intCast(int),
             else => break,
@@ -155,15 +247,24 @@ fn resolveCompressedObject(
     }
 
     // Find our object
-    if (index >= offsets.items.len) return Object{ .null = {} };
+    if (index >= offsets.items.len) {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream target index is out of range"));
+        return Object{ .null = {} };
+    }
 
     const obj_offset: usize = @intCast(first);
     const rel_offset = offsets.items[index].offset;
 
-    if (obj_offset + rel_offset >= decoded.len) return Object{ .null = {} };
+    if (obj_offset + rel_offset >= decoded.len) {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream target offset is out of range"));
+        return Object{ .null = {} };
+    }
 
     var obj_parser = parser.Parser.initAt(allocator, decoded, obj_offset + @as(usize, @intCast(rel_offset)));
-    const result = obj_parser.parseObject() catch return Object{ .null = {} };
+    const result = obj_parser.parseObject() catch {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Failed to parse compressed object"));
+        return Object{ .null = {} };
+    };
 
     try resolved_cache.put(offsets.items[index].num, result);
     return result;
@@ -184,6 +285,15 @@ pub fn buildPageTreeWithSecurity(
     xref: *const XRefTable,
     security: ?*const encryption.SecurityHandler,
 ) PageTreeError![]Page {
+    return buildPageTreeWithOptions(allocator, data, xref, .{ .security = security });
+}
+
+pub fn buildPageTreeWithOptions(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    xref: *const XRefTable,
+    options: BuildOptions,
+) PageTreeError![]Page {
     var resolved_cache = std.AutoHashMap(u32, Object).init(allocator);
     defer resolved_cache.deinit();
 
@@ -194,7 +304,7 @@ pub fn buildPageTreeWithSecurity(
     };
 
     // Resolve catalog
-    const catalog = resolveRefWithSecurity(allocator, data, xref, root_ref, &resolved_cache, security) catch
+    const catalog = resolveRefWithOptions(allocator, data, xref, root_ref, &resolved_cache, options) catch
         return PageTreeError.CatalogNotFound;
 
     const catalog_dict = switch (catalog) {
@@ -223,7 +333,7 @@ pub fn buildPageTreeWithSecurity(
         allocator,
         data,
         xref,
-        security,
+        options,
         &resolved_cache,
         &visited,
         &pages,
@@ -241,7 +351,7 @@ fn walkPageTree(
     allocator: std.mem.Allocator,
     data: []const u8,
     xref: *const XRefTable,
-    security: ?*const encryption.SecurityHandler,
+    options: BuildOptions,
     cache: *std.AutoHashMap(u32, Object),
     visited: *std.AutoHashMap(u32, void),
     pages: *std.ArrayList(Page),
@@ -253,13 +363,21 @@ fn walkPageTree(
 ) PageTreeError!void {
     // Cycle detection
     if (visited.contains(node_ref.num)) {
+        emit(allocator, options, .{
+            .code = .page_tree_circular_reference,
+            .severity = .warning,
+            .stage = .page_tree,
+            .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+            .action = if (options.recover) .skipped else .failed,
+            .message = "Circular page-tree reference",
+        });
         return PageTreeError.CircularReference;
     }
     visited.put(node_ref.num, {}) catch return PageTreeError.OutOfMemory;
     defer _ = visited.remove(node_ref.num);
 
     // Resolve node
-    const node = resolveRefWithSecurity(allocator, data, xref, node_ref, cache, security) catch
+    const node = resolveRefWithOptions(allocator, data, xref, node_ref, cache, options) catch
         return PageTreeError.InvalidPageTree;
 
     const dict = switch (node) {
@@ -268,18 +386,39 @@ fn walkPageTree(
     };
 
     // Check Type — some generators omit /Type; infer from structure
-    const type_name = dict.getName("Type") orelse
-        if (dict.get("Kids") != null) "Pages" else "Page";
+    const type_name = dict.getName("Type") orelse blk: {
+        emit(allocator, options, .{
+            .code = .page_tree_missing_type,
+            .severity = .warning,
+            .stage = .page_tree,
+            .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+            .action = .recovered,
+            .message = "Page-tree node is missing /Type; inferred from structure",
+        });
+        break :blk if (dict.get("Kids") != null) "Pages" else "Page";
+    };
 
     // Get inherited attributes at this level
-    const mediabox = extractBox(dict, "MediaBox") orelse inherited_mediabox;
+    const mediabox = extractBox(dict, "MediaBox") orelse blk: {
+        if (dict.get("MediaBox") != null) {
+            emit(allocator, options, .{
+                .code = .page_tree_missing_box,
+                .severity = .warning,
+                .stage = .page_tree,
+                .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+                .action = .recovered,
+                .message = "Invalid MediaBox; using inherited/default box",
+            });
+        }
+        break :blk inherited_mediabox;
+    };
     const cropbox = extractBox(dict, "CropBox") orelse inherited_cropbox;
     const rotation = @as(i32, @intCast(dict.getInt("Rotate") orelse inherited_rotation));
 
     var resources = inherited_resources;
     if (dict.get("Resources")) |res_obj| {
         const resolved = switch (res_obj) {
-            .reference => |r| resolveRefWithSecurity(allocator, data, xref, r, cache, security) catch res_obj,
+            .reference => |r| resolveRefWithOptions(allocator, data, xref, r, cache, options) catch res_obj,
             else => res_obj,
         };
         if (resolved == .dict) {
@@ -289,19 +428,52 @@ fn walkPageTree(
 
     if (std.mem.eql(u8, type_name, "Pages")) {
         // Intermediate node - recurse into Kids
-        const kids = dict.getArray("Kids") orelse return;
+        const kids = dict.getArray("Kids") orelse {
+            emit(allocator, options, .{
+                .code = .page_tree_missing_kids,
+                .severity = if (options.recover) .warning else .error_,
+                .stage = .page_tree,
+                .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+                .action = if (options.recover) .skipped else .failed,
+                .message = "Pages node is missing /Kids",
+            });
+            if (options.recover) return;
+            return PageTreeError.InvalidPageTree;
+        };
+        if (dict.getInt("Count")) |declared_count| {
+            if (declared_count != @as(i64, @intCast(kids.len))) {
+                emit(allocator, options, .{
+                    .code = .page_tree_wrong_count,
+                    .severity = .warning,
+                    .stage = .page_tree,
+                    .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+                    .action = .recovered,
+                    .message = "Pages node /Count does not match immediate /Kids count",
+                });
+            }
+        }
 
         for (kids) |kid| {
             const kid_ref = switch (kid) {
                 .reference => |r| r,
-                else => continue,
+                else => {
+                    emit(allocator, options, .{
+                        .code = .page_tree_bad_kid,
+                        .severity = .warning,
+                        .stage = .page_tree,
+                        .object_ref = .{ .num = node_ref.num, .gen = node_ref.gen },
+                        .action = .skipped,
+                        .message = "Skipped non-reference page-tree kid",
+                    });
+                    continue;
+                },
             };
 
-            try walkPageTree(
+            walkPageTree(
                 allocator,
                 data,
                 xref,
-                security,
+                options,
                 cache,
                 visited,
                 pages,
@@ -310,7 +482,17 @@ fn walkPageTree(
                 cropbox,
                 rotation,
                 resources,
-            );
+            ) catch |err| {
+                emit(allocator, options, .{
+                    .code = .page_tree_recovered_child,
+                    .severity = if (options.recover) .warning else .error_,
+                    .stage = .page_tree,
+                    .object_ref = .{ .num = kid_ref.num, .gen = kid_ref.gen },
+                    .action = if (options.recover) .skipped else .failed,
+                    .message = "Skipped unrecoverable page-tree child",
+                });
+                if (!options.recover) return err;
+            };
         }
     } else if (std.mem.eql(u8, type_name, "Page")) {
         // Leaf node - add to pages list
@@ -324,6 +506,22 @@ fn walkPageTree(
         }) catch return PageTreeError.OutOfMemory;
     }
     // Ignore unknown types
+}
+
+fn emit(allocator: std.mem.Allocator, options: BuildOptions, diagnostic: structural.Diagnostic) void {
+    structural.appendDiagnostic(options.diagnostic_allocator orelse allocator, options.diagnostics, diagnostic);
+}
+
+fn objectStreamDiagnostic(objstm_num: u32, offset: ?u64, message: []const u8) structural.Diagnostic {
+    return .{
+        .code = .malformed_object_stream,
+        .severity = .warning,
+        .stage = .object_stream,
+        .offset = offset,
+        .object_ref = .{ .num = objstm_num, .gen = 0 },
+        .action = .skipped,
+        .message = message,
+    };
 }
 
 fn extractBox(dict: Object.Dict, key: []const u8) ?[4]f64 {

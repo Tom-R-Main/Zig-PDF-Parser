@@ -242,6 +242,25 @@ extraction and OCR-routed pages:
 python3 benchmark/eval/compare.py --require-baselines --pdf-parser-adaptive
 ```
 
+## Structural qpdf Comparison
+
+Use the structural comparator when changing xref, object stream, encryption,
+stream-length, or page-tree recovery. It runs `pdf-parser check --format json`
+and `qpdf --check` over the same manifest, then emits one JSONL record per
+document:
+
+```sh
+.venv/bin/python benchmark/eval/structural_compare.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --output benchmark/eval/outputs/structural/tiny-corpus.jsonl
+```
+
+Classifications are intentionally coarse: `both_ok`, `both_warn`,
+`pdf_parser_more_strict`, `qpdf_more_strict`, `parser_failed`, and `skipped`.
+Exact warning text does not need to match qpdf; the useful signal is whether
+the parser can recover, whether qpdf also warns, and which fixture class
+regressed. `--strict` runs the first-party check without permissive recovery.
+
 ## Lane Profiling
 
 Profile extraction surfaces before tuning parser internals:

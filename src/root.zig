@@ -25,6 +25,7 @@ pub const encoding = @import("encoding.zig");
 pub const interpreter = @import("interpreter.zig");
 pub const decompress = @import("decompress.zig");
 pub const encryption = @import("encryption.zig");
+pub const structural = @import("structural.zig");
 pub const simd = @import("simd.zig");
 pub const layout = @import("layout.zig");
 pub const structtree = @import("structtree.zig");
@@ -104,6 +105,8 @@ pub const EncryptionInfo = encryption.Info;
 pub const EncryptionAuthType = encryption.AuthType;
 pub const EncryptionCryptMethod = encryption.CryptMethod;
 pub const EncryptionPermissions = encryption.Permissions;
+pub const StructuralDiagnostic = structural.Diagnostic;
+pub const StructuralSummary = structural.Summary;
 
 /// Error handling configuration
 pub const ErrorConfig = struct {
@@ -204,6 +207,9 @@ pub const Document = struct {
     /// Accumulated errors
     errors: std.ArrayList(ParseErrorRecord),
 
+    /// Structural parser diagnostics with recovery evidence.
+    structural_diagnostics: std.ArrayList(structural.Diagnostic),
+
     /// Pre-resolved font encodings (key: "pageNum:fontName")
     font_cache: std.StringHashMap(encoding.FontEncoding),
 
@@ -266,6 +272,7 @@ pub const Document = struct {
             .error_config = config,
             .security = null,
             .errors = .empty,
+            .structural_diagnostics = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
@@ -292,6 +299,7 @@ pub const Document = struct {
             .error_config = config,
             .security = null,
             .errors = .empty,
+            .structural_diagnostics = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
@@ -319,6 +327,7 @@ pub const Document = struct {
             .error_config = config,
             .security = null,
             .errors = .empty,
+            .structural_diagnostics = .empty,
             .font_cache = std.StringHashMap(encoding.FontEncoding).init(allocator),
             .font_obj_cache = std.AutoHashMap(u32, encoding.FontEncoding).init(allocator),
         };
@@ -341,6 +350,14 @@ pub const Document = struct {
             if (!self.error_config.continue_on_parse_error) {
                 return error.InvalidPdfHeader;
             }
+            try self.structural_diagnostics.append(self.allocator, .{
+                .code = .invalid_header,
+                .severity = .warning,
+                .stage = .header,
+                .offset = 0,
+                .action = .recovered,
+                .message = "Invalid PDF header",
+            });
             try self.errors.append(self.allocator, .{
                 .kind = .invalid_header,
                 .offset = 0,
@@ -349,7 +366,11 @@ pub const Document = struct {
         }
 
         // Parse XRef (HashMap uses base allocator, parsed objects use arena)
-        self.xref_table = xref.parseXRef(self.allocator, arena, self.data) catch |err| {
+        self.xref_table = xref.parseXRefWithOptions(self.allocator, arena, self.data, .{
+            .recover = true,
+            .diagnostics = &self.structural_diagnostics,
+            .diagnostic_allocator = self.allocator,
+        }) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
                     .kind = .invalid_xref,
@@ -365,7 +386,12 @@ pub const Document = struct {
         try self.authenticateIfEncrypted(arena);
 
         // Build page tree (uses arena for all allocations)
-        const pages_slice = pagetree.buildPageTreeWithSecurity(arena, self.data, &self.xref_table, self.securityHandler()) catch |err| {
+        const pages_slice = pagetree.buildPageTreeWithOptions(arena, self.data, &self.xref_table, .{
+            .security = self.securityHandler(),
+            .diagnostics = &self.structural_diagnostics,
+            .diagnostic_allocator = self.allocator,
+            .recover = self.error_config.continue_on_parse_error,
+        }) catch |err| {
             if (self.error_config.continue_on_parse_error) {
                 try self.errors.append(self.allocator, .{
                     .kind = .syntax_error,
@@ -575,6 +601,7 @@ pub const Document = struct {
         self.xref_table.deinit();
         self.object_cache.deinit();
         self.errors.deinit(self.allocator);
+        self.structural_diagnostics.deinit(self.allocator);
         self.pages.deinit(self.allocator);
         self.font_cache.deinit();
         self.font_obj_cache.deinit();
@@ -586,6 +613,31 @@ pub const Document = struct {
     /// Check if the document is encrypted
     pub fn isEncrypted(self: *const Document) bool {
         return self.xref_table.trailer.get("Encrypt") != null;
+    }
+
+    pub fn structuralDiagnostics(self: *const Document) []const structural.Diagnostic {
+        return self.structural_diagnostics.items;
+    }
+
+    pub fn structuralSummary(self: *const Document) structural.Summary {
+        var summary = structural.Summary{
+            .xref_entries = self.xref_table.entries.count(),
+            .trailer_size = self.xref_table.trailer.getInt("Size"),
+            .has_root = self.xref_table.trailer.get("Root") != null,
+            .has_encrypt = self.xref_table.trailer.get("Encrypt") != null,
+        };
+        var iterator = self.xref_table.entries.iterator();
+        while (iterator.next()) |entry| {
+            switch (entry.value_ptr.entry_type) {
+                .free => summary.xref_free_entries += 1,
+                .in_use => summary.xref_in_use_entries += 1,
+                .compressed => {
+                    summary.xref_compressed_entries += 1;
+                    summary.object_stream_entries += 1;
+                },
+            }
+        }
+        return summary;
     }
 
     pub fn isAuthenticated(self: *const Document) bool {
@@ -2662,6 +2714,11 @@ fn extractContentStream(
     var line_start_y: f64 = 0;
     var font_size: f64 = 12;
     var text_leading: f64 = 0;
+    var char_spacing: f64 = 0;
+    var word_spacing: f64 = 0;
+    var horizontal_scale: f64 = 100;
+    var text_rise: f64 = 0;
+    var text_matrix: [6]f64 = .{ 1, 0, 0, 1, 0, 0 };
     var in_text = false;
     // Track the font size of the last shown text for newline threshold.
     // Superscripts/subscripts switch to a smaller Tf *before* their Tm, so
@@ -2700,7 +2757,9 @@ fn extractContentStream(
                         current_y = 0;
                         line_start_x = 0;
                         line_start_y = 0;
+                        text_matrix = .{ 1, 0, 0, 1, 0, 0 };
                         collector.setPosition(current_x, current_y);
+                        collector.setTextMatrix(text_matrix);
                     } else if (std.mem.eql(u8, op, "BDC")) {
                         collector.setMcid(extractMcidFromOperands(operands[0..operand_count], if (operand_count >= 2) 1 else 0));
                     } else if (std.mem.eql(u8, op, "BMC")) {
@@ -2753,6 +2812,42 @@ fn extractContentStream(
                 .bounds, .structured => {},
             },
             'T' => if (op.len == 2) switch (op[1]) {
+                'c' => if (operand_count >= 1) {
+                    char_spacing = operands[0].asNumber();
+                    if (mode == .bounds) mode.bounds.setTextState(.{
+                        .char_spacing = char_spacing,
+                        .word_spacing = word_spacing,
+                        .horizontal_scale = horizontal_scale,
+                        .text_rise = text_rise,
+                    });
+                },
+                'w' => if (operand_count >= 1) {
+                    word_spacing = operands[0].asNumber();
+                    if (mode == .bounds) mode.bounds.setTextState(.{
+                        .char_spacing = char_spacing,
+                        .word_spacing = word_spacing,
+                        .horizontal_scale = horizontal_scale,
+                        .text_rise = text_rise,
+                    });
+                },
+                'z' => if (operand_count >= 1) {
+                    horizontal_scale = operands[0].asNumber();
+                    if (mode == .bounds) mode.bounds.setTextState(.{
+                        .char_spacing = char_spacing,
+                        .word_spacing = word_spacing,
+                        .horizontal_scale = horizontal_scale,
+                        .text_rise = text_rise,
+                    });
+                },
+                's' => if (operand_count >= 1) {
+                    text_rise = operands[0].asNumber();
+                    if (mode == .bounds) mode.bounds.setTextState(.{
+                        .char_spacing = char_spacing,
+                        .word_spacing = word_spacing,
+                        .horizontal_scale = horizontal_scale,
+                        .text_rise = text_rise,
+                    });
+                },
                 'f' => if (operand_count >= 2) {
                     const font_name = if (operands[0] == .name) operands[0].name else null;
                     if (operands[0] == .name) {
@@ -2762,6 +2857,7 @@ fn extractContentStream(
                     if (mode == .bounds) {
                         const has_to_unicode = if (current_font) |font| font.has_to_unicode else null;
                         mode.bounds.setFont(font_name, font_size, has_to_unicode);
+                        mode.bounds.current_writing_mode = if (current_font) |font| font.wmode else 0;
                     }
                 },
                 'L' => if (in_text and operand_count >= 1) {
@@ -2791,14 +2887,19 @@ fn extractContentStream(
                             line_start_x = current_x;
                             line_start_y = current_y;
                             prev_y = current_y;
+                            text_matrix[4] = current_x;
+                            text_matrix[5] = current_y;
                         },
                         .bounds => |collector| {
                             current_x = line_start_x + tx;
                             current_y = line_start_y + ty;
                             line_start_x = current_x;
                             line_start_y = current_y;
+                            text_matrix[4] = current_x;
+                            text_matrix[5] = current_y;
                             try collector.flush();
                             collector.setPosition(current_x, current_y);
+                            collector.setTextMatrix(text_matrix);
                         },
                         .structured => {},
                     }
@@ -2825,14 +2926,31 @@ fn extractContentStream(
                             line_start_y = ty;
                             prev_x = tx;
                             prev_y = ty;
+                            text_matrix = .{
+                                operands[0].asNumber(),
+                                operands[1].asNumber(),
+                                operands[2].asNumber(),
+                                operands[3].asNumber(),
+                                tx,
+                                ty,
+                            };
                         },
                         .bounds => |collector| {
                             current_x = tx;
                             current_y = ty;
                             line_start_x = tx;
                             line_start_y = ty;
+                            text_matrix = .{
+                                operands[0].asNumber(),
+                                operands[1].asNumber(),
+                                operands[2].asNumber(),
+                                operands[3].asNumber(),
+                                tx,
+                                ty,
+                            };
                             try collector.flush();
                             collector.setPosition(current_x, current_y);
+                            collector.setTextMatrix(text_matrix);
                         },
                         .structured => {},
                     }
@@ -2845,7 +2963,10 @@ fn extractContentStream(
                         current_x = line_start_x;
                         current_y = line_start_y - leading;
                         line_start_y = current_y;
+                        text_matrix[4] = current_x;
+                        text_matrix[5] = current_y;
                         collector.setPosition(current_x, current_y);
+                        collector.setTextMatrix(text_matrix);
                     },
                     .structured => {},
                 },
@@ -2859,7 +2980,7 @@ fn extractContentStream(
                             try writeTextWithFont(operands[0], current_font, writer);
                             last_text_font_size = font_size;
                         },
-                        .bounds => |collector| try writeTextWithFont(operands[0], current_font, collector),
+                        .bounds => |collector| try writeTextToCollector(operands[0], current_font, collector),
                         .structured => |extractor| {
                             text_pos = 0;
                             writeTextToBuffer(operands[0], current_font, &text_buf, &text_pos);
@@ -2904,8 +3025,11 @@ fn extractContentStream(
                         current_x = line_start_x;
                         current_y = line_start_y - leading;
                         line_start_y = current_y;
+                        text_matrix[4] = current_x;
+                        text_matrix[5] = current_y;
                         collector.setPosition(current_x, current_y);
-                        try writeTextWithFont(operands[0], current_font, collector);
+                        collector.setTextMatrix(text_matrix);
+                        try writeTextToCollector(operands[0], current_font, collector);
                     },
                     .structured => |extractor| {
                         text_pos = 0;
@@ -2931,8 +3055,11 @@ fn extractContentStream(
                         current_x = line_start_x;
                         current_y = line_start_y - leading;
                         line_start_y = current_y;
+                        text_matrix[4] = current_x;
+                        text_matrix[5] = current_y;
                         collector.setPosition(current_x, current_y);
-                        try writeTextWithFont(operands[2], current_font, collector);
+                        collector.setTextMatrix(text_matrix);
+                        try writeTextToCollector(operands[2], current_font, collector);
                     },
                     .structured => |extractor| {
                         text_pos = 0;
@@ -3041,6 +3168,20 @@ fn writeTextWithFont(operand: interpreter.Operand, font: ?*const encoding.FontEn
     }
 }
 
+fn writeTextToCollector(operand: interpreter.Operand, font: ?*const encoding.FontEncoding, collector: *interpreter.SpanCollector) !void {
+    const data = switch (operand) {
+        .string => |s| s,
+        .hex_string => |s| s,
+        else => return,
+    };
+
+    if (font) |enc| {
+        try enc.decodeRecords(data, collector);
+    } else {
+        try collector.appendFallbackBytes(data);
+    }
+}
+
 /// WinAnsi fallback decoding for text without font encoding
 fn writeTextFallback(data: []const u8, writer: anytype) !void {
     for (data) |byte| {
@@ -3089,13 +3230,10 @@ fn writeTJArrayToCollector(operand: interpreter.Operand, font: ?*const encoding.
 
     for (arr) |item| {
         switch (item) {
-            .string, .hex_string => try writeTextWithFont(item, font, collector),
+            .string, .hex_string => try writeTextToCollector(item, font, collector),
             .number => |n| {
-                if (n < -150) {
-                    try collector.flush();
-                }
                 const adjustment = -n / 1000.0 * collector.current_font_size;
-                collector.current_x += adjustment;
+                try collector.advanceByTextAdjustment(adjustment);
             },
             else => {},
         }

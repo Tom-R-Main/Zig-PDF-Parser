@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const simd = @import("simd.zig");
+const structural = @import("structural.zig");
 
 /// PDF Object types
 pub const Object = union(enum) {
@@ -124,28 +125,45 @@ pub const ParseError = error{
 
 const MAX_NESTING = 100;
 
+pub const ParseOptions = struct {
+    recover_stream_lengths: bool = true,
+    diagnostics: ?*std.ArrayList(structural.Diagnostic) = null,
+    diagnostic_allocator: ?std.mem.Allocator = null,
+};
+
 /// PDF Object Parser
 pub const Parser = struct {
     data: []const u8,
     pos: usize,
     allocator: std.mem.Allocator,
     nesting: usize,
+    options: ParseOptions,
 
     pub fn init(allocator: std.mem.Allocator, data: []const u8) Parser {
+        return initWithOptions(allocator, data, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, data: []const u8, options: ParseOptions) Parser {
         return .{
             .data = data,
             .pos = 0,
             .allocator = allocator,
             .nesting = 0,
+            .options = options,
         };
     }
 
     pub fn initAt(allocator: std.mem.Allocator, data: []const u8, offset: usize) Parser {
+        return initAtWithOptions(allocator, data, offset, .{});
+    }
+
+    pub fn initAtWithOptions(allocator: std.mem.Allocator, data: []const u8, offset: usize, options: ParseOptions) Parser {
         return .{
             .data = data,
             .pos = offset,
             .allocator = allocator,
             .nesting = 0,
+            .options = options,
         };
     }
 
@@ -406,34 +424,59 @@ pub const Parser = struct {
             // Get length from dictionary
             const length = dict.getInt("Length") orelse {
                 // Try to find endstream
-                if (simd.findSubstring(self.data[self.pos..], "endstream")) |end_pos| {
-                    var actual_end = end_pos;
-                    // Remove trailing whitespace
-                    while (actual_end > 0 and isWhitespace(self.data[self.pos + actual_end - 1])) {
-                        actual_end -= 1;
-                    }
-                    const stream_data = self.data[self.pos .. self.pos + actual_end];
-                    self.pos += end_pos + 9; // Skip past "endstream"
-                    return Object{ .stream = .{ .dict = dict, .data = stream_data } };
-                }
+                if (self.options.recover_stream_lengths) return self.recoverStreamByEndMarker(dict, self.pos, .recovered_stream_length, "Recovered stream without /Length using endstream marker");
                 return ParseError.InvalidStream;
             };
 
             if (length < 0) return ParseError.InvalidStream;
             const len: usize = @intCast(length);
 
-            if (self.pos + len > self.data.len) return ParseError.InvalidStream;
+            const stream_start = self.pos;
+            if (self.pos + len > self.data.len) {
+                if (self.options.recover_stream_lengths) {
+                    return self.recoverStreamByEndMarker(dict, stream_start, .wrong_stream_length, "Recovered stream whose /Length extends beyond EOF");
+                }
+                return ParseError.InvalidStream;
+            }
 
             const stream_data = self.data[self.pos .. self.pos + len];
             self.pos += len;
 
             self.skipWhitespaceAndComments();
-            _ = self.matchKeyword("endstream");
+            const saw_endstream = self.matchKeyword("endstream");
+            if (!saw_endstream) {
+                if (self.options.recover_stream_lengths) {
+                    self.pos = stream_start;
+                    return self.recoverStreamByEndMarker(dict, stream_start, .wrong_stream_length, "Recovered stream whose declared /Length missed endstream");
+                }
+                return ParseError.InvalidStream;
+            }
 
             return Object{ .stream = .{ .dict = dict, .data = stream_data } };
         }
 
         return Object{ .dict = dict };
+    }
+
+    fn recoverStreamByEndMarker(self: *Parser, dict: Object.Dict, stream_start: usize, code: structural.Code, message: []const u8) ParseError!Object {
+        if (simd.findSubstring(self.data[stream_start..], "endstream")) |end_pos| {
+            var actual_end = end_pos;
+            while (actual_end > 0 and isWhitespace(self.data[stream_start + actual_end - 1])) {
+                actual_end -= 1;
+            }
+            const stream_data = self.data[stream_start .. stream_start + actual_end];
+            self.pos = stream_start + end_pos + 9;
+            structural.appendDiagnostic(self.options.diagnostic_allocator orelse self.allocator, self.options.diagnostics, .{
+                .code = code,
+                .severity = .warning,
+                .stage = .object,
+                .offset = @intCast(stream_start),
+                .action = .recovered,
+                .message = message,
+            });
+            return Object{ .stream = .{ .dict = dict, .data = stream_data } };
+        }
+        return ParseError.InvalidStream;
     }
 
     fn parseDict(self: *Parser) ParseError!Object.Dict {
@@ -770,6 +813,50 @@ test "parse stream object" {
 
     try std.testing.expect(obj == .stream);
     try std.testing.expectEqual(@as(usize, 12), obj.stream.data.len);
+}
+
+test "parse stream object recovers wrong length with structural diagnostic" {
+    const input =
+        \\<< /Length 3 >>
+        \\stream
+        \\Hello World!
+        \\endstream
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var diagnostics: std.ArrayList(structural.Diagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+
+    var parser = Parser.initWithOptions(arena.allocator(), input, .{
+        .recover_stream_lengths = true,
+        .diagnostics = &diagnostics,
+        .diagnostic_allocator = std.testing.allocator,
+    });
+    const obj = try parser.parseObject();
+
+    try std.testing.expect(obj == .stream);
+    try std.testing.expectEqualStrings("Hello World!", obj.stream.data);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(structural.Code.wrong_stream_length, diagnostics.items[0].code);
+    try std.testing.expectEqual(structural.Action.recovered, diagnostics.items[0].action);
+}
+
+test "parse stream object rejects wrong length when recovery disabled" {
+    const input =
+        \\<< /Length 3 >>
+        \\stream
+        \\Hello World!
+        \\endstream
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var parser = Parser.initWithOptions(arena.allocator(), input, .{
+        .recover_stream_lengths = false,
+    });
+    try std.testing.expectError(ParseError.InvalidStream, parser.parseObject());
 }
 
 test "parse empty array" {
