@@ -162,6 +162,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
             "tesseract",
             "pdftoppm",
             200,
+            True,
             "1-10",
         )
 
@@ -170,6 +171,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertIn("--password", cmd)
         self.assertIn("--ocr-dpi", cmd)
         self.assertIn("200", cmd)
+        self.assertIn("--ocr-color", cmd)
         self.assertIn("--pages", cmd)
         self.assertIn("1-10", cmd)
 

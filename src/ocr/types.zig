@@ -33,6 +33,7 @@ pub const OcrConfig = struct {
     lang: []const u8 = "eng",
     psm: PageSegMode = .single_block,
     dpi: u32 = 200,
+    rasterize_grayscale: bool = true,
     timeout_ms: u32 = 10_000,
     stdout_limit: usize = 16 * 1024 * 1024,
     stderr_limit: usize = 1024 * 1024,

@@ -57,6 +57,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--ocr-executable", default="tesseract")
     parser.add_argument("--ocr-rasterizer", default="pdftoppm")
     parser.add_argument("--ocr-dpi", type=int, default=200)
+    parser.add_argument("--ocr-color", action="store_true", help="Rasterize OCR pages as RGB instead of default grayscale")
     parser.set_defaults(ensure_releasefast=True)
     args = parser.parse_args(argv)
 
@@ -92,6 +93,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                         ocr_executable=args.ocr_executable,
                         ocr_rasterizer=args.ocr_rasterizer,
                         ocr_dpi=args.ocr_dpi,
+                        ocr_color=args.ocr_color,
                         pages=args.pages,
                     )
                     if row["status"] != "ok":
@@ -190,6 +192,7 @@ def run_lane(
     ocr_executable: str,
     ocr_rasterizer: str,
     ocr_dpi: int,
+    ocr_color: bool,
     pages: str | None,
 ) -> dict[str, object]:
     if not entry.pdf_path.exists():
@@ -206,7 +209,7 @@ def run_lane(
     with tempfile.NamedTemporaryFile(prefix=f"pdf-parser-{lane}-", suffix=".out", delete=False) as handle:
         output_path = Path(handle.name)
     try:
-        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, ocr_dpi, pages)
+        cmd = build_lane_command(parser_command, entry, lane, output_path, ocr_executable, ocr_rasterizer, ocr_dpi, ocr_color, pages)
         started = time.perf_counter()
         proc = run_timed(cmd, cwd=repo_root)
         wall_ms = (time.perf_counter() - started) * 1000.0
@@ -231,6 +234,7 @@ def run_lane(
             "peak_rss_mb": proc.peak_rss_mb,
             "output_bytes": output_bytes,
             "ocr_dpi": ocr_dpi if lane == "ocr-routed" else None,
+            "ocr_color": ocr_color if lane == "ocr-routed" else None,
             "source_note": entry.source_note,
         }
     finally:
@@ -252,6 +256,7 @@ def build_lane_command(
     ocr_executable: str,
     ocr_rasterizer: str,
     ocr_dpi: int,
+    ocr_color: bool,
     pages: str | None,
 ) -> list[str]:
     base = [str(parser_command)]
@@ -293,6 +298,8 @@ def build_lane_command(
             "--output",
             str(output_path),
         ]
+        if ocr_color:
+            cmd.append("--ocr-color")
     else:
         raise SystemExit(f"Unknown profile lane: {lane}")
     if entry.password:

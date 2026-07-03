@@ -1797,7 +1797,22 @@ pub const Document = struct {
         errdefer allocator.free(image_path);
         errdefer runtime.deleteFileCwd(image_path);
 
-        const argv = [_][]const u8{
+        const grayscale_argv = [_][]const u8{
+            config.rasterizer_executable,
+            "-q",
+            "-png",
+            "-gray",
+            "-singlefile",
+            "-r",
+            dpi_arg,
+            "-f",
+            page_number,
+            "-l",
+            page_number,
+            source_path,
+            prefix,
+        };
+        const color_argv = [_][]const u8{
             config.rasterizer_executable,
             "-q",
             "-png",
@@ -1811,8 +1826,9 @@ pub const Document = struct {
             source_path,
             prefix,
         };
+        const argv = if (config.rasterize_grayscale) &grayscale_argv else &color_argv;
 
-        const result = runtime.runCapture(allocator, &argv, .{
+        const result = runtime.runCapture(allocator, argv, .{
             .stdout_limit = 64 * 1024,
             .stderr_limit = 1024 * 1024,
             .timeout_ms = config.timeout_ms,

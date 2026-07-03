@@ -377,6 +377,10 @@ fn parseArgs(args: []const []const u8) !Options {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
             options.ocr_config.dpi = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--ocr-color")) {
+            options.ocr_config.rasterize_grayscale = false;
+        } else if (std.mem.eql(u8, arg, "--ocr-grayscale")) {
+            options.ocr_config.rasterize_grayscale = true;
         } else {
             return error.UnknownOption;
         }
@@ -411,6 +415,8 @@ fn printUsage() !void {
         \\  --ocr-executable FILE    Tesseract executable for adaptive lanes
         \\  --ocr-rasterizer FILE    pdftoppm-compatible rasterizer for adaptive lanes
         \\  --ocr-dpi N              Rasterization DPI for adaptive OCR lanes (default: 200)
+        \\  --ocr-color              Rasterize OCR pages as RGB instead of default grayscale
+        \\  --ocr-grayscale          Rasterize OCR pages as grayscale (default)
         \\
         \\Tool lanes:
         \\  pdf-parser:native

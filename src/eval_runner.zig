@@ -1169,6 +1169,10 @@ fn parseArgs(args: []const []const u8) !Options {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
             options.ocr_config.dpi = try std.fmt.parseInt(u32, args[index], 10);
+        } else if (std.mem.eql(u8, arg, "--ocr-color")) {
+            options.ocr_config.rasterize_grayscale = false;
+        } else if (std.mem.eql(u8, arg, "--ocr-grayscale")) {
+            options.ocr_config.rasterize_grayscale = true;
         } else if (std.mem.eql(u8, arg, "--native-pages")) {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
@@ -1239,6 +1243,8 @@ fn printUsage() !void {
         \\  --ocr-rasterizer FILE   pdftoppm-compatible rasterizer for adaptive OCR
         \\  --ocr-lang LANG         Tesseract language code (default: eng)
         \\  --ocr-dpi N             Rasterization DPI for adaptive OCR (default: 200)
+        \\  --ocr-color             Rasterize OCR pages as RGB instead of default grayscale
+        \\  --ocr-grayscale         Rasterize OCR pages as grayscale (default)
         \\  -o, --output FILE       Write one JSONL record to file
         \\  --reading-order-score N External reading-order score, 0..1
         \\  --table-f1 N            External table detection F1, 0..1
@@ -1300,6 +1306,7 @@ test "eval runner parses category and options" {
         "eng+equ",
         "--ocr-dpi",
         "200",
+        "--ocr-color",
         "--ocr-pages",
         "1",
     });
@@ -1323,6 +1330,7 @@ test "eval runner parses category and options" {
     try std.testing.expectEqualStrings("fake-rasterizer", options.ocr_config.rasterizer_executable);
     try std.testing.expectEqualStrings("eng+equ", options.ocr_config.lang);
     try std.testing.expectEqual(@as(u32, 200), options.ocr_config.dpi);
+    try std.testing.expect(!options.ocr_config.rasterize_grayscale);
     try std.testing.expectEqual(@as(u32, 1), options.ocr_pages.?);
 }
 

@@ -88,6 +88,8 @@ fn printUsage() !void {
         \\  --ocr-rasterizer FILE
         \\                  pdftoppm-compatible rasterizer for adaptive OCR routes
         \\  --ocr-dpi N     Rasterization DPI for adaptive OCR routes (default: 200)
+        \\  --ocr-color     Rasterize OCR pages as RGB instead of default grayscale
+        \\  --ocr-grayscale Rasterize OCR pages as grayscale (default)
         \\  --no-ocr        Disable adaptive OCR subprocess routing
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
@@ -190,6 +192,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var debug_assets_dir: ?[]const u8 = null;
     var specialist_requests_file: ?[]const u8 = null;
     var specialist_config_file: ?[]const u8 = null;
+    var ocr_config = zpdf.OcrConfig{};
     var enable_ocr = true;
 
     var i: usize = 0;
@@ -222,6 +225,25 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (i < args.len) specialist_config_file = args[i];
         } else if (std.mem.eql(u8, arg, "--no-ocr")) {
             enable_ocr = false;
+        } else if (std.mem.eql(u8, arg, "--ocr-executable")) {
+            i += 1;
+            if (i < args.len) ocr_config.executable = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-rasterizer")) {
+            i += 1;
+            if (i < args.len) ocr_config.rasterizer_executable = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-lang")) {
+            i += 1;
+            if (i < args.len) ocr_config.lang = args[i];
+        } else if (std.mem.eql(u8, arg, "--ocr-dpi")) {
+            i += 1;
+            if (i < args.len) ocr_config.dpi = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-color")) {
+            ocr_config.rasterize_grayscale = false;
+        } else if (std.mem.eql(u8, arg, "--ocr-grayscale")) {
+            ocr_config.rasterize_grayscale = true;
         } else if (std.mem.eql(u8, arg, "--strict")) {
             error_mode = zpdf.ErrorConfig.strict();
         } else if (std.mem.eql(u8, arg, "--permissive")) {
@@ -303,7 +325,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer allocator.free(pages);
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, enable_ocr, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, enable_ocr, ocr_config, allocator, output_handle);
         return;
     }
 
@@ -560,6 +582,7 @@ fn doAdaptiveExtract(
     specialist_requests_file: ?[]const u8,
     specialist_config_file: ?[]const u8,
     enable_ocr: bool,
+    ocr_config: zpdf.OcrConfig,
     allocator: std.mem.Allocator,
     output_handle: ?runtime.File,
 ) !void {
@@ -612,6 +635,7 @@ fn doAdaptiveExtract(
                 .page_start = window.start,
                 .page_end = window.end,
                 .enable_ocr = enable_ocr,
+                .ocr_config = ocr_config,
             }) catch |err| {
                 std.debug.print("Error generating specialist requests: {}\n", .{err});
                 return;
@@ -632,6 +656,7 @@ fn doAdaptiveExtract(
                     .page_start = window.start,
                     .page_end = window.end,
                     .enable_ocr = enable_ocr,
+                    .ocr_config = ocr_config,
                 },
                 .schema_options = schema_options,
             }) catch |err| {
@@ -647,6 +672,7 @@ fn doAdaptiveExtract(
                     .page_start = window.start,
                     .page_end = window.end,
                     .enable_ocr = enable_ocr,
+                    .ocr_config = ocr_config,
                 },
                 .schema_options = schema_options,
             }) catch |err| {
@@ -661,6 +687,7 @@ fn doAdaptiveExtract(
         .page_start = window.start,
         .page_end = window.end,
         .enable_ocr = enable_ocr,
+        .ocr_config = ocr_config,
     }) catch |err| {
         std.debug.print("Error during adaptive extraction: {}\n", .{err});
         return;
@@ -792,6 +819,10 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
                 std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
                 return;
             };
+        } else if (std.mem.eql(u8, arg, "--ocr-color")) {
+            ocr_config.rasterize_grayscale = false;
+        } else if (std.mem.eql(u8, arg, "--ocr-grayscale")) {
+            ocr_config.rasterize_grayscale = true;
         } else if (std.mem.eql(u8, arg, "--no-ocr")) {
             enable_ocr = false;
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {

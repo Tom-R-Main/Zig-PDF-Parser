@@ -260,9 +260,10 @@ stream parser latency when the lane emits a `document_finished` record. Its
 default `--ensure-releasefast` mode also rebuilds ReleaseFast before measuring,
 so profiler output stays comparable after local Debug builds. Use the tiny
 checked-in manifest for CI smoke tests and the large manifest after populating
-`raw_cache/large`. OCR profiling defaults to `--ocr-dpi 200`; use
-`--ocr-dpi 300` when comparing against older high-resolution runs or validating
-harder low-quality scans.
+`raw_cache/large`. OCR profiling defaults to `--ocr-dpi 200` with grayscale
+rasterization; use `--ocr-dpi 300` when comparing against older high-resolution
+runs or validating harder low-quality scans, and `--ocr-color` to preserve the
+older RGB raster path for an A/B run.
 
 For the full baseline workflow, use the wrapper:
 

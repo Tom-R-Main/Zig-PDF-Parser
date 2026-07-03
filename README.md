@@ -102,8 +102,9 @@ corpus. Large public or private PDFs belong under ignored
 download/derive local performance fixtures and `benchmark/eval/profile_lanes.py`
 to measure native text, adaptive artifact JSONL, streaming JSONL, and OCR-routed
 lanes before doing parser optimization. OCR routes default to 200 DPI for the
-local Tesseract path; pass `--ocr-dpi 300` when validating high-resolution scan
-tradeoffs. `benchmark/eval/analyze_baseline.py`
+local Tesseract path and grayscale rasterization; pass `--ocr-dpi 300` when
+validating high-resolution scan tradeoffs, or `--ocr-color` when comparing
+against the older RGB raster path. `benchmark/eval/analyze_baseline.py`
 turns comparator and profiler JSONL into grouped JSON/Markdown reports and
 records whether manifest PDFs are locally present. It also ranks measured
 optimization candidates and next actions, so the next slice is chosen from

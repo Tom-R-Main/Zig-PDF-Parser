@@ -20,6 +20,9 @@ corpus.
   --output benchmark/eval/outputs/profile/large.jsonl
 ```
 
+OCR profiling uses 200 DPI grayscale rasterization by default. Add
+`--ocr-color` for a compatibility A/B run against the older RGB raster path.
+
 The encrypted derivative uses the known benchmark password
 `benchmark-password`. This is not a secret; it exists only to exercise
 known-password parsing and should not be reused for private files.
