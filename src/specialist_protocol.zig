@@ -556,10 +556,24 @@ fn hasReason(mask: u32, bit: u5) bool {
 
 fn requestAlreadyCovered(result: anytype, kind: SpecialistKind, page_index: u32, region_index: ?u32) bool {
     if (region_index) |region| {
+        const route_index: usize = @intCast(region);
+        if (route_index < result.region_routes.len) {
+            const route = result.region_routes[route_index];
+            if (route.page_index == page_index and route.region_index == region) {
+                return routeNeedsKindOrReason(route.route, kind, route.reason_mask);
+            }
+        }
         for (result.region_routes) |route| {
             if (route.page_index == page_index and route.region_index == region and routeNeedsKindOrReason(route.route, kind, route.reason_mask)) return true;
         }
         return false;
+    }
+    const route_index: usize = @intCast(page_index);
+    if (route_index < result.page_routes.len) {
+        const route = result.page_routes[route_index];
+        if (route.page_index == page_index) {
+            return routeNeedsKindOrReason(route.route, kind, route.reason_mask);
+        }
     }
     for (result.page_routes) |route| {
         if (route.page_index == page_index and routeNeedsKindOrReason(route.route, kind, route.reason_mask)) return true;
@@ -569,9 +583,19 @@ fn requestAlreadyCovered(result: anytype, kind: SpecialistKind, page_index: u32,
 
 fn traceBBox(result: anytype, record: anytype) ?layout.BBox {
     if (record.region_index) |region| {
+        const route_index: usize = @intCast(region);
+        if (route_index < result.region_routes.len) {
+            const route = result.region_routes[route_index];
+            if (route.page_index == record.page_index and route.region_index == region) return route.bbox;
+        }
         for (result.region_routes) |route| {
             if (route.page_index == record.page_index and route.region_index == region) return route.bbox;
         }
+    }
+    const route_index: usize = @intCast(record.page_index);
+    if (route_index < result.page_routes.len) {
+        const route = result.page_routes[route_index];
+        if (route.page_index == record.page_index) return route.bbox;
     }
     for (result.page_routes) |route| {
         if (route.page_index == record.page_index) return route.bbox;
@@ -882,21 +906,34 @@ fn boxesIntersect(a: layout.BBox, b: layout.BBox) bool {
 }
 
 fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
-    for (text) |byte| {
-        switch (byte) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            '\x08' => try writer.writeAll("\\b"),
-            '\x0c' => try writer.writeAll("\\f"),
-            else => if (byte < 0x20) {
-                try writer.print("\\u00{X:0>2}", .{byte});
-            } else {
-                try writer.writeByte(byte);
-            },
-        }
+    var clean_start: usize = 0;
+    for (text, 0..) |byte, index| {
+        if (!jsonNeedsEscape(byte)) continue;
+        if (index > clean_start) try writer.writeAll(text[clean_start..index]);
+        try writeJsonEscapedByte(writer, byte);
+        clean_start = index + 1;
+    }
+    if (clean_start < text.len) try writer.writeAll(text[clean_start..]);
+}
+
+fn jsonNeedsEscape(byte: u8) bool {
+    return byte < 0x20 or byte == '"' or byte == '\\';
+}
+
+fn writeJsonEscapedByte(writer: anytype, byte: u8) !void {
+    switch (byte) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        '\x08' => try writer.writeAll("\\b"),
+        '\x0c' => try writer.writeAll("\\f"),
+        else => if (byte < 0x20) {
+            try writer.print("\\u00{X:0>2}", .{byte});
+        } else {
+            try writer.writeByte(byte);
+        },
     }
 }
 
