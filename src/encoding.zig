@@ -193,6 +193,9 @@ pub const FontEncoding = struct {
     cff_data: ?[]const u8 = null,
     /// True when this font dictionary supplied an explicit ToUnicode CMap.
     has_to_unicode: bool = false,
+    /// True for /Subtype /Type3 fonts. These rely on PDF glyph programs but
+    /// can still expose deterministic widths, bboxes, encodings, and ToUnicode.
+    is_type3: bool = false,
 
     allocator: std.mem.Allocator,
 
@@ -456,6 +459,10 @@ pub const FontEncoding = struct {
                     .descender = self.metrics.descender,
                 });
             } else if (final_codepoint <= 0x10FFFF) {
+                const suspicious_identity = self.is_cid and
+                    self.cid_system_info.isIdentity() and
+                    !self.has_to_unicode and
+                    (final_codepoint < 0x20 or (final_codepoint >= 0x7F and final_codepoint <= 0x9F));
                 const len = std.unicode.utf8Encode(@intCast(final_codepoint), &buf) catch 1;
                 try sink.writeDecodedGlyph(.{
                     .source_code = code.value,
@@ -464,7 +471,7 @@ pub const FontEncoding = struct {
                     .utf8_text = buf[0..len],
                     .glyph_width = self.widths.getCIDWidth(code.value),
                     .cid_or_gid = code.value,
-                    .unicode_map_error = unicode_map_error,
+                    .unicode_map_error = unicode_map_error or suspicious_identity,
                     .writing_mode = self.wmode,
                     .ascender = self.metrics.ascender,
                     .descender = self.metrics.descender,
@@ -582,6 +589,12 @@ pub fn parseFontEncoding(
     // Detect font type first
     const subtype = font_dict.getName("Subtype");
     const is_type0 = subtype != null and std.mem.eql(u8, subtype.?, "Type0");
+    const is_type3 = subtype != null and std.mem.eql(u8, subtype.?, "Type3");
+    encoding.is_type3 = is_type3;
+
+    if (font_dict.getName("BaseFont")) |base_font| {
+        applyBase14FallbackMetrics(&encoding, base_font);
+    }
 
     // For Type0 (composite) fonts, check DescendantFonts
     if (is_type0) {
@@ -680,6 +693,7 @@ pub fn parseFontEncoding(
 
     // Parse FontDescriptor for metrics
     try parseFontDescriptor(font_dict, resolve_fn, resolve_ctx, &encoding);
+    if (is_type3) parseType3Metrics(font_dict, &encoding);
 
     // Parse glyph widths
     try parseWidths(allocator, font_dict, resolve_fn, resolve_ctx, &encoding);
@@ -759,6 +773,37 @@ fn parseFontDescriptor(font_dict: Object.Dict, resolve_fn: *const fn (ctx: *cons
     }
 }
 
+fn parseType3Metrics(font_dict: Object.Dict, encoding: *FontEncoding) void {
+    if (font_dict.getArray("FontBBox")) |bbox_arr| {
+        if (bbox_arr.len >= 4) {
+            for (0..4) |i| {
+                if (getNumber(bbox_arr[i])) |v| {
+                    encoding.metrics.bbox[i] = v;
+                }
+            }
+            encoding.metrics.descender = encoding.metrics.bbox[1];
+            encoding.metrics.ascender = encoding.metrics.bbox[3];
+        }
+    }
+
+    if (font_dict.getArray("FontMatrix")) |matrix| {
+        if (matrix.len >= 6) {
+            // Most Type3 fonts use [0.001 0 0 0.001 0 0]. If a document uses
+            // normalized 1-em glyph coordinates, keep bboxes useful by scaling
+            // them into the same 1000-unit space as other PDF font metrics.
+            const sx = getNumber(matrix[0]) orelse 0.001;
+            const sy = getNumber(matrix[3]) orelse sx;
+            if (@abs(sx) > 0 and @abs(sx) < 0.01 and @abs(sy) > 0 and @abs(sy) < 0.01) {
+                const scale_y = 0.001 / @abs(sy);
+                encoding.metrics.ascender *= scale_y;
+                encoding.metrics.descender *= scale_y;
+                encoding.metrics.bbox[1] *= scale_y;
+                encoding.metrics.bbox[3] *= scale_y;
+            }
+        }
+    }
+}
+
 /// Parse /Widths array for simple fonts
 fn parseWidths(allocator: std.mem.Allocator, font_dict: Object.Dict, resolve_fn: *const fn (ctx: *const anyopaque, Object) Object, resolve_ctx: *const anyopaque, encoding: *FontEncoding) !void {
     _ = allocator;
@@ -789,6 +834,154 @@ fn parseWidths(allocator: std.mem.Allocator, font_dict: Object.Dict, resolve_fn:
             }
         }
     }
+}
+
+fn applyBase14FallbackMetrics(encoding: *FontEncoding, base_font_raw: []const u8) void {
+    const base_font = stripSubsetPrefix(base_font_raw);
+    if (fontNameContains(base_font, "Courier")) {
+        for (&encoding.widths.simple_widths) |*width| width.* = 600;
+        encoding.widths.default_width = 600;
+        encoding.metrics.ascender = 629;
+        encoding.metrics.descender = -157;
+        return;
+    }
+
+    if (fontNameContains(base_font, "Times")) {
+        fillRepresentativeWidths(&encoding.widths.simple_widths, .times);
+        encoding.widths.default_width = 500;
+        encoding.metrics.ascender = 683;
+        encoding.metrics.descender = -217;
+        return;
+    }
+
+    if (fontNameContains(base_font, "Helvetica")) {
+        fillRepresentativeWidths(&encoding.widths.simple_widths, .helvetica);
+        encoding.widths.default_width = 556;
+        encoding.metrics.ascender = 718;
+        encoding.metrics.descender = -207;
+        return;
+    }
+
+    if (fontNameContains(base_font, "Symbol")) {
+        fillRepresentativeWidths(&encoding.widths.simple_widths, .symbol);
+        encoding.widths.default_width = 600;
+        encoding.metrics.ascender = 700;
+        encoding.metrics.descender = -200;
+        applySymbolEncoding(encoding);
+        return;
+    }
+
+    if (fontNameContains(base_font, "ZapfDingbats")) {
+        fillRepresentativeWidths(&encoding.widths.simple_widths, .zapf_dingbats);
+        encoding.widths.default_width = 700;
+        encoding.metrics.ascender = 820;
+        encoding.metrics.descender = -143;
+        applyZapfDingbatsEncoding(encoding);
+    }
+}
+
+const Base14Kind = enum { helvetica, times, symbol, zapf_dingbats };
+
+fn fillRepresentativeWidths(widths: *[256]f64, kind: Base14Kind) void {
+    switch (kind) {
+        .helvetica => {
+            widths[' '] = 278;
+            widths['i'] = 222;
+            widths['l'] = 222;
+            widths['m'] = 833;
+            widths['w'] = 722;
+            widths['A'] = 667;
+            widths['M'] = 833;
+            widths['W'] = 944;
+            widths['0'] = 556;
+            widths['1'] = 556;
+            widths['.'] = 278;
+            widths[','] = 278;
+            widths['-'] = 333;
+        },
+        .times => {
+            widths[' '] = 250;
+            widths['i'] = 278;
+            widths['l'] = 278;
+            widths['m'] = 778;
+            widths['w'] = 722;
+            widths['A'] = 722;
+            widths['M'] = 889;
+            widths['W'] = 944;
+            widths['0'] = 500;
+            widths['1'] = 500;
+            widths['.'] = 250;
+            widths[','] = 250;
+            widths['-'] = 333;
+        },
+        .symbol => {
+            widths[' '] = 250;
+            widths['A'] = 722;
+            widths['B'] = 667;
+            widths['a'] = 631;
+            widths['b'] = 549;
+            widths['p'] = 549;
+            widths['m'] = 576;
+        },
+        .zapf_dingbats => {
+            widths[' '] = 278;
+            widths['!'] = 974;
+            widths['"'] = 961;
+            widths['#'] = 974;
+            widths['('] = 789;
+            widths[')'] = 790;
+            widths['*'] = 788;
+        },
+    }
+}
+
+fn stripSubsetPrefix(name: []const u8) []const u8 {
+    if (name.len > 7 and name[6] == '+') {
+        var all_caps = true;
+        for (name[0..6]) |c| {
+            all_caps = all_caps and c >= 'A' and c <= 'Z';
+        }
+        if (all_caps) return name[7..];
+    }
+    return name;
+}
+
+fn fontNameContains(name: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(name, needle) != null;
+}
+
+fn applySymbolEncoding(encoding: *FontEncoding) void {
+    for (&encoding.codepoint_map) |*cp| cp.* = 0;
+    encoding.codepoint_map[' '] = ' ';
+    encoding.codepoint_map['A'] = 0x0391;
+    encoding.codepoint_map['B'] = 0x0392;
+    encoding.codepoint_map['G'] = 0x0393;
+    encoding.codepoint_map['D'] = 0x0394;
+    encoding.codepoint_map['P'] = 0x03A0;
+    encoding.codepoint_map['S'] = 0x03A3;
+    encoding.codepoint_map['W'] = 0x03A9;
+    encoding.codepoint_map['a'] = 0x03B1;
+    encoding.codepoint_map['b'] = 0x03B2;
+    encoding.codepoint_map['g'] = 0x03B3;
+    encoding.codepoint_map['d'] = 0x03B4;
+    encoding.codepoint_map['p'] = 0x03C0;
+    encoding.codepoint_map['s'] = 0x03C3;
+    encoding.codepoint_map['w'] = 0x03C9;
+    encoding.codepoint_map['-'] = 0x2212;
+    encoding.codepoint_map['='] = '=';
+}
+
+fn applyZapfDingbatsEncoding(encoding: *FontEncoding) void {
+    for (&encoding.codepoint_map) |*cp| cp.* = 0;
+    encoding.codepoint_map[' '] = ' ';
+    encoding.codepoint_map['!'] = 0x2701;
+    encoding.codepoint_map['"'] = 0x2702;
+    encoding.codepoint_map['#'] = 0x2703;
+    encoding.codepoint_map['('] = 0x260E;
+    encoding.codepoint_map[')'] = 0x2706;
+    encoding.codepoint_map['*'] = 0x261B;
+    encoding.codepoint_map['4'] = 0x2714;
+    encoding.codepoint_map['8'] = 0x2720;
 }
 
 /// Parse /W and /DW for CID fonts
@@ -950,11 +1143,26 @@ fn applyPredefinedCMap(encoding: *FontEncoding, name: []const u8) void {
         return;
     }
 
+    if (std.mem.indexOf(u8, name, "Adobe-Japan1") != null or
+        std.mem.indexOf(u8, name, "Adobe-GB1") != null or
+        std.mem.indexOf(u8, name, "Adobe-CNS1") != null or
+        std.mem.indexOf(u8, name, "Adobe-Korea1") != null)
+    {
+        encoding.bytes_per_char = 2;
+        return;
+    }
+
     // Horizontal variants (commonly used)
     if (std.mem.eql(u8, name, "UniGB-UCS2-H") or
         std.mem.eql(u8, name, "UniCNS-UCS2-H") or
         std.mem.eql(u8, name, "UniJIS-UCS2-H") or
-        std.mem.eql(u8, name, "UniKS-UCS2-H"))
+        std.mem.eql(u8, name, "UniKS-UCS2-H") or
+        std.mem.eql(u8, name, "GB-EUC-H") or
+        std.mem.eql(u8, name, "GBK-EUC-H") or
+        std.mem.eql(u8, name, "CNS-EUC-H") or
+        std.mem.eql(u8, name, "ETen-B5-H") or
+        std.mem.eql(u8, name, "UniJIS-UTF8-H") or
+        std.mem.eql(u8, name, "KSC-EUC-H"))
     {
         // These map CID directly to Unicode - identity-like
         encoding.bytes_per_char = 2;
@@ -965,7 +1173,13 @@ fn applyPredefinedCMap(encoding: *FontEncoding, name: []const u8) void {
     if (std.mem.eql(u8, name, "UniGB-UCS2-V") or
         std.mem.eql(u8, name, "UniCNS-UCS2-V") or
         std.mem.eql(u8, name, "UniJIS-UCS2-V") or
-        std.mem.eql(u8, name, "UniKS-UCS2-V"))
+        std.mem.eql(u8, name, "UniKS-UCS2-V") or
+        std.mem.eql(u8, name, "GB-EUC-V") or
+        std.mem.eql(u8, name, "GBK-EUC-V") or
+        std.mem.eql(u8, name, "CNS-EUC-V") or
+        std.mem.eql(u8, name, "ETen-B5-V") or
+        std.mem.eql(u8, name, "UniJIS-UTF8-V") or
+        std.mem.eql(u8, name, "KSC-EUC-V"))
     {
         encoding.bytes_per_char = 2;
         return;
@@ -2047,4 +2261,83 @@ test "font metrics defaults" {
     try std.testing.expectEqual(@as(f64, 800), metrics.ascender);
     try std.testing.expectEqual(@as(f64, -200), metrics.descender);
     try std.testing.expectEqual(@as(f64, 700), metrics.cap_height);
+}
+
+fn resolveEncodingTestObject(_: *const anyopaque, obj: Object) Object {
+    return obj;
+}
+
+test "Type3 font honors widths font bbox and ToUnicode" {
+    const allocator = std.testing.allocator;
+    const widths = [_]Object{ .{ .integer = 400 }, .{ .integer = 700 } };
+    const bbox = [_]Object{ .{ .integer = 0 }, .{ .integer = -120 }, .{ .integer = 900 }, .{ .integer = 760 } };
+    const matrix = [_]Object{ .{ .real = 0.001 }, .{ .integer = 0 }, .{ .integer = 0 }, .{ .real = 0.001 }, .{ .integer = 0 }, .{ .integer = 0 } };
+    const entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type3" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 66 } },
+        .{ .key = "Widths", .value = .{ .array = @constCast(widths[0..]) } },
+        .{ .key = "FontBBox", .value = .{ .array = @constCast(bbox[0..]) } },
+        .{ .key = "FontMatrix", .value = .{ .array = @constCast(matrix[0..]) } },
+    };
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, resolveEncodingTestObject, undefined);
+    defer enc.deinit();
+
+    try std.testing.expect(enc.is_type3);
+    try std.testing.expectEqual(@as(f64, 400), enc.widths.getWidth('A'));
+    try std.testing.expectEqual(@as(f64, 700), enc.widths.getWidth('B'));
+    try std.testing.expectEqual(@as(f64, -120), enc.metrics.descender);
+    try std.testing.expectEqual(@as(f64, 760), enc.metrics.ascender);
+}
+
+test "Base14 fallback metrics and symbolic encodings" {
+    var helvetica = FontEncoding.init(std.testing.allocator);
+    defer helvetica.deinit();
+    applyBase14FallbackMetrics(&helvetica, "ABCDEE+Helvetica-Bold");
+    try std.testing.expectEqual(@as(f64, 278), helvetica.widths.getWidth(' '));
+    try std.testing.expectEqual(@as(f64, 944), helvetica.widths.getWidth('W'));
+
+    var courier = FontEncoding.init(std.testing.allocator);
+    defer courier.deinit();
+    applyBase14FallbackMetrics(&courier, "Courier");
+    try std.testing.expectEqual(@as(f64, 600), courier.widths.getWidth('i'));
+    try std.testing.expectEqual(@as(f64, 600), courier.widths.getWidth('W'));
+
+    var symbol = FontEncoding.init(std.testing.allocator);
+    defer symbol.deinit();
+    applyBase14FallbackMetrics(&symbol, "Symbol");
+    try std.testing.expectEqual(@as(u21, 0x03A9), symbol.codepoint_map['W']);
+    try std.testing.expectEqual(@as(u21, 0x03C0), symbol.codepoint_map['p']);
+}
+
+test "predefined CJK CMaps set width and writing mode conservatively" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+    applyPredefinedCMap(&enc, "Adobe-Japan1-UCS2-V");
+    try std.testing.expectEqual(@as(u8, 2), enc.bytes_per_char);
+    try std.testing.expectEqual(@as(u8, 1), enc.wmode);
+
+    var gb = FontEncoding.init(std.testing.allocator);
+    defer gb.deinit();
+    applyPredefinedCMap(&gb, "GBK-EUC-H");
+    try std.testing.expectEqual(@as(u8, 2), gb.bytes_per_char);
+    try std.testing.expectEqual(@as(u8, 0), gb.wmode);
+}
+
+test "broken Identity CID without ToUnicode reports map error" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+    enc.cid_system_info = .{ .registry = "Adobe", .ordering = "Identity", .supplement = 0 };
+    enc.has_to_unicode = false;
+
+    var sink = struct {
+        saw_map_error: bool = false,
+        fn writeDecodedGlyph(self: *@This(), glyph: FontEncoding.DecodedGlyph) !void {
+            self.saw_map_error = self.saw_map_error or glyph.unicode_map_error;
+        }
+    }{};
+    try enc.decodeRecords(&[_]u8{ 0x00, 0x01 }, &sink);
+    try std.testing.expect(sink.saw_map_error);
 }

@@ -265,11 +265,12 @@ debug assets, then `document_finished`. `jsonl` remains a compatibility span
 stream, and `rag-jsonl` remains chunk-only. The schema is documented in
 [docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets are formal `debug_asset` records in schema `0.8.0`. By
+Visual review assets are formal `debug_asset` records in schema `0.9.0`. By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
-`page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`, `document.hocr.html`,
-and `document.route-trace.json`; the corresponding records then include file
+`page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`,
+`page-0001.glyph-trace.jsonl`, `document.hocr.html`, and
+`document.route-trace.json`; the corresponding records then include file
 path, byte length, SHA256, page scope, layers, and provenance.
 
 For host applications, prefer the neutral adapter command:
@@ -508,7 +509,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.8.0`. Every emitted record carries a `provenance` envelope with document and
+`0.9.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines
@@ -531,6 +532,8 @@ without removing the older top-level compatibility fields.
 | WinAnsi/MacRoman | Yes | Yes | Yes | Yes |
 | ToUnicode CMap | Yes | Yes | Yes | Yes |
 | CID fonts (Type0) | Partial* | Yes | Yes | Yes |
+| Type3 extraction metrics | Partial | Yes | Yes | Yes |
+| ActualText marked content | Yes | Yes | Yes | Partial |
 | **Compression** | | | |
 | FlateDecode, LZW, ASCII85/Hex | Yes | Yes | Yes | Yes |
 | JBIG2, JPEG2000 | No | Yes | Yes | Via dependencies |
@@ -538,7 +541,8 @@ without removing the older top-level compatibility fields.
 | Encrypted PDFs | Known password | Yes | Yes | Via dependencies |
 | Rendering | No | Yes | Yes | No |
 
-*\*CID fonts: Works when CMap is embedded directly.*
+*\*CID fonts: Works when CMap is embedded directly; broken Identity CIDs now
+emit lower-confidence Unicode-map evidence instead of silently looking clean.*
 
 **Use pdf-parser when:** Batch extraction, deterministic Zig-native pipelines,
 PDF/UA/tagged PDFs, local OCR fallback, financial table provenance, form values,

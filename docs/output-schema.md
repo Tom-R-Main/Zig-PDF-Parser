@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.8.0`
+Current schema version: `0.9.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -30,10 +30,9 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.8.0` adds encrypted-document manifest metadata for known-password
-PDF parsing. Earlier schema `0.7.0` added specialist protocol records for local
-OCR, table, formula, layout, or entity specialists without requiring any
-specific external model package.
+Schema `0.9.0` adds the `glyph_trace_jsonl` debug asset kind for page-scoped
+character/glyph review evidence. Earlier schema `0.8.0` added
+encrypted-document manifest metadata for known-password PDF parsing.
 
 ## Provenance Envelope
 
@@ -212,11 +211,12 @@ Current `asset_kind` values:
 - `hocr`
 - `alto`
 - `route_trace_json`
+- `glyph_trace_jsonl`
 
 Materialized page assets use deterministic filenames such as
 `page-0001.page-overlay.svg`, `page-0001.table-grid.svg`,
-`page-0001.ocr-routes.svg`, and `page-0001.span-block-ids.svg`. Document-level
-assets include `document.debug.svg`, `document.hocr.html`,
+`page-0001.ocr-routes.svg`, `page-0001.span-block-ids.svg`, and
+`page-0001.glyph-trace.jsonl`. Document-level assets include `document.debug.svg`, `document.hocr.html`,
 `document.alto.xml`, and `document.route-trace.json`.
 
 ### Streaming lifecycle records
@@ -312,7 +312,7 @@ Minimal specialist config shape:
 }
 ```
 
-The config format is intentionally small. In schema `0.8.0`, it is adapter
+The config format is intentionally small. In schema `0.9.0`, it is adapter
 plumbing for future local subprocess invocation; the kernel never depends on a
 specific Python package or hosted model.
 

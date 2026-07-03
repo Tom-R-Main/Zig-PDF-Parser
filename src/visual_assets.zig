@@ -18,6 +18,7 @@ pub const AssetKind = enum {
     hocr,
     alto,
     route_trace_json,
+    glyph_trace_jsonl,
 };
 
 pub const AssetRecord = struct {
@@ -54,6 +55,7 @@ const page_asset_specs = [_]PageAssetSpec{
     .{ .asset_kind = .table_grid_overlay_svg, .suffix = "table-grid.svg", .layers = &.{ "table-grid", "table-grid-cells", "table-grid-labels" } },
     .{ .asset_kind = .ocr_route_overlay_svg, .suffix = "ocr-routes.svg", .layers = &.{ "ocr-route-overlay", "ocr-route-regions", "ocr-route-traces" } },
     .{ .asset_kind = .span_block_id_overlay_svg, .suffix = "span-block-ids.svg", .layers = &.{ "span-block-id-overlay", "span-id-labels", "block-id-labels" } },
+    .{ .asset_kind = .glyph_trace_jsonl, .suffix = "glyph-trace.jsonl", .layers = &.{"glyph-trace"} },
 };
 
 const DocumentAssetSpec = struct {
@@ -159,6 +161,7 @@ pub fn assetKindName(kind: AssetKind) []const u8 {
         .hocr => "hocr",
         .alto => "alto",
         .route_trace_json => "route_trace_json",
+        .glyph_trace_jsonl => "glyph_trace_jsonl",
     };
 }
 
@@ -177,8 +180,8 @@ fn pageRecord(allocator: std.mem.Allocator, page_index: u32, spec: PageAssetSpec
     return .{
         .debug_asset_id = try std.fmt.allocPrint(allocator, "page-{d}-{s}", .{ page_index, assetKindName(spec.asset_kind) }),
         .asset_kind = assetKindName(spec.asset_kind),
-        .kind = "debug_overlay",
-        .media_type = "image/svg+xml",
+        .kind = if (spec.asset_kind == .glyph_trace_jsonl) "glyph_trace" else "debug_overlay",
+        .media_type = if (spec.asset_kind == .glyph_trace_jsonl) "application/x-ndjson" else "image/svg+xml",
         .output_format = spec.suffix,
         .page_index = page_index,
         .layers = spec.layers,
@@ -198,7 +201,10 @@ fn materializeDocumentAsset(allocator: std.mem.Allocator, result: anytype, dir: 
 }
 
 fn materializePageAsset(allocator: std.mem.Allocator, result: anytype, dir: []const u8, page_index: u32, spec: PageAssetSpec, record: *AssetRecord) !void {
-    const bytes = try renderPageSvg(allocator, result, page_index, spec.asset_kind);
+    const bytes = switch (spec.asset_kind) {
+        .glyph_trace_jsonl => try renderGlyphTraceJsonl(allocator, result, page_index),
+        else => try renderPageSvg(allocator, result, page_index, spec.asset_kind),
+    };
     defer allocator.free(bytes);
 
     const filename = try std.fmt.allocPrint(allocator, "page-{d:0>4}.{s}", .{ page_index + 1, spec.suffix });
@@ -243,9 +249,64 @@ fn renderPageSvg(allocator: std.mem.Allocator, result: anytype, page_index: u32,
         .table_grid_overlay_svg => try writeTableGridLayers(writer, result, page_index),
         .ocr_route_overlay_svg => try writeOcrRouteLayers(writer, result, page_index),
         .span_block_id_overlay_svg => try writeSpanBlockIdLayers(writer, result, page_index),
+        .glyph_trace_jsonl => {},
         else => try writePageOverlayLayers(writer, result, page_index),
     }
     try writer.writeAll("</svg>\n");
+    return output.toOwnedSlice(allocator);
+}
+
+fn renderGlyphTraceJsonl(allocator: std.mem.Allocator, result: anytype, page_index: u32) ![]u8 {
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+
+    var char_index: usize = 0;
+    for (result.reconciled.spans, 0..) |span_record, span_index| {
+        const span = span_record.span;
+        if (span.page_index != page_index) continue;
+
+        const estimated_chars = @max(1, utf8ScalarCount(span.text));
+        const char_width = width(span.bbox) / @as(f64, @floatFromInt(estimated_chars));
+        var byte_index: usize = 0;
+        var local_char_index: usize = 0;
+        while (byte_index < span.text.len) {
+            const len = std.unicode.utf8ByteSequenceLength(span.text[byte_index]) catch 1;
+            const end = @min(span.text.len, byte_index + len);
+            const x0 = span.bbox.x0 + char_width * @as(f64, @floatFromInt(local_char_index));
+            const bbox = layout.BBox{
+                .x0 = x0,
+                .y0 = span.bbox.y0,
+                .x1 = if (local_char_index + 1 == estimated_chars) span.bbox.x1 else x0 + char_width,
+                .y1 = span.bbox.y1,
+            };
+            try writer.print(
+                "{{\"record_type\":\"glyph_trace\",\"page_index\":{},\"span_id\":\"span-{}\",\"glyph_index\":{},\"char_index\":{},\"bbox\":{{\"x0\":{d:.3},\"y0\":{d:.3},\"x1\":{d:.3},\"y1\":{d:.3}}},\"source_code\":null,\"source_bytes\":null,\"text\":\"",
+                .{ page_index, span_index, char_index, char_index, bbox.x0, bbox.y0, bbox.x1, bbox.y1 },
+            );
+            try writeJsonEscaped(writer, span.text[byte_index..end]);
+            try writer.print(
+                "\",\"font_name\":",
+                .{},
+            );
+            try writeOptionalJsonString(writer, span.font.name);
+            try writer.print(
+                ",\"font_size\":{d:.3},\"writing_mode\":0,\"generated\":false,\"hyphen\":{},\"unicode_map_error\":{},\"actual_text\":{},\"mcid\":",
+                .{ span.font_size, isHyphenText(span.text[byte_index..end]), span.unicode_map_error, span.actual_text },
+            );
+            if (span.mcid) |mcid| {
+                try writer.print("{}", .{mcid});
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeByte('\n');
+
+            char_index += 1;
+            local_char_index += 1;
+            byte_index = end;
+        }
+    }
+
     return output.toOwnedSlice(allocator);
 }
 
@@ -530,6 +591,52 @@ fn writeXmlEscaped(writer: anytype, text: []const u8) !void {
     }
 }
 
+fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
+    for (text) |byte| {
+        if (byte < 0x20 and byte != '\n' and byte != '\r' and byte != '\t') {
+            try writer.print("\\u{x:0>4}", .{byte});
+            continue;
+        }
+        switch (byte) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(byte),
+        }
+    }
+}
+
+fn writeOptionalJsonString(writer: anytype, maybe_text: ?[]const u8) !void {
+    if (maybe_text) |text| {
+        try writer.writeByte('"');
+        try writeJsonEscaped(writer, text);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn utf8ScalarCount(text: []const u8) usize {
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        i += @max(@as(usize, 1), @min(len, text.len - i));
+        count += 1;
+    }
+    return count;
+}
+
+fn isHyphenText(text: []const u8) bool {
+    return std.mem.eql(u8, text, "-") or
+        std.mem.eql(u8, text, "\xC2\xAD") or
+        std.mem.eql(u8, text, "\xE2\x80\x90") or
+        std.mem.eql(u8, text, "\xE2\x80\x91") or
+        std.mem.eql(u8, text, "\xE2\x88\x92");
+}
+
 fn sha256Hex(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -543,4 +650,5 @@ test "visual asset kind names are stable" {
     try std.testing.expectEqualStrings("page_overlay_svg", assetKindName(.page_overlay_svg));
     try std.testing.expectEqualStrings("table_grid_overlay_svg", assetKindName(.table_grid_overlay_svg));
     try std.testing.expectEqualStrings("route_trace_json", assetKindName(.route_trace_json));
+    try std.testing.expectEqualStrings("glyph_trace_jsonl", assetKindName(.glyph_trace_jsonl));
 }

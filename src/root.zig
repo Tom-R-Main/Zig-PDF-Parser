@@ -2615,6 +2615,16 @@ const ExtractionMode = union(enum) {
     structured: *structtree.MarkedContentExtractor,
 };
 
+const ActualTextScope = struct {
+    text: ?[]u8 = null,
+    seen: bool = false,
+};
+
+const PoppedActualText = struct {
+    text: []u8,
+    seen: bool,
+};
+
 /// Try to buffer a token as an operand. Returns true if consumed (not an operator).
 fn pushOperand(operands: []interpreter.Operand, count: *usize, token: interpreter.ContentLexer.Token) bool {
     switch (token) {
@@ -2734,6 +2744,11 @@ fn extractContentStream(
     var text_buf: [MCID_TEXT_BUF_SIZE]u8 = undefined;
     var text_pos: usize = 0;
 
+    var actual_text_scopes: [32]ActualTextScope = undefined;
+    @memset(&actual_text_scopes, .{});
+    var actual_text_depth: usize = 0;
+    defer cleanupActualTextScopes(allocator, actual_text_scopes[0..actual_text_depth]);
+
     while (try lexer.next()) |token| {
         if (pushOperand(&operands, &operand_count, token)) continue;
 
@@ -2741,14 +2756,20 @@ fn extractContentStream(
         const op = token.operator;
         if (op.len > 0) switch (op[0]) {
             'B' => switch (mode) {
-                .stream => if (op.len == 2 and op[1] == 'T') {
-                    in_text = true;
-                    prev_x = 0;
-                    prev_y = 0;
-                    current_x = 0;
-                    current_y = 0;
-                    line_start_x = 0;
-                    line_start_y = 0;
+                .stream => {
+                    if (op.len == 2 and op[1] == 'T') {
+                        in_text = true;
+                        prev_x = 0;
+                        prev_y = 0;
+                        current_x = 0;
+                        current_y = 0;
+                        line_start_x = 0;
+                        line_start_y = 0;
+                    } else if (std.mem.eql(u8, op, "BDC")) {
+                        try pushActualTextScope(allocator, &actual_text_scopes, &actual_text_depth, operands[0..operand_count], if (operand_count >= 2) 1 else 0);
+                    } else if (std.mem.eql(u8, op, "BMC")) {
+                        try pushEmptyActualTextScope(&actual_text_scopes, &actual_text_depth);
+                    }
                 },
                 .bounds => |collector| {
                     if (op.len == 2 and op[1] == 'T') {
@@ -2761,8 +2782,14 @@ fn extractContentStream(
                         collector.setPosition(current_x, current_y);
                         collector.setTextMatrix(text_matrix);
                     } else if (std.mem.eql(u8, op, "BDC")) {
+                        try pushActualTextScope(allocator, &actual_text_scopes, &actual_text_depth, operands[0..operand_count], if (operand_count >= 2) 1 else 0);
+                        try collector.flush();
+                        try collector.setActualText(currentActualText(actual_text_scopes[0..actual_text_depth]));
                         collector.setMcid(extractMcidFromOperands(operands[0..operand_count], if (operand_count >= 2) 1 else 0));
                     } else if (std.mem.eql(u8, op, "BMC")) {
+                        try pushEmptyActualTextScope(&actual_text_scopes, &actual_text_depth);
+                        try collector.flush();
+                        try collector.setActualText(currentActualText(actual_text_scopes[0..actual_text_depth]));
                         collector.setMcid(null);
                     }
                 },
@@ -2770,12 +2797,14 @@ fn extractContentStream(
                     if (op.len == 2 and op[1] == 'T') {
                         in_text = true;
                     } else if (std.mem.eql(u8, op, "BDC")) {
+                        try pushActualTextScope(allocator, &actual_text_scopes, &actual_text_depth, operands[0..operand_count], if (operand_count >= 2) 1 else 0);
                         if (operand_count >= 2) {
                             const tag = operands[0].asName() orelse "Unknown";
                             const mcid = extractMcidFromOperands(operands[0..operand_count], 1);
                             try extractor.beginMarkedContent(tag, mcid);
                         }
                     } else if (std.mem.eql(u8, op, "BMC")) {
+                        try pushEmptyActualTextScope(&actual_text_scopes, &actual_text_depth);
                         if (operand_count >= 1) {
                             const tag = operands[0].asName() orelse "Unknown";
                             try extractor.beginMarkedContent(tag, null);
@@ -2785,13 +2814,25 @@ fn extractContentStream(
             },
             'E' => switch (mode) {
                 .stream => {
-                    if (op.len == 2 and op[1] == 'T') in_text = false;
+                    if (op.len == 2 and op[1] == 'T') {
+                        in_text = false;
+                    } else if (std.mem.eql(u8, op, "EMC")) {
+                        if (popActualTextScope(allocator, &actual_text_scopes, &actual_text_depth)) |actual| {
+                            defer allocator.free(actual.text);
+                            if (actual.seen) try writer.writeAll(actual.text);
+                        }
+                    }
                 },
                 .bounds => |collector| {
                     if (op.len == 2 and op[1] == 'T') {
                         try collector.flush();
                         in_text = false;
                     } else if (std.mem.eql(u8, op, "EMC")) {
+                        try collector.flush();
+                        if (popActualTextScope(allocator, &actual_text_scopes, &actual_text_depth)) |actual| {
+                            allocator.free(actual.text);
+                        }
+                        try collector.setActualText(currentActualText(actual_text_scopes[0..actual_text_depth]));
                         collector.setMcid(null);
                     }
                 },
@@ -2799,6 +2840,10 @@ fn extractContentStream(
                     if (op.len == 2 and op[1] == 'T') {
                         in_text = false;
                     } else if (std.mem.eql(u8, op, "EMC")) {
+                        if (popActualTextScope(allocator, &actual_text_scopes, &actual_text_depth)) |actual| {
+                            defer allocator.free(actual.text);
+                            if (actual.seen) try extractor.addText(actual.text);
+                        }
                         extractor.endMarkedContent();
                     }
                 },
@@ -2977,14 +3022,20 @@ fn extractContentStream(
                     }
                     switch (mode) {
                         .stream => {
-                            try writeTextWithFont(operands[0], current_font, writer);
+                            if (markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                                // ActualText replaces the glyph text when the marked-content scope closes.
+                            } else {
+                                try writeTextWithFont(operands[0], current_font, writer);
+                            }
                             last_text_font_size = font_size;
                         },
                         .bounds => |collector| try writeTextToCollector(operands[0], current_font, collector),
                         .structured => |extractor| {
-                            text_pos = 0;
-                            writeTextToBuffer(operands[0], current_font, &text_buf, &text_pos);
-                            if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                            if (!markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                                text_pos = 0;
+                                writeTextToBuffer(operands[0], current_font, &text_buf, &text_pos);
+                                if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                            }
                         },
                     }
                 },
@@ -2995,14 +3046,20 @@ fn extractContentStream(
                     }
                     switch (mode) {
                         .stream => {
-                            try writeTJArrayWithFont(operands[0], current_font, writer);
+                            if (markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                                // ActualText replaces the TJ glyph text at EMC.
+                            } else {
+                                try writeTJArrayWithFont(operands[0], current_font, writer);
+                            }
                             last_text_font_size = font_size;
                         },
                         .bounds => |collector| try writeTJArrayToCollector(operands[0], current_font, collector),
                         .structured => |extractor| {
-                            text_pos = 0;
-                            writeTJArrayToBuffer(operands[0], current_font, &text_buf, &text_pos);
-                            if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                            if (!markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                                text_pos = 0;
+                                writeTJArrayToBuffer(operands[0], current_font, &text_buf, &text_pos);
+                                if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                            }
                         },
                     }
                 },
@@ -3016,7 +3073,11 @@ fn extractContentStream(
                 switch (mode) {
                     .stream => {
                         try writer.writeByte('\n');
-                        try writeTextWithFont(operands[0], current_font, writer);
+                        if (markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                            // ActualText replaces this glyph run at EMC.
+                        } else {
+                            try writeTextWithFont(operands[0], current_font, writer);
+                        }
                         last_text_font_size = font_size;
                     },
                     .bounds => |collector| {
@@ -3032,9 +3093,11 @@ fn extractContentStream(
                         try writeTextToCollector(operands[0], current_font, collector);
                     },
                     .structured => |extractor| {
-                        text_pos = 0;
-                        writeTextToBuffer(operands[0], current_font, &text_buf, &text_pos);
-                        if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                        if (!markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                            text_pos = 0;
+                            writeTextToBuffer(operands[0], current_font, &text_buf, &text_pos);
+                            if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                        }
                     },
                 }
             },
@@ -3046,7 +3109,11 @@ fn extractContentStream(
                 switch (mode) {
                     .stream => {
                         try writer.writeByte('\n');
-                        try writeTextWithFont(operands[2], current_font, writer);
+                        if (markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                            // ActualText replaces this glyph run at EMC.
+                        } else {
+                            try writeTextWithFont(operands[2], current_font, writer);
+                        }
                         last_text_font_size = font_size;
                     },
                     .bounds => |collector| {
@@ -3062,9 +3129,11 @@ fn extractContentStream(
                         try writeTextToCollector(operands[2], current_font, collector);
                     },
                     .structured => |extractor| {
-                        text_pos = 0;
-                        writeTextToBuffer(operands[2], current_font, &text_buf, &text_pos);
-                        if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                        if (!markActualTextSeen(actual_text_scopes[0..actual_text_depth])) {
+                            text_pos = 0;
+                            writeTextToBuffer(operands[2], current_font, &text_buf, &text_pos);
+                            if (text_pos > 0) try extractor.addText(text_buf[0..text_pos]);
+                        }
                     },
                 }
             },
@@ -3073,6 +3142,120 @@ fn extractContentStream(
 
         operand_count = 0;
     }
+
+    if (actual_text_depth > 0) {
+        switch (mode) {
+            .bounds => |collector| {
+                try collector.flush();
+                try collector.setActualText(null);
+            },
+            else => {},
+        }
+    }
+}
+
+fn pushEmptyActualTextScope(scopes: *[32]ActualTextScope, depth: *usize) !void {
+    if (depth.* >= scopes.len) return;
+    scopes[depth.*] = .{};
+    depth.* += 1;
+}
+
+fn pushActualTextScope(
+    allocator: std.mem.Allocator,
+    scopes: *[32]ActualTextScope,
+    depth: *usize,
+    operands: []const interpreter.Operand,
+    property_start: usize,
+) !void {
+    if (depth.* >= scopes.len) return;
+    var scope: ActualTextScope = .{};
+    if (try extractActualTextFromOperands(allocator, operands, property_start)) |text| {
+        scope.text = text;
+    }
+    scopes[depth.*] = scope;
+    depth.* += 1;
+}
+
+fn popActualTextScope(allocator: std.mem.Allocator, scopes: *[32]ActualTextScope, depth: *usize) ?PoppedActualText {
+    if (depth.* == 0) return null;
+    depth.* -= 1;
+    const scope = scopes[depth.*];
+    scopes[depth.*] = .{};
+    if (scope.text) |text| {
+        return .{ .text = text, .seen = scope.seen };
+    }
+    _ = allocator;
+    return null;
+}
+
+fn cleanupActualTextScopes(allocator: std.mem.Allocator, scopes: []ActualTextScope) void {
+    for (scopes) |*scope| {
+        if (scope.text) |text| {
+            allocator.free(text);
+            scope.text = null;
+        }
+    }
+}
+
+fn currentActualText(scopes: []const ActualTextScope) ?[]const u8 {
+    var index = scopes.len;
+    while (index > 0) {
+        index -= 1;
+        if (scopes[index].text) |text| return text;
+    }
+    return null;
+}
+
+fn markActualTextSeen(scopes: []ActualTextScope) bool {
+    var index = scopes.len;
+    while (index > 0) {
+        index -= 1;
+        if (scopes[index].text != null) {
+            scopes[index].seen = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+fn extractActualTextFromOperands(
+    allocator: std.mem.Allocator,
+    operands: []const interpreter.Operand,
+    property_start: usize,
+) !?[]u8 {
+    if (property_start >= operands.len) return null;
+    if (try extractActualTextFromOperand(allocator, operands[property_start])) |text| return text;
+
+    var i = property_start;
+    while (i + 1 < operands.len) : (i += 1) {
+        if (operands[i] == .name and std.mem.eql(u8, operands[i].name, "ActualText")) {
+            return decodeActualTextOperand(allocator, operands[i + 1]);
+        }
+    }
+    return null;
+}
+
+fn extractActualTextFromOperand(allocator: std.mem.Allocator, operand: interpreter.Operand) !?[]u8 {
+    return switch (operand) {
+        .array => |arr| blk: {
+            var i: usize = 0;
+            while (i + 1 < arr.len) : (i += 1) {
+                if (arr[i] == .name and std.mem.eql(u8, arr[i].name, "ActualText")) {
+                    break :blk try decodeActualTextOperand(allocator, arr[i + 1]);
+                }
+            }
+            break :blk null;
+        },
+        else => null,
+    };
+}
+
+fn decodeActualTextOperand(allocator: std.mem.Allocator, operand: interpreter.Operand) !?[]u8 {
+    return switch (operand) {
+        .string => |s| try decodePdfString(allocator, s),
+        .hex_string => |s| try decodePdfString(allocator, s),
+        else => null,
+    };
 }
 
 /// Handle Do operator - extract text from Form XObjects
@@ -3411,6 +3594,50 @@ test "ErrorConfig presets" {
 
     const permissive = ErrorConfig.permissive();
     try std.testing.expect(permissive.continue_on_parse_error);
+}
+
+test "ActualText replaces marked-content glyph text in stream mode" {
+    const allocator = std.testing.allocator;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const content = "BT /Span << /ActualText (Correct text) /MCID 7 >> BDC (bad) Tj EMC ET";
+    var fonts = std.StringHashMap(encoding.FontEncoding).init(allocator);
+    defer fonts.deinit();
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try extractContentStream(content, .{ .stream = .{ .resources = null, .ctx = null } }, &fonts, 0, scratch.allocator(), runtime.arrayListWriter(&output, allocator));
+
+    try std.testing.expectEqualStrings("Correct text", output.items);
+}
+
+test "ActualText preserves glyph-derived bbox in bounds mode" {
+    const allocator = std.testing.allocator;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const content = "BT /F1 10 Tf 10 20 Td /Span << /ActualText (office) /MCID 3 >> BDC (xx) Tj EMC ET";
+    var fonts = std.StringHashMap(encoding.FontEncoding).init(allocator);
+    defer fonts.deinit();
+    var enc = encoding.FontEncoding.init(allocator);
+    enc.widths.simple_widths['x'] = 500;
+    try fonts.put("0:F1", enc);
+    defer {
+        var value = fonts.getPtr("0:F1").?;
+        value.deinit();
+    }
+
+    var collector = interpreter.SpanCollector.init(allocator, 0);
+    defer collector.deinit();
+    var nw: NullWriter = .{};
+    try extractContentStream(content, .{ .bounds = &collector }, &fonts, 0, scratch.allocator(), &nw);
+    try collector.flush();
+
+    const spans = collector.getSpans();
+    try std.testing.expectEqual(@as(usize, 1), spans.len);
+    try std.testing.expectEqualStrings("office", spans[0].text);
+    try std.testing.expect(spans[0].actual_text);
+    try std.testing.expect(spans[0].bbox.x1 > spans[0].bbox.x0);
+    try std.testing.expectEqual(@as(?i32, 3), spans[0].mcid);
 }
 
 test "allocated memory path cleanup" {
