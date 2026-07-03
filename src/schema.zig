@@ -320,7 +320,10 @@ pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result:
         try writeFormFieldRecord(writer, options.document_id, options.source_id, options.input_sha256, result, field, @intCast(index));
         try writer.writeByte('\n');
     }
-    try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, true, .{}, null);
+    // Indexed route matching pays off on large trace streams but can add noise on
+    // small/table-heavy outputs where the linear scan is already tiny.
+    const route_trace_offsets = if (routeTraceCount(result) > 10_000) offsets else RecordOffsets{};
+    try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, true, route_trace_offsets, null);
     _ = try specialist_protocol.writeArtifactJsonl(allocator, writer, result, specialistContext(options));
     for (result.reconciled.chunks) |chunk| {
         try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, offsets, null);
