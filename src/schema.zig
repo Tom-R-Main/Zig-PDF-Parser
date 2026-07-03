@@ -308,7 +308,7 @@ pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result:
         try writer.writeByte('\n');
     }
     try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, true, .{}, null);
-    _ = try specialist_protocol.writeArtifactJsonl(writer, result, specialistContext(options));
+    _ = try specialist_protocol.writeArtifactJsonl(allocator, writer, result, specialistContext(options));
     for (result.reconciled.chunks) |chunk| {
         try writeRagChunkRecord(writer, result, options.document_id, options.source_id, options.input_sha256, chunk, 0, 0, offsets, null);
         try writer.writeByte('\n');

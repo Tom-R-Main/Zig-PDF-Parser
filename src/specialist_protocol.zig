@@ -61,6 +61,122 @@ pub const Counts = struct {
     results: usize = 0,
 };
 
+const IndexRange = struct {
+    start: usize = std.math.maxInt(usize),
+    end: usize = 0,
+
+    fn add(self: *IndexRange, index: usize) void {
+        self.start = @min(self.start, index);
+        self.end = @max(self.end, index + 1);
+    }
+
+    fn slice(self: IndexRange) ?IndexRange {
+        if (self.start == std.math.maxInt(usize)) return null;
+        return self;
+    }
+};
+
+const SpanPageLookup = struct {
+    allocator: std.mem.Allocator,
+    ranges: []IndexRange,
+
+    fn init(allocator: std.mem.Allocator, result: anytype) !SpanPageLookup {
+        const page_count = spanLookupPageCount(result);
+        const ranges = try allocator.alloc(IndexRange, page_count);
+        errdefer allocator.free(ranges);
+        @memset(ranges, .{});
+
+        for (result.reconciled.spans, 0..) |span, index| {
+            const page_index = span.span.page_index;
+            if (page_index < ranges.len) ranges[page_index].add(index);
+        }
+
+        return .{
+            .allocator = allocator,
+            .ranges = ranges,
+        };
+    }
+
+    fn deinit(self: *SpanPageLookup) void {
+        self.allocator.free(self.ranges);
+        self.* = undefined;
+    }
+
+    fn spanRange(self: *const SpanPageLookup, page_index: u32) ?IndexRange {
+        if (page_index >= self.ranges.len) return null;
+        return self.ranges[page_index].slice();
+    }
+};
+
+const BlockPageLookup = struct {
+    allocator: std.mem.Allocator,
+    ranges: []IndexRange,
+
+    fn init(allocator: std.mem.Allocator, result: anytype) !BlockPageLookup {
+        const page_count = blockLookupPageCount(result);
+        const ranges = try allocator.alloc(IndexRange, page_count);
+        errdefer allocator.free(ranges);
+        @memset(ranges, .{});
+
+        for (result.reconciled.blocks, 0..) |block, index| {
+            const page_index = block.page_index;
+            if (page_index < ranges.len) ranges[page_index].add(index);
+        }
+
+        return .{
+            .allocator = allocator,
+            .ranges = ranges,
+        };
+    }
+
+    fn deinit(self: *BlockPageLookup) void {
+        self.allocator.free(self.ranges);
+        self.* = undefined;
+    }
+
+    fn blockRange(self: *const BlockPageLookup, page_index: u32) ?IndexRange {
+        if (page_index >= self.ranges.len) return null;
+        return self.ranges[page_index].slice();
+    }
+};
+
+const SpanRange = struct {
+    start: usize,
+    end: usize,
+};
+
+fn spanLookupPageCount(result: anytype) usize {
+    var page_count: usize = 0;
+    for (result.reconciled.spans) |span| page_count = @max(page_count, @as(usize, @intCast(span.span.page_index)) + 1);
+    return page_count;
+}
+
+fn blockLookupPageCount(result: anytype) usize {
+    var page_count: usize = 0;
+    for (result.reconciled.blocks) |block| page_count = @max(page_count, @as(usize, @intCast(block.page_index)) + 1);
+    return page_count;
+}
+
+fn spanScanRange(result: anytype, page_index: u32, span_lookup: ?*const SpanPageLookup) SpanRange {
+    if (span_lookup) |lookup| {
+        if (lookup.spanRange(page_index)) |range| {
+            return .{ .start = range.start, .end = range.end };
+        }
+        return .{ .start = 0, .end = 0 };
+    }
+    return .{ .start = 0, .end = result.reconciled.spans.len };
+}
+
+fn blockScanRange(result: anytype, page_index: u32, block_lookup: ?*const BlockPageLookup) SpanRange {
+    if (block_lookup) |lookup| {
+        if (lookup.blockRange(page_index)) |range| {
+            return .{ .start = range.start, .end = range.end };
+        }
+        return .{ .start = 0, .end = 0 };
+    }
+    return .{ .start = 0, .end = result.reconciled.blocks.len };
+}
+
 pub fn countRequests(result: anytype) usize {
     var count: usize = 0;
     for (result.page_routes) |route| {
@@ -91,7 +207,7 @@ pub fn countResponses(result: anytype) usize {
 pub fn countResults(result: anytype) usize {
     var count: usize = 0;
     for (result.page_routes) |route| {
-        if (route.route.needs_ocr and countFreshOcrSpans(result, route.page_index, route.bbox) > 0) count += 1;
+        if (route.route.needs_ocr and countFreshOcrSpans(result, route.page_index, route.bbox, null) > 0) count += 1;
     }
     return count;
 }
@@ -106,24 +222,28 @@ pub fn counts(result: anytype) Counts {
 
 pub fn writeRequestsArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
-    try writeRequests(writer, result, context, null, false, null, &wrote);
+    try writeRequests(writer, result, context, null, false, null, &wrote, null, null);
 }
 
 pub fn writeResponsesArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
-    try writeOcrResponses(writer, result, context, null, false, null, &wrote);
+    try writeOcrResponses(writer, result, context, null, false, null, &wrote, null);
 }
 
 pub fn writeResultsArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
-    try writeOcrResults(writer, result, context, null, false, null, &wrote);
+    try writeOcrResults(writer, result, context, null, false, null, &wrote, null);
 }
 
-pub fn writeArtifactJsonl(writer: anytype, result: anytype, context: RenderContext) !Counts {
+pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result: anytype, context: RenderContext) !Counts {
+    var span_lookup = try SpanPageLookup.init(allocator, result);
+    defer span_lookup.deinit();
+    var block_lookup = try BlockPageLookup.init(allocator, result);
+    defer block_lookup.deinit();
     var wrote = false;
-    try writeRequests(writer, result, context, null, true, null, &wrote);
-    try writeOcrResponses(writer, result, context, null, true, null, &wrote);
-    try writeOcrResults(writer, result, context, null, true, null, &wrote);
+    try writeRequests(writer, result, context, null, true, null, &wrote, &span_lookup, &block_lookup);
+    try writeOcrResponses(writer, result, context, null, true, null, &wrote, &span_lookup);
+    try writeOcrResults(writer, result, context, null, true, null, &wrote, &span_lookup);
     if (wrote) try writer.writeByte('\n');
     return counts(result);
 }
@@ -132,8 +252,12 @@ pub fn renderRequestsJsonl(allocator: std.mem.Allocator, result: anytype, contex
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);
     const writer = runtime.arrayListWriter(&output, allocator);
+    var span_lookup = try SpanPageLookup.init(allocator, result);
+    defer span_lookup.deinit();
+    var block_lookup = try BlockPageLookup.init(allocator, result);
+    defer block_lookup.deinit();
     var wrote = false;
-    try writeRequests(writer, result, context, null, true, null, &wrote);
+    try writeRequests(writer, result, context, null, true, null, &wrote, &span_lookup, &block_lookup);
     if (wrote) try writer.writeByte('\n');
     return output.toOwnedSlice(allocator);
 }
@@ -147,8 +271,7 @@ pub fn writePageRequestsJsonl(
 ) !usize {
     const before = event_index.*;
     var wrote = false;
-    _ = page_index;
-    try writeRequests(writer, result, context, null, true, event_index, &wrote);
+    try writeRequests(writer, result, context, page_index, true, event_index, &wrote, null, null);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -162,8 +285,7 @@ pub fn writePageResponsesJsonl(
 ) !usize {
     const before = event_index.*;
     var wrote = false;
-    _ = page_index;
-    try writeOcrResponses(writer, result, context, null, true, event_index, &wrote);
+    try writeOcrResponses(writer, result, context, page_index, true, event_index, &wrote, null);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -177,8 +299,7 @@ pub fn writePageResultsJsonl(
 ) !usize {
     const before = event_index.*;
     var wrote = false;
-    _ = page_index;
-    try writeOcrResults(writer, result, context, null, true, event_index, &wrote);
+    try writeOcrResults(writer, result, context, page_index, true, event_index, &wrote, null);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -236,13 +357,15 @@ fn writeRequests(
     jsonl: bool,
     event_index: ?*u64,
     wrote: *bool,
+    span_lookup: ?*const SpanPageLookup,
+    block_lookup: ?*const BlockPageLookup,
 ) !void {
     var request_index: u32 = 0;
     for (result.page_routes) |route| {
         if (!matchesPage(page_filter, route.page_index)) continue;
         if (!routeNeedsKindOrReason(route.route, .ocr, route.reason_mask)) continue;
         try writeRecordSeparator(writer, jsonl, wrote);
-        try writeRequestRecord(writer, result, context, .ocr, request_index, route.page_index, null, route.bbox, route.route, route.reason_mask, route.signals, event_index);
+        try writeRequestRecord(writer, result, context, .ocr, request_index, route.page_index, null, route.bbox, route.route, route.reason_mask, route.signals, event_index, span_lookup, block_lookup);
         request_index += 1;
     }
     for (result.region_routes) |route| {
@@ -251,7 +374,7 @@ fn writeRequests(
         for (kinds) |kind| {
             if (!routeNeedsKindOrReason(route.route, kind, route.reason_mask)) continue;
             try writeRecordSeparator(writer, jsonl, wrote);
-            try writeRequestRecord(writer, result, context, kind, request_index, route.page_index, route.region_index, route.bbox, route.route, route.reason_mask, route.signals, event_index);
+            try writeRequestRecord(writer, result, context, kind, request_index, route.page_index, route.region_index, route.bbox, route.route, route.reason_mask, route.signals, event_index, span_lookup, block_lookup);
             request_index += 1;
         }
     }
@@ -263,7 +386,7 @@ fn writeRequests(
             if (requestAlreadyCovered(result, kind, record.page_index, record.region_index)) continue;
             const bbox = traceBBox(result, record) orelse layout.BBox{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
             try writeRecordSeparator(writer, jsonl, wrote);
-            try writeRequestRecord(writer, result, context, kind, request_index, record.page_index, record.region_index, bbox, record.route, record.reason_mask, zeroSignals(), event_index);
+            try writeRequestRecord(writer, result, context, kind, request_index, record.page_index, record.region_index, bbox, record.route, record.reason_mask, zeroSignals(), event_index, span_lookup, block_lookup);
             request_index += 1;
         }
     }
@@ -277,11 +400,12 @@ fn writeOcrResponses(
     jsonl: bool,
     event_index: ?*u64,
     wrote: *bool,
+    span_lookup: ?*const SpanPageLookup,
 ) !void {
     for (result.page_routes, 0..) |route, index| {
         if (!matchesPage(page_filter, route.page_index) or !route.route.needs_ocr) continue;
         try writeRecordSeparator(writer, jsonl, wrote);
-        try writeOcrResponseRecord(writer, result, context, @intCast(index), route, event_index);
+        try writeOcrResponseRecord(writer, result, context, @intCast(index), route, event_index, span_lookup);
     }
 }
 
@@ -293,12 +417,13 @@ fn writeOcrResults(
     jsonl: bool,
     event_index: ?*u64,
     wrote: *bool,
+    span_lookup: ?*const SpanPageLookup,
 ) !void {
     for (result.page_routes, 0..) |route, index| {
         if (!matchesPage(page_filter, route.page_index) or !route.route.needs_ocr) continue;
-        if (countFreshOcrSpans(result, route.page_index, route.bbox) == 0) continue;
+        if (countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup) == 0) continue;
         try writeRecordSeparator(writer, jsonl, wrote);
-        try writeOcrResultRecord(writer, result, context, @intCast(index), route, event_index);
+        try writeOcrResultRecord(writer, result, context, @intCast(index), route, event_index, span_lookup);
     }
 }
 
@@ -315,6 +440,8 @@ fn writeRequestRecord(
     reason_mask: u32,
     signals: complexity.SignalScores,
     event_index: ?*u64,
+    span_lookup: ?*const SpanPageLookup,
+    block_lookup: ?*const BlockPageLookup,
 ) !void {
     try writeRecordHeader(writer, "specialist_request");
     if (event_index) |index| {
@@ -339,23 +466,23 @@ fn writeRequestRecord(
     try writer.writeAll("\",\"requested_outputs\":");
     try writeRequestedOutputs(writer, kind);
     try writer.writeAll(",\"span_ids\":");
-    try writeSpanIdArray(writer, result, page_index, bbox, .all);
+    try writeSpanIdArray(writer, result, page_index, bbox, .all, span_lookup);
     try writer.writeAll(",\"spans\":");
-    try writeSpanContextArray(writer, result, page_index, bbox, .all);
+    try writeSpanContextArray(writer, result, page_index, bbox, .all, span_lookup);
     try writer.writeAll(",\"block_ids\":");
-    try writeBlockIdArray(writer, result, page_index, bbox);
+    try writeBlockIdArray(writer, result, page_index, bbox, block_lookup);
     try writer.writeAll(",\"blocks\":");
-    try writeBlockContextArray(writer, result, page_index, bbox);
+    try writeBlockContextArray(writer, result, page_index, bbox, block_lookup);
     try writer.writeAll(",\"ruling_lines\":[],\"crop_image_path\":null,\"debug_asset_ids\":");
     try writeDebugAssetIds(writer, page_index);
     try writeProvenance(writer, context, "specialist-request", page_index, bbox, "lifecycle", routeConfidence(route));
     try writer.writeByte('}');
 }
 
-fn writeOcrResponseRecord(writer: anytype, result: anytype, context: RenderContext, response_index: u32, route: anytype, event_index: ?*u64) !void {
-    const fresh_count = countFreshOcrSpans(result, route.page_index, route.bbox);
+fn writeOcrResponseRecord(writer: anytype, result: anytype, context: RenderContext, response_index: u32, route: anytype, event_index: ?*u64, span_lookup: ?*const SpanPageLookup) !void {
+    const fresh_count = countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup);
     const status = if (fresh_count > 0) "completed" else "empty";
-    const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox);
+    const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox, span_lookup);
     try writeRecordHeader(writer, "specialist_response");
     if (event_index) |index| {
         try writeStreamFields(writer, "specialist_response", index.*, route.page_index);
@@ -369,14 +496,14 @@ fn writeOcrResponseRecord(writer: anytype, result: anytype, context: RenderConte
     try writer.writeAll(",\"specialist_id\":\"tesseract\",\"specialist_kind\":\"ocr\",\"status\":\"");
     try writer.writeAll(status);
     try writer.print("\",\"confidence\":{d:.3},\"spans\":", .{confidence});
-    try writeSpanContextArray(writer, result, route.page_index, route.bbox, .fresh_ocr);
+    try writeSpanContextArray(writer, result, route.page_index, route.bbox, .fresh_ocr, span_lookup);
     try writer.writeAll(",\"tables\":[],\"blocks\":[],\"formulas\":[],\"entities\":[],\"debug_assets\":[],\"warnings\":[],\"errors\":[]");
     try writeProvenance(writer, context, "specialist-response-ocr", route.page_index, route.bbox, "fresh_ocr", confidence);
     try writer.writeByte('}');
 }
 
-fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext, result_index: u32, route: anytype, event_index: ?*u64) !void {
-    const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox);
+fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext, result_index: u32, route: anytype, event_index: ?*u64, span_lookup: ?*const SpanPageLookup) !void {
+    const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox, span_lookup);
     try writeRecordHeader(writer, "specialist_result");
     if (event_index) |index| {
         try writeStreamFields(writer, "specialist_result", index.*, route.page_index);
@@ -386,9 +513,9 @@ fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext
     try writer.print(",\"page_index\":{},\"specialist_result_id\":\"specialist-result-ocr-{d}\",\"request_id\":", .{ route.page_index, result_index });
     try writeRequestId(writer, .ocr, route.page_index, null);
     try writer.writeAll(",\"specialist_id\":\"tesseract\",\"specialist_kind\":\"ocr\",\"status\":\"completed\",\"source_kind\":\"fresh_ocr\"");
-    try writer.print(",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":{},\"tables\":0,\"blocks\":0,\"formulas\":0,\"entities\":0}}", .{ confidence, countFreshOcrSpans(result, route.page_index, route.bbox) });
+    try writer.print(",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":{},\"tables\":0,\"blocks\":0,\"formulas\":0,\"entities\":0}}", .{ confidence, countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup) });
     try writer.writeAll(",\"span_ids\":");
-    try writeSpanIdArray(writer, result, route.page_index, route.bbox, .fresh_ocr);
+    try writeSpanIdArray(writer, result, route.page_index, route.bbox, .fresh_ocr, span_lookup);
     try writer.writeAll(",\"table_ids\":[],\"block_ids\":[],\"formula_ids\":[],\"entity_ids\":[]");
     try writeProvenance(writer, context, "specialist-result-ocr", route.page_index, route.bbox, "fresh_ocr", confidence);
     try writer.writeByte('}');
@@ -525,10 +652,11 @@ fn writeRequestedOutputs(writer: anytype, kind: SpecialistKind) !void {
 
 const SpanFilter = enum { all, fresh_ocr };
 
-fn writeSpanIdArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFilter) !void {
+fn writeSpanIdArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFilter, span_lookup: ?*const SpanPageLookup) !void {
     try writer.writeByte('[');
     var first = true;
-    for (result.reconciled.spans, 0..) |span, index| {
+    const range = spanScanRange(result, page_index, span_lookup);
+    for (result.reconciled.spans[range.start..range.end], range.start..) |span, index| {
         if (!includeSpan(span, page_index, bbox, filter)) continue;
         if (!first) try writer.writeByte(',');
         try writer.print("\"span-{d}\"", .{index});
@@ -537,10 +665,11 @@ fn writeSpanIdArray(writer: anytype, result: anytype, page_index: u32, bbox: lay
     try writer.writeByte(']');
 }
 
-fn writeSpanContextArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFilter) !void {
+fn writeSpanContextArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFilter, span_lookup: ?*const SpanPageLookup) !void {
     try writer.writeByte('[');
     var first = true;
-    for (result.reconciled.spans, 0..) |span, index| {
+    const range = spanScanRange(result, page_index, span_lookup);
+    for (result.reconciled.spans[range.start..range.end], range.start..) |span, index| {
         if (!includeSpan(span, page_index, bbox, filter)) continue;
         if (!first) try writer.writeByte(',');
         try writer.print("{{\"span_id\":\"span-{d}\",\"text\":\"", .{index});
@@ -555,10 +684,11 @@ fn writeSpanContextArray(writer: anytype, result: anytype, page_index: u32, bbox
     try writer.writeByte(']');
 }
 
-fn writeBlockIdArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox) !void {
+fn writeBlockIdArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, block_lookup: ?*const BlockPageLookup) !void {
     try writer.writeByte('[');
     var first = true;
-    for (result.reconciled.blocks) |block| {
+    const range = blockScanRange(result, page_index, block_lookup);
+    for (result.reconciled.blocks[range.start..range.end]) |block| {
         if (block.page_index != page_index or !boxesIntersect(block.bbox, bbox)) continue;
         if (!first) try writer.writeByte(',');
         try writer.print("\"block-{d}\"", .{block.id});
@@ -567,10 +697,11 @@ fn writeBlockIdArray(writer: anytype, result: anytype, page_index: u32, bbox: la
     try writer.writeByte(']');
 }
 
-fn writeBlockContextArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox) !void {
+fn writeBlockContextArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, block_lookup: ?*const BlockPageLookup) !void {
     try writer.writeByte('[');
     var first = true;
-    for (result.reconciled.blocks) |block| {
+    const range = blockScanRange(result, page_index, block_lookup);
+    for (result.reconciled.blocks[range.start..range.end]) |block| {
         if (block.page_index != page_index or !boxesIntersect(block.bbox, bbox)) continue;
         if (!first) try writer.writeByte(',');
         try writeBlockContext(writer, block, block.id);
@@ -629,18 +760,20 @@ fn includeSpan(span: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFi
     };
 }
 
-fn countFreshOcrSpans(result: anytype, page_index: u32, bbox: layout.BBox) usize {
+fn countFreshOcrSpans(result: anytype, page_index: u32, bbox: layout.BBox, span_lookup: ?*const SpanPageLookup) usize {
     var count: usize = 0;
-    for (result.reconciled.spans) |span| {
+    const range = spanScanRange(result, page_index, span_lookup);
+    for (result.reconciled.spans[range.start..range.end]) |span| {
         if (includeSpan(span, page_index, bbox, .fresh_ocr)) count += 1;
     }
     return count;
 }
 
-fn averageFreshOcrConfidence(result: anytype, page_index: u32, bbox: layout.BBox) f32 {
+fn averageFreshOcrConfidence(result: anytype, page_index: u32, bbox: layout.BBox, span_lookup: ?*const SpanPageLookup) f32 {
     var sum: f32 = 0;
     var count: usize = 0;
-    for (result.reconciled.spans) |span| {
+    const range = spanScanRange(result, page_index, span_lookup);
+    for (result.reconciled.spans[range.start..range.end]) |span| {
         if (!includeSpan(span, page_index, bbox, .fresh_ocr)) continue;
         sum += span.confidence;
         count += 1;
@@ -796,4 +929,134 @@ test "entity request writer exposes entity protocol shape" {
     }, 0);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"requested_kind\":\"entity\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"record_type\":\"specialist_request\"") != null);
+}
+
+test "page specialist request writer scopes requests and spans to page" {
+    const PageRoute = struct {
+        page_index: u32,
+        bbox: layout.BBox,
+        route: complexity.RouteDecision,
+        reason_mask: u32 = 0,
+        signals: complexity.SignalScores = .{},
+    };
+    const RegionRoute = struct {
+        page_index: u32,
+        region_index: u32,
+        bbox: layout.BBox,
+        route: complexity.RouteDecision,
+        reason_mask: u32 = 0,
+        signals: complexity.SignalScores = .{},
+    };
+    const TraceRecord = struct {
+        page_index: u32,
+        region_index: ?u32 = null,
+        route: complexity.RouteDecision,
+        reason_mask: u32 = 0,
+    };
+    const SpanRecord = struct {
+        span: layout.TextSpan,
+        source_mask: u32 = 1,
+        source_count: u8 = 1,
+        duplicate_count: u32 = 0,
+        chosen_source: layout.SourceKind = .native_pdf,
+        confidence: f32 = 1.0,
+    };
+    const BlockRecord = struct {
+        id: u32,
+        page_index: u32,
+        bbox: layout.BBox,
+        kind: layout.BlockKind,
+        text: []const u8,
+        span_start: u32,
+        span_count: u32,
+        source_mask: u32,
+        confidence: f32,
+    };
+    const Reconciled = struct {
+        spans: []const SpanRecord,
+        blocks: []const BlockRecord,
+    };
+    const Result = struct {
+        page_routes: []const PageRoute,
+        region_routes: []const RegionRoute,
+        trace_records: []const TraceRecord,
+        reconciled: Reconciled,
+    };
+
+    const page_bbox = layout.BBox{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 100 };
+    const routes = [_]PageRoute{
+        .{
+            .page_index = 0,
+            .bbox = page_bbox,
+            .route = .{ .needs_ocr = true },
+        },
+        .{
+            .page_index = 1,
+            .bbox = page_bbox,
+            .route = .{ .needs_ocr = true },
+        },
+    };
+    const spans = [_]SpanRecord{
+        .{
+            .span = layout.TextSpan.init(.{
+                .page_index = 0,
+                .bbox = layout.BBox{ .x0 = 1, .y0 = 1, .x1 = 10, .y1 = 10 },
+                .text = "wrong page",
+            }),
+        },
+        .{
+            .span = layout.TextSpan.init(.{
+                .page_index = 1,
+                .bbox = layout.BBox{ .x0 = 1, .y0 = 1, .x1 = 10, .y1 = 10 },
+                .text = "right page",
+            }),
+        },
+    };
+    const blocks = [_]BlockRecord{
+        .{
+            .id = 10,
+            .page_index = 0,
+            .bbox = layout.BBox{ .x0 = 1, .y0 = 1, .x1 = 10, .y1 = 10 },
+            .kind = .paragraph,
+            .text = "wrong block",
+            .span_start = 0,
+            .span_count = 1,
+            .source_mask = 1,
+            .confidence = 1.0,
+        },
+        .{
+            .id = 11,
+            .page_index = 1,
+            .bbox = layout.BBox{ .x0 = 1, .y0 = 1, .x1 = 10, .y1 = 10 },
+            .kind = .paragraph,
+            .text = "right block",
+            .span_start = 1,
+            .span_count = 1,
+            .source_mask = 1,
+            .confidence = 1.0,
+        },
+    };
+    const result = Result{
+        .page_routes = &routes,
+        .region_routes = &.{},
+        .trace_records = &.{},
+        .reconciled = .{
+            .spans = &spans,
+            .blocks = &blocks,
+        },
+    };
+
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    const writer = runtime.arrayListWriter(&output, std.testing.allocator);
+    var event_index: u64 = 0;
+
+    const written = try writePageRequestsJsonl(writer, &result, .{ .document_id = "doc" }, 1, &event_index);
+    try std.testing.expectEqual(@as(usize, 1), written);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "specialist-request-ocr-page-1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "specialist-request-ocr-page-0") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"span_id\":\"span-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"span_id\":\"span-0\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"block_id\":\"block-11\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"block_id\":\"block-10\"") == null);
 }
