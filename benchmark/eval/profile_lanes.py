@@ -61,7 +61,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     repo_root = Path(__file__).resolve().parents[2]
     parser_command = resolve_command_path(repo_root, args.pdf_parser_command)
-    if args.ensure_releasefast and not parser_command.exists():
+    if args.ensure_releasefast:
         ensure_releasefast(repo_root, parser_command)
     entries = filter_entries(
         load_manifest(repo_root / args.manifest, repo_root),

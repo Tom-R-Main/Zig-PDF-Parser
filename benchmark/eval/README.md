@@ -217,9 +217,11 @@ python3 benchmark/eval/compare.py --ensure-releasefast
 
 It reports CER, WER, token F1, latency, and RSS for `pdf-parser`, PyMuPDF,
 `pypdfium2`, `pdfplumber`, and a named Tesseract lane. The `pdf-parser` lane
-uses `zig-out/bin/pdf-parser-eval` by default, building it once with
-`zig build -Doptimize=ReleaseFast` when needed. Its `latency_ms` is parser
-reported latency, while `wall_ms` captures subprocess overhead. Use
+uses `zig-out/bin/pdf-parser-eval` by default. With `--ensure-releasefast`
+enabled, it runs `zig build -Doptimize=ReleaseFast` before measuring even when
+the binary already exists; this avoids accidentally timing a Debug binary after
+a normal `zig build`. Its `latency_ms` is parser reported latency, while
+`wall_ms` captures subprocess overhead. Use
 `--pdf-parser-runner zig-build` only for legacy compatibility. Python baselines
 are optional by default; unavailable libraries are shown as skipped so
 first-party eval stays runnable on a clean machine. To require all
@@ -254,9 +256,11 @@ Profile extraction surfaces before tuning parser internals:
 
 The profiler writes one JSONL record per document/lane/repeat with wall time,
 peak RSS when `/usr/bin/time` exposes it, input SHA256, output byte count, and
-stream parser latency when the lane emits a `document_finished` record. Use the
-tiny checked-in manifest for CI smoke tests and the large manifest after
-populating `raw_cache/large`.
+stream parser latency when the lane emits a `document_finished` record. Its
+default `--ensure-releasefast` mode also rebuilds ReleaseFast before measuring,
+so profiler output stays comparable after local Debug builds. Use the tiny
+checked-in manifest for CI smoke tests and the large manifest after populating
+`raw_cache/large`.
 
 For the full baseline workflow, use the wrapper:
 

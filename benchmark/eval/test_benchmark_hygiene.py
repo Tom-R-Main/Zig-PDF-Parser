@@ -31,6 +31,51 @@ run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
+    def test_compare_ensure_releasefast_rebuilds_even_when_binary_exists(self) -> None:
+        calls: list[list[str]] = []
+
+        class Proc:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "pdf-parser-eval"
+            binary.write_text("existing debug binary placeholder", encoding="utf-8")
+            config = compare.PdfParserConfig(
+                runner="binary",
+                eval_command=binary,
+                ensure_releasefast=True,
+            )
+            original_run = compare.subprocess.run
+            try:
+                compare.subprocess.run = lambda cmd, **kwargs: (calls.append(cmd), Proc())[1]
+                compare.ensure_pdf_parser_eval_binary(Path(temp_dir), config)
+            finally:
+                compare.subprocess.run = original_run
+
+        self.assertEqual([["zig", "build", "-Doptimize=ReleaseFast", "--summary", "all"]], calls)
+
+    def test_profile_ensure_releasefast_rebuilds_even_when_binary_exists(self) -> None:
+        calls: list[list[str]] = []
+
+        class Proc:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "pdf-parser"
+            binary.write_text("existing debug binary placeholder", encoding="utf-8")
+            original_run = profile_lanes.subprocess.run
+            try:
+                profile_lanes.subprocess.run = lambda cmd, **kwargs: (calls.append(cmd), Proc())[1]
+                profile_lanes.ensure_releasefast(Path(temp_dir), binary)
+            finally:
+                profile_lanes.subprocess.run = original_run
+
+        self.assertEqual([["zig", "build", "-Doptimize=ReleaseFast", "--summary", "all"]], calls)
+
     def test_compare_uses_releasefast_eval_binary_by_default(self) -> None:
         entry = compare.Entry(
             category="clean_born_digital",

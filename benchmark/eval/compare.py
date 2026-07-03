@@ -136,9 +136,9 @@ def resolve_command_path(repo_root: Path, value: str) -> Path:
 
 
 def ensure_pdf_parser_eval_binary(repo_root: Path, config: PdfParserConfig) -> None:
-    if config.eval_command.exists():
-        return
     if not config.ensure_releasefast:
+        if config.eval_command.exists():
+            return
         raise SystemExit(f"Missing pdf-parser eval binary: {config.eval_command}")
     cmd = ["zig", "build", "-Doptimize=ReleaseFast", "--summary", "all"]
     proc = subprocess.run(cmd, cwd=repo_root, text=True, capture_output=True, check=False)
