@@ -207,6 +207,8 @@ class Summary:
     parser_latency_ms: list[float] = field(default_factory=list)
     peak_rss_mb: list[float] = field(default_factory=list)
     output_bytes: list[float] = field(default_factory=list)
+    output_sha256: set[str] = field(default_factory=set)
+    output_hash_count: int = 0
     metrics: dict[str, list[float]] = field(default_factory=dict)
 
     def add_status(self, status: object) -> None:
@@ -230,6 +232,12 @@ class Summary:
             return
         self.metrics.setdefault(name, []).append(number)
 
+    def add_output_hash(self, value: object) -> None:
+        if not isinstance(value, str) or not value:
+            return
+        self.output_hash_count += 1
+        self.output_sha256.add(value)
+
     def to_record(self) -> dict[str, object]:
         result: dict[str, object] = {
             "count": self.count,
@@ -241,6 +249,12 @@ class Summary:
             "parser_latency_ms": numeric_summary(self.parser_latency_ms),
             "peak_rss_mb": numeric_summary(self.peak_rss_mb),
             "output_bytes": numeric_summary(self.output_bytes),
+            "output_hashes": {
+                "count": self.output_hash_count,
+                "distinct_count": len(self.output_sha256),
+                "stable": self.output_hash_count == 0 or len(self.output_sha256) <= 1,
+                "samples": sorted(self.output_sha256)[:3],
+            },
         }
         if self.metrics:
             result["metrics"] = {key: numeric_summary(values) for key, values in sorted(self.metrics.items())}
@@ -291,6 +305,7 @@ def summarize_profile_group(records: list[dict[str, object]]) -> dict[str, objec
         summary.add_number("parser_latency_ms", record.get("parser_latency_ms"))
         summary.add_number("peak_rss_mb", record.get("peak_rss_mb"))
         summary.add_number("output_bytes", record.get("output_bytes"))
+        summary.add_output_hash(record.get("output_sha256"))
     return summary.to_record()
 
 
@@ -494,6 +509,7 @@ def compact_profile_record(record: dict[str, object]) -> dict[str, object]:
         "parser_latency_ms": record.get("parser_latency_ms"),
         "peak_rss_mb": record.get("peak_rss_mb"),
         "output_bytes": record.get("output_bytes"),
+        "output_sha256": record.get("output_sha256"),
     }
 
 
@@ -604,8 +620,8 @@ def render_group_table(title: str, groups: object, *, label_name: str) -> list[s
     if not isinstance(groups, dict) or not groups:
         return []
     lines = [f"## {title}", ""]
-    lines.append(f"{label_name} | ok/total | skipped | failed | wall_ms median | latency_ms median | rss_mb max")
-    lines.append("--- | ---: | ---: | ---: | ---: | ---: | ---:")
+    lines.append(f"{label_name} | ok/total | skipped | failed | wall_ms median | latency_ms median | rss_mb max | output hashes")
+    lines.append("--- | ---: | ---: | ---: | ---: | ---: | ---: | ---:")
     for key, value in sorted(groups.items()):
         if not isinstance(value, dict):
             continue
@@ -616,6 +632,7 @@ def render_group_table(title: str, groups: object, *, label_name: str) -> list[s
         displayed_latency = latency.get("median") if isinstance(latency, dict) and latency.get("median") is not None else (
             parser_latency.get("median") if isinstance(parser_latency, dict) else None
         )
+        hashes = value.get("output_hashes") if isinstance(value.get("output_hashes"), dict) else {}
         lines.append(
             " | ".join(
                 [
@@ -626,6 +643,7 @@ def render_group_table(title: str, groups: object, *, label_name: str) -> list[s
                     fmt(wall.get("median") if isinstance(wall, dict) else None),
                     fmt(displayed_latency),
                     fmt(rss.get("max") if isinstance(rss, dict) else None),
+                    fmt_hash_summary(hashes),
                 ]
             )
         )
@@ -640,6 +658,17 @@ def fmt(value: object) -> str:
     if abs(number) >= 100:
         return f"{number:.1f}"
     return f"{number:.3f}"
+
+
+def fmt_hash_summary(value: object) -> str:
+    if not isinstance(value, dict):
+        return "-"
+    count = as_int(value.get("count"))
+    distinct = as_int(value.get("distinct_count"))
+    if not count:
+        return "-"
+    status = "stable" if value.get("stable") is True else "drift"
+    return f"{status} {distinct}/{count}"
 
 
 if __name__ == "__main__":

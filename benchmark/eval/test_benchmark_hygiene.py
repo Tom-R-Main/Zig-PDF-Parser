@@ -344,6 +344,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
                         "parser_latency_ms": None,
                         "peak_rss_mb": 10.0,
                         "output_bytes": 1234,
+                        "output_sha256": "abc123",
                     }
                 )
                 + "\n",
@@ -377,11 +378,30 @@ class BenchmarkHygieneTests(unittest.TestCase):
             self.assertEqual("populate-large-corpus", report["next_actions"][0]["action_id"])
             self.assertIn("pdf-parser", report["compare"]["by_parser"])
             self.assertIn("native-text", report["profile"]["by_lane"])
+            hashes = report["profile"]["by_lane"]["native-text"]["output_hashes"]
+            self.assertEqual(1, hashes["count"])
+            self.assertEqual(1, hashes["distinct_count"])
+            self.assertTrue(hashes["stable"])
             table = table_path.read_text(encoding="utf-8")
             self.assertIn("Manifest Readiness", table)
             self.assertIn("Comparator By Parser", table)
             self.assertIn("Optimization Candidates", table)
             self.assertIn("candidate | scope | max_wall_ms | median_wall_ms", table)
+            self.assertIn("output hashes", table)
+            self.assertIn("stable 1/1", table)
+
+    def test_analyze_profile_hash_summary_detects_drift(self) -> None:
+        summary = analyze_baseline.summarize_profile_group(
+            [
+                {"status": "ok", "wall_ms": 1.0, "output_sha256": "aaa"},
+                {"status": "ok", "wall_ms": 1.1, "output_sha256": "bbb"},
+                {"status": "ok", "wall_ms": 1.2},
+            ]
+        )
+
+        self.assertEqual(2, summary["output_hashes"]["count"])
+        self.assertEqual(2, summary["output_hashes"]["distinct_count"])
+        self.assertFalse(summary["output_hashes"]["stable"])
 
     def test_run_baseline_dry_run_prints_pipeline_commands(self) -> None:
         stdout = io.StringIO()
