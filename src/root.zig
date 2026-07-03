@@ -933,7 +933,7 @@ pub const Document = struct {
                 {
                     var nw: NullWriter = .{};
                     extractContentStream(content, .{ .structured = &extractor }, &self.font_cache, page_num, scratch_allocator, &nw) catch
-                        return self.extractTextGeometric(page_num, allocator);
+                        return self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
                 }
 
                 // Collect text in structure tree order
@@ -953,7 +953,7 @@ pub const Document = struct {
 
                 if (result.items.len > 0) {
                     const structured = try result.toOwnedSlice(allocator);
-                    const stream_text = self.extractTextStreamOrder(page_num, allocator) catch
+                    const stream_text = self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content) catch
                         return self.withPageFormFields(page_num, allocator, structured);
                     defer allocator.free(stream_text);
                     // If structured covers ≥60% of stream content, trust the structure tree order
@@ -968,23 +968,23 @@ pub const Document = struct {
             }
         }
 
-        if (try self.extractTextTableAware(page_num, allocator)) |table_text| {
+        if (try self.extractTextTableAwareFromContent(page_num, allocator, scratch_allocator, content)) |table_text| {
             return self.withPageFormFields(page_num, allocator, table_text);
         }
 
         // For untagged content, prefer stream-order extraction first.
         // This generally tracks MuPDF text extraction more closely on large
         // technical PDFs, while keeping geometric extraction as a fallback.
-        const stream_text = self.extractTextStreamOrder(page_num, allocator) catch |err| {
+        const stream_text = self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content) catch |err| {
             if (err == error.OutOfMemory) return err;
-            return self.extractTextGeometric(page_num, allocator);
+            return self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
         };
         if (stream_text.len > 0) {
             return self.withPageFormFields(page_num, allocator, stream_text);
         }
 
         allocator.free(stream_text);
-        return self.withPageFormFields(page_num, allocator, try self.extractTextGeometric(page_num, allocator));
+        return self.withPageFormFields(page_num, allocator, try self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content));
     }
 
     /// Render value-bearing AcroForm fields as stable "name value" text lines.
@@ -1035,19 +1035,28 @@ pub const Document = struct {
     }
 
     fn extractTextTableAware(self: *Document, page_num: usize, allocator: std.mem.Allocator) !?[]u8 {
-        const page = self.pages.items[page_num];
-        const page_width = page.media_box[2] - page.media_box[0];
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const spans = self.extractTextWithBounds(page_num, scratch_allocator) catch |err| {
+        const content = self.getPageContentForScratch(page_num, scratch_allocator) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return null;
+        };
+        return self.extractTextTableAwareFromContent(page_num, allocator, scratch_allocator, content);
+    }
+
+    fn extractTextTableAwareFromContent(self: *Document, page_num: usize, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, content: []const u8) !?[]u8 {
+        const page = self.pages.items[page_num];
+        const page_width = page.media_box[2] - page.media_box[0];
+
+        const spans = self.extractTextWithBoundsFromContent(page_num, scratch_allocator, scratch_allocator, content) catch |err| {
             if (err == error.OutOfMemory) return err;
             return null;
         };
         if (spans.len == 0) return null;
 
-        const ruling_lines = self.getPageRulingLines(page_num, scratch_allocator) catch |err| {
+        const ruling_lines = self.getPageRulingLinesFromContent(page_num, scratch_allocator, scratch_allocator, content) catch |err| {
             if (err == error.OutOfMemory) return err;
             return null;
         };
@@ -1071,18 +1080,25 @@ pub const Document = struct {
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
 
-        const spans = self.extractTextWithBounds(page_num, scratch_allocator) catch |err| {
+        const content = self.getPageContentForScratch(page_num, scratch_allocator) catch |err| {
             // If bounds extraction fails, fall back to stream order
             if (err == error.OutOfMemory) return err;
             return self.extractTextStreamOrder(page_num, allocator);
         };
+        return self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
+    }
 
+    fn extractTextGeometricFromContent(self: *Document, page_num: usize, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, content: []const u8) ![]u8 {
+        const spans = self.extractTextWithBoundsFromContent(page_num, scratch_allocator, scratch_allocator, content) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content);
+        };
         if (spans.len == 0) {
             return allocator.alloc(u8, 0);
         }
 
         return layout.sortGeometric(allocator, spans) catch {
-            return self.extractTextStreamOrder(page_num, allocator);
+            return self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content);
         };
     }
 
@@ -1093,16 +1109,27 @@ pub const Document = struct {
         // Pre-size for typical page: ~2KB of text
         try output.ensureTotalCapacity(allocator, 2048);
 
-        const parse_allocator = self.parsing_arena.allocator();
         var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer scratch_arena.deinit();
         const scratch_allocator = scratch_arena.allocator();
-        const page = self.pages.items[page_num];
-        const content = pagetree.getPageContentsWithSecurity(parse_allocator, scratch_allocator, self.data, &self.xref_table, page, &self.object_cache, self.securityHandler()) catch return output.toOwnedSlice(allocator);
+        const content = self.getPageContentForScratch(page_num, scratch_allocator) catch return output.toOwnedSlice(allocator);
 
-        self.ensurePageFonts(page_num);
-        try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, runtime.arrayListWriter(&output, allocator));
+        try self.extractTextStreamOrderFromContentInto(page_num, scratch_allocator, content, runtime.arrayListWriter(&output, allocator));
         return output.toOwnedSlice(allocator);
+    }
+
+    fn extractTextStreamOrderFromContent(self: *Document, page_num: usize, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, content: []const u8) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        try output.ensureTotalCapacity(allocator, 2048);
+
+        try self.extractTextStreamOrderFromContentInto(page_num, scratch_allocator, content, runtime.arrayListWriter(&output, allocator));
+        return output.toOwnedSlice(allocator);
+    }
+
+    fn extractTextStreamOrderFromContentInto(self: *Document, page_num: usize, scratch_allocator: std.mem.Allocator, content: []const u8, writer: anytype) !void {
+        self.ensurePageFonts(page_num);
+        try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, writer);
     }
 
     /// Extract text from all pages using structure tree order
