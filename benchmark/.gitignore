@@ -2,9 +2,11 @@
 results/
 *.txt
 !eval/ground_truth/**/*.txt
+!eval/table_stress/ground_truth/page_text/**/*.txt
 
 # Test corpora (download separately)
 verapdf/
 eval/raw_cache/
 *.pdf
 !eval/corpus/**/*.pdf
+!eval/table_stress/corpus/**/*.pdf

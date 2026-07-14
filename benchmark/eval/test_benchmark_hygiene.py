@@ -32,6 +32,7 @@ run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
 structural_compare = load_module("structural_compare", EVAL_DIR / "structural_compare.py")
 font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
 render_oracle = load_module("render_oracle", EVAL_DIR / "render_oracle.py")
+table_compare = load_module("table_compare", EVAL_DIR / "table_compare.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
@@ -462,6 +463,139 @@ class BenchmarkHygieneTests(unittest.TestCase):
         output = io.StringIO()
 
         render_oracle.write_row(output, row)
+
+        self.assertEqual(row, json.loads(output.getvalue()))
+
+    def test_table_compare_loads_metadata_sidecar_and_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "table.pdf"
+            text_path = temp_path / "table.txt"
+            truth_path = temp_path / "table.json"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            text_path.write_text("Table truth\n", encoding="utf-8")
+            truth_path.write_text(
+                json.dumps([{"rows": [[{"text": "Amount", "role": "header"}]]}]),
+                encoding="utf-8",
+            )
+            manifest_path = temp_path / "manifest.tsv"
+            manifest_path.write_text(
+                f"financial_table_stress\tinvoice\t{pdf_path}\t{text_path}\t{truth_path}\n",
+                encoding="utf-8",
+            )
+            metadata_path = temp_path / "metadata.jsonl"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "category": "financial_table_stress",
+                        "doc_id": "invoice",
+                        "table_case_tags": ["invoice", "accounting_notation"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = table_compare.load_entries(manifest_path, ROOT)
+            truth = table_compare.load_table_truth(entries[0])
+
+        self.assertEqual("invoice", entries[0].doc_id)
+        self.assertEqual(("invoice", "accounting_notation"), entries[0].table_case_tags)
+        self.assertEqual("Amount", truth[0]["rows"][0][0]["text"])
+
+    def test_table_compare_numeric_normalization_and_metrics(self) -> None:
+        predicted = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "role": "header"},
+                        {"text": "(950)", "role": "data", "numeric": {"is_numeric": True, "value": -950.0}},
+                        {"text": "N/M", "role": "data", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+        truth = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "role": "header"},
+                        {"text": "(950)", "role": "data", "numeric": {"is_numeric": True, "value": -950.0}},
+                        {"text": "N/M", "role": "data", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertEqual(-950.0, table_compare.parse_accounting_number("(950)"))
+        self.assertIsNone(table_compare.parse_accounting_number("N/M"))
+        self.assertEqual(1.0, metrics["cell_text_accuracy"])
+        self.assertEqual(1.0, metrics["numeric_accuracy"])
+
+    def test_table_compare_numeric_accuracy_aligns_asymmetric_annotations_by_cell(self) -> None:
+        predicted = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "numeric": {"is_numeric": False, "value": None}},
+                        {"text": "1,200", "numeric": {"is_numeric": True, "value": 1200.0}},
+                        {"text": "Memo", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+        truth = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount"},
+                        {"text": "1,200", "numeric": {"is_numeric": True, "value": 1200.0}},
+                        {"text": "Memo"},
+                    ]
+                ]
+            }
+        ]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertEqual(1.0, metrics["numeric_accuracy"])
+
+    def test_table_compare_bbox_iou(self) -> None:
+        predicted = [{"bbox": [0, 0, 10, 10], "rows": []}]
+        truth = [{"bbox": [5, 0, 15, 10], "rows": []}]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertAlmostEqual(1.0 / 3.0, metrics["bbox_iou"])
+
+    def test_table_compare_skipped_baseline_record_is_stable(self) -> None:
+        entry = table_compare.Entry(
+            category="financial_table_stress",
+            doc_id="invoice",
+            pdf_path=Path("/tmp/invoice.pdf"),
+            truth_text_path=None,
+            table_truth_path=None,
+            table_case_tags=("invoice",),
+        )
+
+        row = table_compare.skipped(entry, "pymupdf-find-tables", "PyMuPDF is not installed")
+
+        self.assertEqual("table_compare_result", row["record_type"])
+        self.assertEqual("0.1.0", row["table_compare_schema_version"])
+        self.assertEqual("skipped", row["status"])
+        self.assertEqual(["invoice"], row["table_case_tags"])
+
+    def test_table_compare_jsonl_rows_parse_line_by_line(self) -> None:
+        row = {
+            "record_type": "table_compare_result",
+            "table_compare_schema_version": "0.1.0",
+            "status": "ok",
+        }
+        output = io.StringIO()
+
+        table_compare.write_row(output, row)
 
         self.assertEqual(row, json.loads(output.getvalue()))
 

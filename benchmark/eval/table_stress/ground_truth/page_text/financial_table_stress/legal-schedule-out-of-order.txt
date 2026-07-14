@@ -1,0 +1,5 @@
+Schedule A
+Clause Party Amount Notes
+1.1 Seller 1,000 Escrow release
+2.4 Buyer N/M Subject to audit
+3.2 Seller (250) Credit memo

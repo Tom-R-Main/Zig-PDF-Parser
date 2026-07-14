@@ -1,0 +1,5 @@
+Bank Activity
+Date Description Debit Credit Balance
+01/02 Payroll ACME 2,450 4,100
+01/03 Rent (1,200) 2,900
+01/05 Card Services (86.35) 2,813.65

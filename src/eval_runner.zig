@@ -289,8 +289,15 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
     var table_page_accuracy: ?f64 = null;
     var table_continuation_accuracy: ?f64 = null;
     var table_source_span_coverage: ?f64 = null;
+    var table_bbox_iou: ?f64 = null;
+    var table_numeric_accuracy: ?f64 = null;
+    var table_header_accuracy: ?f64 = null;
+    var table_footnote_accuracy: ?f64 = null;
     if (truth_table_json) |truth_json| {
-        const predicted_table_json = try renderDocumentTablesJson(allocator, doc);
+        const predicted_table_json = if (extraction.adaptive) |*adaptive_result|
+            try renderAdaptiveTablesJson(allocator, adaptive_result.tables)
+        else
+            try renderDocumentTablesJson(allocator, doc);
         defer allocator.free(predicted_table_json);
         table_cell_accuracy = try evaluateTableCellAccuracy(allocator, predicted_table_json, truth_json);
         table_span_accuracy = try evaluateTableSpanAccuracy(allocator, predicted_table_json, truth_json);
@@ -299,6 +306,10 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
         table_colspan_accuracy = try evaluateTableIntegerFieldAccuracy(allocator, predicted_table_json, truth_json, "\"colspan\"");
         table_page_accuracy = try evaluateTableIntegerFieldAccuracy(allocator, predicted_table_json, truth_json, "\"page\"");
         table_continuation_accuracy = try evaluateTableContinuationAccuracy(allocator, predicted_table_json, truth_json);
+        table_bbox_iou = try evaluateTableBBoxIou(allocator, predicted_table_json, truth_json);
+        table_numeric_accuracy = try evaluateTableNumericAccuracy(allocator, predicted_table_json, truth_json);
+        table_header_accuracy = try evaluateTableRoleTextAccuracy(allocator, predicted_table_json, truth_json, &.{"header"});
+        table_footnote_accuracy = try evaluateTableRoleTextAccuracy(allocator, predicted_table_json, truth_json, &.{ "note", "footer" });
         if (extraction.adaptive) |*adaptive_result| {
             const artifact_json = try zpdf.schema.renderArtifactJson(allocator, adaptive_result, .{ .document_id = docIdForMetrics(options, pdf_path) });
             defer allocator.free(artifact_json);
@@ -380,6 +391,10 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
             .page_accuracy = table_page_accuracy,
             .continuation_accuracy = table_continuation_accuracy,
             .source_span_coverage = table_source_span_coverage,
+            .bbox_iou = table_bbox_iou,
+            .numeric_accuracy = table_numeric_accuracy,
+            .header_accuracy = table_header_accuracy,
+            .footnote_accuracy = table_footnote_accuracy,
         },
         .formula = formula_metrics,
         .form = form_metrics,
@@ -513,6 +528,77 @@ fn renderDocumentTablesJson(allocator: std.mem.Allocator, doc: *zpdf.Document) !
     try writer.writeByte(']');
 
     return out.toOwnedSlice(allocator);
+}
+
+fn renderAdaptiveTablesJson(allocator: std.mem.Allocator, tables: []const layout.TableGrid) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const writer = runtime.arrayListWriter(&out, allocator);
+
+    try writer.writeByte('[');
+    for (tables, 0..) |table, table_index| {
+        if (table_index > 0) try writer.writeByte(',');
+        const logical_index = table.logical_table_index orelse @as(u32, @intCast(table_index));
+        try writer.print(
+            "{{\"table_id\":\"table-{d}\",\"logical_table_id\":\"logical-table-{d}\",\"table_index\":{},\"table_part_index\":{},\"continued_from_table_id\":",
+            .{ table_index, logical_index, table_index, table.table_part_index },
+        );
+        try writeOptionalTableId(writer, table.continued_from_table_index);
+        try writer.writeAll(",\"continued_to_table_id\":");
+        try writeOptionalTableId(writer, table.continued_to_table_index);
+        try writer.print(
+            ",\"page_index\":{},\"block_index\":{},\"block_count\":{},\"column_count\":{},\"confidence\":{d:.3},\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"source_span_ids\":[],\"rows\":[",
+            .{ table.page_index, table.block_index, table.block_count, table.column_count, table.confidence, table.bounds.x0, table.bounds.y0, table.bounds.x1, table.bounds.y1 },
+        );
+        for (table.rows, 0..) |row, row_index| {
+            if (row_index > 0) try writer.writeByte(',');
+            try writer.writeByte('[');
+            var wrote_cell = false;
+            for (row.cells) |cell| {
+                if (cell.text.len == 0) continue;
+                if (wrote_cell) try writer.writeByte(',');
+                wrote_cell = true;
+                try writer.print(
+                    "{{\"cell_id\":\"table-{d}-cell-{d}-{d}\",\"page\":{},\"page_index\":{},\"row\":{},\"column\":{},\"rowspan\":{},\"colspan\":{},\"role\":\"{s}\",\"text\":\"",
+                    .{ table_index, cell.row_index, cell.column_index, cell.bounds.page_index, cell.bounds.page_index, cell.row_index, cell.column_index, cell.rowspan, cell.colspan, tableCellRoleName(cell.role) },
+                );
+                try writeJsonEscaped(writer, cell.text);
+                try writer.writeAll("\",\"raw_text\":\"");
+                try writeJsonEscaped(writer, cell.text);
+                try writer.writeAll("\",\"normalized_text\":\"");
+                try writeNormalizedJsonEscaped(writer, cell.text);
+                try writer.writeAll("\",\"numeric\":");
+                try writeNumericHint(writer, cell.text);
+                try writer.print(
+                    ",\"bbox\":[{d:.2},{d:.2},{d:.2},{d:.2}],\"source_span_ids\":[]}}",
+                    .{ cell.bounds.x0, cell.bounds.y0, cell.bounds.x1, cell.bounds.y1 },
+                );
+            }
+            try writer.writeByte(']');
+        }
+        try writer.writeAll("]}");
+    }
+    try writer.writeByte(']');
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn tableCellRoleName(role: layout.TableCellRole) []const u8 {
+    return switch (role) {
+        .data => "data",
+        .header => "header",
+        .row_header => "row_header",
+        .note => "note",
+        .footer => "footer",
+    };
+}
+
+fn writeOptionalTableId(writer: anytype, table_index: ?u32) !void {
+    if (table_index) |index| {
+        try writer.print("\"table-{d}\"", .{index});
+    } else {
+        try writer.writeAll("null");
+    }
 }
 
 fn renderDocumentFormsJson(allocator: std.mem.Allocator, doc: *zpdf.Document) ![]u8 {
@@ -751,6 +837,82 @@ fn evaluateTableContinuationAccuracy(allocator: std.mem.Allocator, predicted_jso
     return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(denominator));
 }
 
+const TableBBox = struct {
+    x0: f64,
+    y0: f64,
+    x1: f64,
+    y1: f64,
+};
+
+fn evaluateTableBBoxIou(allocator: std.mem.Allocator, predicted_json: []const u8, truth_json: []const u8) !?f64 {
+    if (std.mem.indexOf(u8, truth_json, "\"bbox\"") == null) return null;
+    const predicted = try extractBBoxes(allocator, predicted_json);
+    defer allocator.free(predicted);
+    const truth = try extractBBoxes(allocator, truth_json);
+    defer allocator.free(truth);
+    if (truth.len == 0) return if (predicted.len == 0) @as(f64, 1.0) else @as(f64, 0.0);
+
+    const count = @min(predicted.len, truth.len);
+    if (count == 0) return 0.0;
+    var total: f64 = 0;
+    for (0..count) |index| total += bboxIou(predicted[index], truth[index]);
+    return total / @as(f64, @floatFromInt(@max(predicted.len, truth.len)));
+}
+
+fn evaluateTableNumericAccuracy(allocator: std.mem.Allocator, predicted_json: []const u8, truth_json: []const u8) !?f64 {
+    if (std.mem.indexOf(u8, truth_json, "\"numeric\"") == null) return null;
+    const predicted = try extractNumericValues(allocator, predicted_json);
+    defer allocator.free(predicted);
+    const truth = try extractNumericValues(allocator, truth_json);
+    defer allocator.free(truth);
+    if (truth.len == 0) return if (predicted.len == 0) @as(f64, 1.0) else @as(f64, 0.0);
+
+    var matched: usize = 0;
+    const compare_count = @min(predicted.len, truth.len);
+    for (0..compare_count) |index| {
+        if (@abs(predicted[index] - truth[index]) <= 0.0001) matched += 1;
+    }
+    return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(@max(predicted.len, truth.len)));
+}
+
+fn evaluateTableRoleTextAccuracy(
+    allocator: std.mem.Allocator,
+    predicted_json: []const u8,
+    truth_json: []const u8,
+    roles: []const []const u8,
+) !?f64 {
+    if (std.mem.indexOf(u8, truth_json, "\"role\"") == null) return null;
+
+    const predicted_texts = try extractTableCellTexts(allocator, predicted_json);
+    defer freeStringList(allocator, predicted_texts);
+    const predicted_roles = try extractJsonStringValues(allocator, predicted_json, "\"role\"");
+    defer freeStringList(allocator, predicted_roles);
+    const truth_texts = try extractTableCellTexts(allocator, truth_json);
+    defer freeStringList(allocator, truth_texts);
+    const truth_roles = try extractJsonStringValues(allocator, truth_json, "\"role\"");
+    defer freeStringList(allocator, truth_roles);
+
+    const truth_count = @min(truth_texts.len, truth_roles.len);
+    var total: usize = 0;
+    var matched: usize = 0;
+    for (0..truth_count) |index| {
+        if (!roleInSet(truth_roles[index], roles)) continue;
+        total += 1;
+        if (index >= predicted_texts.len or index >= predicted_roles.len) continue;
+        if (!roleInSet(predicted_roles[index], roles)) continue;
+        if (std.mem.eql(u8, predicted_texts[index], truth_texts[index])) matched += 1;
+    }
+    if (total == 0) return null;
+    return @as(f64, @floatFromInt(matched)) / @as(f64, @floatFromInt(total));
+}
+
+fn roleInSet(role: []const u8, roles: []const []const u8) bool {
+    for (roles) |candidate| {
+        if (std.mem.eql(u8, role, candidate)) return true;
+    }
+    return false;
+}
+
 fn extractContinuationValues(allocator: std.mem.Allocator, json: []const u8) ![][]u8 {
     const logical = try extractJsonStringValues(allocator, json, "\"logical_table_id\"");
     errdefer freeStringList(allocator, logical);
@@ -766,6 +928,139 @@ fn extractContinuationValues(allocator: std.mem.Allocator, json: []const u8) ![]
     for (continued) |value| try values.append(allocator, value);
     allocator.free(logical);
     allocator.free(continued);
+    return values.toOwnedSlice(allocator);
+}
+
+fn extractBBoxes(allocator: std.mem.Allocator, json: []const u8) ![]TableBBox {
+    var boxes: std.ArrayList(TableBBox) = .empty;
+    errdefer boxes.deinit(allocator);
+    var pos: usize = 0;
+    var object_depth: usize = 0;
+    while (pos < json.len) {
+        switch (json[pos]) {
+            '{' => {
+                object_depth += 1;
+                pos += 1;
+                continue;
+            },
+            '}' => {
+                object_depth -|= 1;
+                pos += 1;
+                continue;
+            },
+            '"' => {},
+            else => {
+                pos += 1;
+                continue;
+            },
+        }
+
+        const key_start = pos;
+        pos += 1;
+        var escaped = false;
+        while (pos < json.len) : (pos += 1) {
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (json[pos] == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (json[pos] == '"') break;
+        }
+        if (pos >= json.len) break;
+        pos += 1;
+
+        if (object_depth != 1 or !std.mem.eql(u8, json[key_start..pos], "\"bbox\"")) continue;
+        while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
+        if (pos >= json.len or json[pos] != ':') continue;
+        pos += 1;
+        while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
+        if (pos < json.len and json[pos] == '[') {
+            if (parseBBoxArray(json, pos)) |parsed| {
+                try boxes.append(allocator, parsed.box);
+                pos = parsed.end;
+                continue;
+            }
+        } else if (pos < json.len and json[pos] == '{') {
+            if (parseBBoxObject(json, pos)) |parsed| {
+                try boxes.append(allocator, parsed.box);
+                pos = parsed.end;
+                continue;
+            }
+        }
+    }
+    return boxes.toOwnedSlice(allocator);
+}
+
+const ParsedBBox = struct {
+    box: TableBBox,
+    end: usize,
+};
+
+fn parseBBoxArray(json: []const u8, start: usize) ?ParsedBBox {
+    var pos = start + 1;
+    var values: [4]f64 = undefined;
+    for (0..4) |index| {
+        skipJsonSpace(json, &pos);
+        values[index] = parseJsonFloatAt(json, &pos) orelse return null;
+        skipJsonSpace(json, &pos);
+        if (index < 3) {
+            if (pos >= json.len or json[pos] != ',') return null;
+            pos += 1;
+        }
+    }
+    skipJsonSpace(json, &pos);
+    if (pos >= json.len or json[pos] != ']') return null;
+    return .{ .box = .{ .x0 = values[0], .y0 = values[1], .x1 = values[2], .y1 = values[3] }, .end = pos + 1 };
+}
+
+fn parseBBoxObject(json: []const u8, start: usize) ?ParsedBBox {
+    const end = std.mem.indexOfScalarPos(u8, json, start, '}') orelse return null;
+    const object = json[start .. end + 1];
+    return .{
+        .box = .{
+            .x0 = extractJsonFloatValue(object, "\"x0\"") orelse return null,
+            .y0 = extractJsonFloatValue(object, "\"y0\"") orelse return null,
+            .x1 = extractJsonFloatValue(object, "\"x1\"") orelse return null,
+            .y1 = extractJsonFloatValue(object, "\"y1\"") orelse return null,
+        },
+        .end = end + 1,
+    };
+}
+
+fn bboxIou(a: TableBBox, b: TableBBox) f64 {
+    const ix0 = @max(a.x0, b.x0);
+    const iy0 = @max(a.y0, b.y0);
+    const ix1 = @min(a.x1, b.x1);
+    const iy1 = @min(a.y1, b.y1);
+    const intersection = @max(0.0, ix1 - ix0) * @max(0.0, iy1 - iy0);
+    const union_area = bboxArea(a) + bboxArea(b) - intersection;
+    if (union_area <= 0) return 0;
+    return intersection / union_area;
+}
+
+fn bboxArea(box: TableBBox) f64 {
+    return @max(0.0, box.x1 - box.x0) * @max(0.0, box.y1 - box.y0);
+}
+
+fn extractNumericValues(allocator: std.mem.Allocator, json: []const u8) ![]f64 {
+    var values: std.ArrayList(f64) = .empty;
+    errdefer values.deinit(allocator);
+    var cursor: usize = 0;
+    while (std.mem.indexOf(u8, json[cursor..], "\"numeric\"")) |relative_index| {
+        const numeric_start = cursor + relative_index;
+        const object_start = std.mem.indexOfScalarPos(u8, json, numeric_start, '{') orelse break;
+        const object_end = std.mem.indexOfScalarPos(u8, json, object_start, '}') orelse break;
+        const object = json[object_start .. object_end + 1];
+        if (jsonBoolValue(object, "\"is_numeric\"") == true) {
+            if (extractJsonFloatValue(object, "\"value\"")) |value| {
+                try values.append(allocator, value);
+            }
+        }
+        cursor = object_end + 1;
+    }
     return values.toOwnedSlice(allocator);
 }
 
@@ -1070,6 +1365,172 @@ fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
     }
 }
 
+fn writeNormalizedJsonEscaped(writer: anytype, text: []const u8) !void {
+    var previous_space = true;
+    for (text) |byte| {
+        if (std.ascii.isWhitespace(byte)) {
+            if (!previous_space) {
+                try writer.writeByte(' ');
+                previous_space = true;
+            }
+        } else {
+            try writeJsonEscapedByte(writer, byte);
+            previous_space = false;
+        }
+    }
+}
+
+fn writeJsonEscapedByte(writer: anytype, byte: u8) !void {
+    switch (byte) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        '\x08' => try writer.writeAll("\\b"),
+        '\x0c' => try writer.writeAll("\\f"),
+        else => {
+            if (byte < 0x20) {
+                try writer.print("\\u00{X:0>2}", .{byte});
+            } else {
+                try writer.writeByte(byte);
+            }
+        },
+    }
+}
+
+fn writeNumericHint(writer: anytype, text: []const u8) !void {
+    if (parseNumericCell(text)) |numeric| {
+        try writer.print(
+            "{{\"is_numeric\":true,\"value\":{d:.6},\"negative\":{},\"format\":\"{s}\"}}",
+            .{ numeric.value, numeric.negative, numeric.format },
+        );
+    } else {
+        try writer.writeAll("{\"is_numeric\":false,\"value\":null,\"negative\":false,\"format\":null}");
+    }
+}
+
+const NumericCell = struct {
+    value: f64,
+    negative: bool,
+    format: []const u8,
+};
+
+fn parseNumericCell(text: []const u8) ?NumericCell {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0 or trimmed.len > 96) return null;
+    if (std.ascii.eqlIgnoreCase(trimmed, "N/M") or
+        std.ascii.eqlIgnoreCase(trimmed, "NM") or
+        std.mem.eql(u8, trimmed, "--") or
+        std.mem.eql(u8, trimmed, "-") or
+        std.mem.eql(u8, trimmed, "\xE2\x80\x94"))
+    {
+        return null;
+    }
+
+    var buf: [128]u8 = undefined;
+    var len: usize = 0;
+    var saw_digit = false;
+    var negative = false;
+    var paren_negative = false;
+    var minus_negative = false;
+    var percent = false;
+
+    for (trimmed, 0..) |byte, index| {
+        switch (byte) {
+            '0'...'9' => {
+                saw_digit = true;
+                buf[len] = byte;
+                len += 1;
+            },
+            '.' => {
+                buf[len] = byte;
+                len += 1;
+            },
+            ',', ' ', '\t', '$' => {},
+            '%' => percent = true,
+            '(' => {
+                if (index != 0) return null;
+                negative = true;
+                paren_negative = true;
+            },
+            ')' => {
+                var tail_index = index + 1;
+                while (tail_index < trimmed.len and std.ascii.isWhitespace(trimmed[tail_index])) : (tail_index += 1) {}
+                if (!paren_negative or tail_index != trimmed.len) return null;
+            },
+            '-' => {
+                if (len != 0) return null;
+                negative = true;
+                minus_negative = true;
+            },
+            '+' => {
+                if (len != 0) return null;
+            },
+            else => return null,
+        }
+        if (len >= buf.len) return null;
+    }
+    if (!saw_digit or len == 0) return null;
+    const parsed = std.fmt.parseFloat(f64, buf[0..len]) catch return null;
+    const value = if (percent) parsed / 100.0 else parsed;
+    return .{
+        .value = if (negative) -value else value,
+        .negative = negative,
+        .format = if (percent) "percent" else if (paren_negative) "parentheses" else if (minus_negative) "minus" else "plain",
+    };
+}
+
+fn skipJsonSpace(json: []const u8, pos: *usize) void {
+    while (pos.* < json.len and std.ascii.isWhitespace(json[pos.*])) : (pos.* += 1) {}
+}
+
+fn parseJsonFloatAt(json: []const u8, pos: *usize) ?f64 {
+    const start = pos.*;
+    if (pos.* < json.len and (json[pos.*] == '-' or json[pos.*] == '+')) pos.* += 1;
+    var saw_digit = false;
+    while (pos.* < json.len and std.ascii.isDigit(json[pos.*])) : (pos.* += 1) saw_digit = true;
+    if (pos.* < json.len and json[pos.*] == '.') {
+        pos.* += 1;
+        while (pos.* < json.len and std.ascii.isDigit(json[pos.*])) : (pos.* += 1) saw_digit = true;
+    }
+    if (!saw_digit) {
+        pos.* = start;
+        return null;
+    }
+    if (pos.* < json.len and (json[pos.*] == 'e' or json[pos.*] == 'E')) {
+        const exponent_start = pos.*;
+        pos.* += 1;
+        if (pos.* < json.len and (json[pos.*] == '-' or json[pos.*] == '+')) pos.* += 1;
+        const digits_start = pos.*;
+        while (pos.* < json.len and std.ascii.isDigit(json[pos.*])) : (pos.* += 1) {}
+        if (pos.* == digits_start) pos.* = exponent_start;
+    }
+    return std.fmt.parseFloat(f64, json[start..pos.*]) catch null;
+}
+
+fn extractJsonFloatValue(json: []const u8, needle: []const u8) ?f64 {
+    const found = std.mem.indexOf(u8, json, needle) orelse return null;
+    var pos = found + needle.len;
+    skipJsonSpace(json, &pos);
+    if (pos >= json.len or json[pos] != ':') return null;
+    pos += 1;
+    skipJsonSpace(json, &pos);
+    return parseJsonFloatAt(json, &pos);
+}
+
+fn jsonBoolValue(json: []const u8, needle: []const u8) ?bool {
+    const found = std.mem.indexOf(u8, json, needle) orelse return null;
+    var pos = found + needle.len;
+    skipJsonSpace(json, &pos);
+    if (pos >= json.len or json[pos] != ':') return null;
+    pos += 1;
+    skipJsonSpace(json, &pos);
+    if (std.mem.startsWith(u8, json[pos..], "true")) return true;
+    if (std.mem.startsWith(u8, json[pos..], "false")) return false;
+    return null;
+}
+
 fn parseArgs(args: []const []const u8) !Options {
     var options: Options = .{};
     var index: usize = 0;
@@ -1260,7 +1721,8 @@ fn printUsage() !void {
         \\Categories:
         \\  clean_born_digital, academic_two_column, scientific_math,
         \\  scanned_typewritten, patents, financial_tables, legal_contracts,
-        \\  manuals, forms, weird_fonts, visual_truth, adversarial_corrupt
+        \\  manuals, forms, weird_fonts, visual_truth, financial_table_stress,
+        \\  adversarial_corrupt
         \\
     );
 }
@@ -1497,6 +1959,77 @@ test "table role accuracy compares role sequence when truth has roles" {
     const accuracy = try evaluateTableRoleAccuracy(std.testing.allocator, predicted, truth);
     try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), accuracy.?, 0.0001);
     try std.testing.expect((try evaluateTableRoleAccuracy(std.testing.allocator, predicted, "[{\"text\":\"Account\"}]")) == null);
+}
+
+test "table bbox metric compares array and object boxes" {
+    const predicted =
+        \\[
+        \\  {"bbox":[0,0,10,10],"rows":[[{"bbox":[50,50,60,60]}]]},
+        \\  {"bbox":{"x0":10,"y0":0,"x1":20,"y1":10},"rows":[[{"bbox":[70,70,80,80]}]]}
+        \\]
+    ;
+    const truth =
+        \\[
+        \\  {"bbox":[0,0,10,10],"rows":[[{"bbox":[0,0,1,1]}]]},
+        \\  {"bbox":{"x0":15,"y0":0,"x1":25,"y1":10},"rows":[[{"bbox":[2,2,3,3]}]]}
+        \\]
+    ;
+
+    const score = try evaluateTableBBoxIou(std.testing.allocator, predicted, truth);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), score.?, 0.0001);
+    try std.testing.expect((try evaluateTableBBoxIou(std.testing.allocator, predicted, "[{\"text\":\"Account\"}]")) == null);
+}
+
+test "table numeric accuracy compares accounting numeric hints" {
+    const predicted =
+        \\[
+        \\  {"numeric":{"is_numeric":true,"value":1200.0}},
+        \\  {"numeric":{"is_numeric":true,"value":-950.0}},
+        \\  {"numeric":{"is_numeric":false,"value":null}}
+        \\]
+    ;
+    const truth =
+        \\[
+        \\  {"numeric":{"is_numeric":true,"value":1200.0}},
+        \\  {"numeric":{"is_numeric":true,"value":-950.0}},
+        \\  {"numeric":{"is_numeric":true,"value":0.0}}
+        \\]
+    ;
+
+    const score = try evaluateTableNumericAccuracy(std.testing.allocator, predicted, truth);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0 / 3.0), score.?, 0.0001);
+    try std.testing.expect(parseNumericCell("$1,200.50").?.value == 1200.5);
+    try std.testing.expect(parseNumericCell("(950)").?.value == -950.0);
+    try std.testing.expect(parseNumericCell("-12%").?.value == -0.12);
+    try std.testing.expect(parseNumericCell("--") == null);
+    try std.testing.expect(parseNumericCell("N/M") == null);
+}
+
+test "table header and footnote accuracy use role-filtered text" {
+    const predicted =
+        \\[
+        \\  {"text":"Account","role":"header"},
+        \\  {"text":"Amount","role":"header"},
+        \\  {"text":"Cash","role":"row_header"},
+        \\  {"text":"* excludes transfers","role":"note"}
+        \\]
+    ;
+    const truth =
+        \\[
+        \\  {"text":"Account","role":"header"},
+        \\  {"text":"Amount","role":"header"},
+        \\  {"text":"Cash","role":"row_header"},
+        \\  {"text":"* excludes fees","role":"note"}
+        \\]
+    ;
+
+    const header = try evaluateTableRoleTextAccuracy(std.testing.allocator, predicted, truth, &.{"header"});
+    const footnote = try evaluateTableRoleTextAccuracy(std.testing.allocator, predicted, truth, &.{ "note", "footer" });
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), header.?, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), footnote.?, 0.0001);
 }
 
 test "formula structure accuracy compares page and text sequence" {

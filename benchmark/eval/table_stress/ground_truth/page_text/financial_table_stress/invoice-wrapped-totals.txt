@@ -1,0 +1,7 @@
+Invoice 1007
+Item Description Qty Unit Total
+A-1 Implementation services 2 1,250 2,500
+B-9 Support retainer 1 850 850
+Subtotal 3,350
+Tax 268
+Total 3,618

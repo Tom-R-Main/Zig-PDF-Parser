@@ -1,0 +1,56 @@
+[
+  {
+    "logical_table_id": "logical-table-0",
+    "table_part_index": 0,
+    "continued_to_table_id": "table-1",
+    "page_index": 0,
+    "bbox": [72, 628, 412, 724],
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "page": 0 },
+        { "text": "2025", "role": "header", "page": 0 },
+        { "text": "2024", "role": "header", "page": 0 }
+      ],
+      [
+        { "text": "Revenue", "role": "row_header", "page": 0, "numeric": { "is_numeric": false, "value": null } },
+        { "text": "12,450", "role": "data", "page": 0, "numeric": { "is_numeric": true, "value": 12450.0 } },
+        { "text": "11,200", "role": "data", "page": 0, "numeric": { "is_numeric": true, "value": 11200.0 } }
+      ],
+      [
+        { "text": "Cost of revenue", "role": "row_header", "page": 0 },
+        { "text": "(7,100)", "role": "data", "page": 0, "numeric": { "is_numeric": true, "value": -7100.0 } },
+        { "text": "(6,850)", "role": "data", "page": 0, "numeric": { "is_numeric": true, "value": -6850.0 } }
+      ],
+      [
+        { "text": "See note 1", "role": "note", "page": 0, "colspan": 3 }
+      ]
+    ]
+  },
+  {
+    "logical_table_id": "logical-table-0",
+    "table_part_index": 1,
+    "continued_from_table_id": "table-0",
+    "page_index": 1,
+    "bbox": [72, 628, 412, 724],
+    "rows": [
+      [
+        { "text": "Account", "role": "header", "page": 1 },
+        { "text": "2025", "role": "header", "page": 1 },
+        { "text": "2024", "role": "header", "page": 1 }
+      ],
+      [
+        { "text": "Operating income", "role": "row_header", "page": 1 },
+        { "text": "2,300", "role": "data", "page": 1, "numeric": { "is_numeric": true, "value": 2300.0 } },
+        { "text": "1,950", "role": "data", "page": 1, "numeric": { "is_numeric": true, "value": 1950.0 } }
+      ],
+      [
+        { "text": "Net income", "role": "footer", "page": 1 },
+        { "text": "1,700", "role": "footer", "page": 1, "numeric": { "is_numeric": true, "value": 1700.0 } },
+        { "text": "1,420", "role": "footer", "page": 1, "numeric": { "is_numeric": true, "value": 1420.0 } }
+      ],
+      [
+        { "text": "See note 2", "role": "note", "page": 1, "colspan": 3 }
+      ]
+    ]
+  }
+]

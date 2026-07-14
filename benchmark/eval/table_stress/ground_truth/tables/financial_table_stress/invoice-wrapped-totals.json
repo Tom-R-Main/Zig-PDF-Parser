@@ -1,0 +1,39 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Item", "role": "header" },
+        { "text": "Description", "role": "header" },
+        { "text": "Qty", "role": "header" },
+        { "text": "Unit", "role": "header" },
+        { "text": "Total", "role": "header" }
+      ],
+      [
+        { "text": "A-1", "role": "row_header" },
+        { "text": "Implementation services", "role": "data" },
+        { "text": "2", "role": "data", "numeric": { "is_numeric": true, "value": 2.0 } },
+        { "text": "1,250", "role": "data", "numeric": { "is_numeric": true, "value": 1250.0 } },
+        { "text": "2,500", "role": "data", "numeric": { "is_numeric": true, "value": 2500.0 } }
+      ],
+      [
+        { "text": "B-9", "role": "row_header" },
+        { "text": "Support retainer", "role": "data" },
+        { "text": "1", "role": "data", "numeric": { "is_numeric": true, "value": 1.0 } },
+        { "text": "850", "role": "data", "numeric": { "is_numeric": true, "value": 850.0 } },
+        { "text": "850", "role": "data", "numeric": { "is_numeric": true, "value": 850.0 } }
+      ],
+      [
+        { "text": "Subtotal", "role": "footer" },
+        { "text": "3,350", "role": "footer", "numeric": { "is_numeric": true, "value": 3350.0 } }
+      ],
+      [
+        { "text": "Tax", "role": "footer" },
+        { "text": "268", "role": "footer", "numeric": { "is_numeric": true, "value": 268.0 } }
+      ],
+      [
+        { "text": "Total", "role": "footer" },
+        { "text": "3,618", "role": "footer", "numeric": { "is_numeric": true, "value": 3618.0 } }
+      ]
+    ]
+  }
+]

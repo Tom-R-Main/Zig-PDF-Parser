@@ -1,0 +1,6 @@
+# id	category	kind	url_or_local_note	source_id	cache_path	derive_recipe	license_status	notes
+sec-statement-source	financial_table_stress	source	https://www.sec.gov/Archives/		benchmark/eval/raw_cache/table_stress/sec-statement-source.pdf	page-window:redacted	public SEC filing	Use public filing page windows for continuation, footnotes, and financial statements.
+bank-statement-private	financial_table_stress	source	local-private-redacted		benchmark/eval/raw_cache/table_stress/bank-statement-private.pdf	redact-and-reduce	private/redacted	Only commit reduced/redacted derivatives when redistribution is clear.
+invoice-public-sample	financial_table_stress	source	public-or-local-invoice-sample		benchmark/eval/raw_cache/table_stress/invoice-public-sample.pdf	page-window:redacted	varies	Model wrapped descriptions, subtotals, taxes, and total rows.
+procurement-public-sample	financial_table_stress	source	public-procurement-table		benchmark/eval/raw_cache/table_stress/procurement-public-sample.pdf	page-window:redacted	public-source-dependent	Model nested bid headers and mixed units/prices.
+legal-schedule-private	financial_table_stress	source	local-private-redacted		benchmark/eval/raw_cache/table_stress/legal-schedule-private.pdf	redact-and-reduce	private/redacted	Model long labels and cells drawn out of content-stream order.

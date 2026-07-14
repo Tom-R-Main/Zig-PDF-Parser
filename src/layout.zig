@@ -603,7 +603,9 @@ pub fn analyzeLayoutWithRulings(
     }
 
     const total_lines = left_only + right_only + both_columns;
-    const is_two_column = both_columns > total_lines / 3; // >33% of lines have both columns
+    const table_like_rows = countTableLikeRowsInSpans(sorted, line_threshold);
+    const table_heavy_page = table_like_rows >= 2 and table_like_rows * 2 >= total_lines;
+    const is_two_column = !table_heavy_page and both_columns > total_lines / 3; // >33% of non-table-heavy lines have both columns
 
     var result_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len);
 
@@ -745,6 +747,47 @@ pub fn analyzeLayoutWithRulings(
         .body_font_size = body_font_size,
         .allocator = allocator,
     };
+}
+
+fn countTableLikeRowsInSpans(sorted: []const TextSpan, line_threshold: f64) usize {
+    if (sorted.len == 0) return 0;
+    var count: usize = 0;
+    var row_start: usize = 0;
+    var current_y = sorted[0].y0;
+    for (sorted, 0..) |span, index| {
+        if (@abs(span.y0 - current_y) <= line_threshold) continue;
+        if (spanRowLooksLikeTable(sorted[row_start..index])) count += 1;
+        row_start = index;
+        current_y = span.y0;
+    }
+    if (spanRowLooksLikeTable(sorted[row_start..])) count += 1;
+    return count;
+}
+
+fn spanRowLooksLikeTable(row: []const TextSpan) bool {
+    if (row.len < 3) return false;
+    var numeric_spans: usize = 0;
+    var wide_gaps: usize = 0;
+    var prev_x1 = row[0].x1;
+    const font_size = @max(1.0, row[0].font_size);
+
+    for (row, 0..) |span, index| {
+        if (spanHasDigit(span)) numeric_spans += 1;
+        if (index > 0) {
+            const gap = span.x0 - prev_x1;
+            if (gap > font_size * 1.8) wide_gaps += 1;
+        }
+        prev_x1 = span.x1;
+    }
+
+    return wide_gaps >= 2 or numeric_spans * 2 >= row.len;
+}
+
+fn spanHasDigit(span: TextSpan) bool {
+    for (span.text) |byte| {
+        if (std.ascii.isDigit(byte)) return true;
+    }
+    return false;
 }
 
 /// Detect paragraphs by analyzing line spacing and indentation
@@ -2144,19 +2187,23 @@ fn lineLooksLikeTable(line: *const TextLine) bool {
     if (line.words.len < 3) return false;
 
     var numeric_words: usize = 0;
-    var wide_gaps: usize = 0;
-    var prev_x1 = line.words[0].bounds.x1;
-
-    for (line.words, 0..) |word, i| {
+    for (line.words) |word| {
         if (wordHasDigit(word)) numeric_words += 1;
-        if (i > 0) {
-            const gap = word.bounds.x0 - prev_x1;
-            if (gap > line.bounds.font_size * 1.8) wide_gaps += 1;
-        }
-        prev_x1 = word.bounds.x1;
     }
 
-    return wide_gaps >= 2 or numeric_words * 2 >= line.words.len;
+    return lineWideGapCount(line) >= 2 or numeric_words * 2 >= line.words.len;
+}
+
+fn lineWideGapCount(line: *const TextLine) usize {
+    if (line.words.len < 2) return 0;
+    var wide_gaps: usize = 0;
+    var prev_x1 = line.words[0].bounds.x1;
+    for (line.words[1..]) |word| {
+        const gap = word.bounds.x0 - prev_x1;
+        if (gap > line.bounds.font_size * 1.8) wide_gaps += 1;
+        prev_x1 = word.bounds.x1;
+    }
+    return wide_gaps;
 }
 
 fn wordHasDigit(word: TextWord) bool {
@@ -2310,6 +2357,33 @@ test "layout reconstruction records two columns in reading order" {
     const text = try result.getTextInOrder(allocator);
     defer allocator.free(text);
     try std.testing.expectEqualStrings("L1\nL2\nL3\nR1\nR2\nR3", text);
+}
+
+test "layout reconstruction does not split table-heavy rows into page columns" {
+    const allocator = std.testing.allocator;
+    const spans = [_]TextSpan{
+        testSpan("Date", 76, 708, 104, 720),
+        testSpan("Description", 132, 708, 206, 720),
+        testSpan("Debit", 292, 708, 326, 720),
+        testSpan("Credit", 372, 708, 414, 720),
+        testSpan("Balance", 456, 708, 506, 720),
+        testSpan("01/02", 76, 682, 116, 694),
+        testSpan("Payroll", 132, 682, 182, 694),
+        testSpan("ACME", 184, 682, 218, 694),
+        testSpan("2,450", 372, 682, 412, 694),
+        testSpan("4,100", 456, 682, 496, 694),
+        testSpan("01/03", 76, 656, 116, 668),
+        testSpan("Rent", 132, 656, 162, 668),
+        testSpan("(1,200)", 292, 656, 342, 668),
+        testSpan("2,900", 456, 656, 496, 668),
+    };
+
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+    try std.testing.expect(result.lines[0].words.len >= 5);
+    try std.testing.expect(result.tables.len >= 1);
 }
 
 test "layout reconstruction detects headings and list items" {

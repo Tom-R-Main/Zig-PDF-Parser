@@ -87,6 +87,26 @@ are installed; use `--require-renderers` when missing optional engines should
 fail. `--materialize-dir` writes rendered pages and low-coverage crops for
 review, but generated PNGs/crops are local outputs and should not be committed.
 
+Financial table stress fixtures live under `benchmark/eval/table_stress/`.
+They are checked-in synthetic reductions for real-world table shapes: SEC
+statement continuation pages, borderless bank transactions, wrapped invoice
+totals, procurement nested headers, and legal schedules drawn out of content
+order. The stress pack has its own manifest so the tiny default correctness
+corpus stays quick:
+
+```sh
+zig build eval -- --adaptive --manifest benchmark/eval/table_stress/manifest.tsv
+.venv/bin/python benchmark/eval/table_compare.py \
+  --manifest benchmark/eval/table_stress/manifest.tsv \
+  --output /tmp/pdf-parser-table-stress.jsonl
+```
+
+`table_compare.py` treats `pdf-parser`, PyMuPDF `Page.find_tables()`, and
+optional pdfplumber as neutral lanes. Missing optional baselines emit skipped
+records unless `--require-baselines` is supplied. Truth sidecars preserve the
+simple `rows/cells` shape and may add `bbox`, `page`, `role`, `rowspan`,
+`colspan`, `numeric`, continuation ids, and source-span requirements.
+
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
 and profiling work rather than truth-labeled correctness scoring:
@@ -115,7 +135,10 @@ over formula page/text sequence; form JSON truth emits `form_field_accuracy`
 over field name/type/value sequence. Richer table truth may include `rowspan`, `colspan`,
 `role`, `bbox`, and `page`; when span fields are present the runner also emits
 `table_span_accuracy`, and when role fields are present it emits
-`table_role_accuracy`.
+`table_role_accuracy`. Table truth with bbox, numeric, header/footer/note, or
+continuation labels also enables `table_bbox_iou`, `table_numeric_accuracy`,
+`table_header_accuracy`, `table_footnote_accuracy`, and
+`table_continuation_accuracy`.
 
 External task evaluators can feed their scores into the same record:
 
@@ -156,6 +179,7 @@ benchmark/eval/
     forms/
     weird_fonts/
     visual_truth/
+    financial_table_stress/
     adversarial_corrupt/
   ground_truth/
     page_text/
@@ -176,6 +200,11 @@ benchmark/eval/
     openparse/
     tesseract_pipeline/
     optional_vlm_oracle/
+  table_stress/
+    manifest.tsv
+    metadata.jsonl
+    corpus/
+    ground_truth/
 ```
 
 ## Metrics

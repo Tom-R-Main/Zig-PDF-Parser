@@ -5,6 +5,7 @@ zig-out/
 # Local Python benchmark environment
 .venv/
 benchmark/eval/outputs/
+benchmark/eval/raw_cache/
 
 # Editor files
 *.swp
