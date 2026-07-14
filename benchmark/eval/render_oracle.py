@@ -253,6 +253,7 @@ def run_entry(
             temp_path = Path(temp_dir)
             artifacts = extract_pdf_parser(repo_root, parser_command, entry, temp_path)
             page_count = int(truth["expected_page_count"])
+            validate_page_count(artifacts, page_count)
             rows: list[dict[str, Any]] = []
             for page_index in range(page_count):
                 try:
@@ -302,6 +303,22 @@ def extract_pdf_parser(repo_root: Path, parser_command: Path, entry: Entry, temp
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "pdf-parser failed")
     return read_jsonl(output_path)
+
+
+def artifact_page_count(artifacts: list[dict[str, Any]]) -> int:
+    manifests = [record for record in artifacts if record.get("record_type") == "document_manifest"]
+    if len(manifests) != 1:
+        raise ValueError(f"expected one document_manifest, got {len(manifests)}")
+    value = manifests[0].get("page_count")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("document_manifest page_count must be a non-negative integer")
+    return value
+
+
+def validate_page_count(artifacts: list[dict[str, Any]], expected_page_count: int) -> None:
+    actual_page_count = artifact_page_count(artifacts)
+    if actual_page_count != expected_page_count:
+        raise ValueError(f"page count mismatch: expected {expected_page_count}, got {actual_page_count}")
 
 
 def render_page(renderer: str, pdf_path: Path, page_index: int, dpi: int, temp_path: Path) -> Image.Image:
@@ -396,12 +413,12 @@ def evaluate_page(
     image_region_overlap = max((ink_density(image, bbox_to_pixels(route["bbox"], viewbox, image.size)) for route in routes), default=0.0)
 
     observed_tags = observed_issue_tags(
-        truth=truth,
         text_bbox_coverage=text_bbox_coverage,
         blank_bbox_rate=blank_bbox_rate,
         low_ink_rate=low_ink_rate,
         ruling_pixel_coverage=ruling_pixel_coverage,
         image_region_overlap=image_region_overlap,
+        rotated_geometry=rotation_geometry_observed(viewbox, image.size),
     )
     expectations = expectation_results(
         truth,
@@ -429,7 +446,8 @@ def evaluate_page(
         "page_index": page_index,
         "renderer": renderer,
         "dpi": dpi,
-        "status": "ok",
+        "status": "ok" if all(expectations.values()) else "failed",
+        "reason": expectation_failure_reason(expectations),
         "visual_case_tags": list(entry.visual_case_tags),
         "expected_issue_tags": list(truth["expected_issue_tags"]),
         "observed_issue_tags": observed_tags,
@@ -544,26 +562,31 @@ def low_ink_coverage_rate(values: list[float]) -> float:
 
 def observed_issue_tags(
     *,
-    truth: dict[str, Any],
     text_bbox_coverage: float,
     blank_bbox_rate: float,
     low_ink_rate: float,
     ruling_pixel_coverage: float,
     image_region_overlap: float,
+    rotated_geometry: bool,
 ) -> list[str]:
-    expected = set(str(tag) for tag in truth["expected_issue_tags"])
     tags: set[str] = set()
-    if blank_bbox_rate > 0.0 and "invisible_text" in expected:
+    if blank_bbox_rate > 0.0:
         tags.add("invisible_text")
-    if (blank_bbox_rate > 0.0 or low_ink_rate > 0.0 or 0.0 < text_bbox_coverage < 1.0) and "clipped_text" in expected:
+    if blank_bbox_rate > 0.0 or low_ink_rate > 0.0 or 0.0 < text_bbox_coverage < 1.0:
         tags.add("clipped_text")
-    if ruling_pixel_coverage > 0.0 and "ruling_lines" in expected:
+    if ruling_pixel_coverage > 0.0:
         tags.add("ruling_lines")
-    if image_region_overlap > 0.0 and "image_region" in expected:
+    if image_region_overlap > 0.0:
         tags.add("image_region")
-    if "rotated_geometry" in expected:
+    if rotated_geometry:
         tags.add("rotated_geometry")
     return sorted(tags)
+
+
+def rotation_geometry_observed(viewbox: ViewBox, image_size: tuple[int, int]) -> bool:
+    viewbox_landscape = viewbox.width > viewbox.height
+    image_landscape = image_size[0] > image_size[1]
+    return viewbox_landscape != image_landscape
 
 
 def expectation_results(
@@ -582,6 +605,11 @@ def expectation_results(
         "ruling_pixel_coverage_ok": ruling_pixel_coverage >= float(truth["min_ruling_pixel_coverage"]),
         "image_region_overlap_ok": image_region_overlap >= float(truth["min_image_region_overlap"]),
     }
+
+
+def expectation_failure_reason(expectations: dict[str, Any]) -> str | None:
+    failed = sorted(key for key, value in expectations.items() if value is not True)
+    return None if not failed else f"failed expectations: {', '.join(failed)}"
 
 
 def materialize_assets(
@@ -627,9 +655,7 @@ def file_asset(kind: str, path: Path) -> dict[str, Any]:
 
 def notes_for_page(truth: dict[str, Any], viewbox: ViewBox, image_size: tuple[int, int]) -> list[str]:
     notes: list[str] = []
-    if "rotated_geometry" in truth["expected_issue_tags"] and (
-        abs(viewbox.width - image_size[0]) < 0.001 or abs(viewbox.height - image_size[1]) < 0.001
-    ):
+    if "rotated_geometry" in truth["expected_issue_tags"] and not rotation_geometry_observed(viewbox, image_size):
         notes.append("rotation_unverified")
     return notes
 

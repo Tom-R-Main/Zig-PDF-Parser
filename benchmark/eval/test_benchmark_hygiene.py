@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -454,6 +455,70 @@ class BenchmarkHygieneTests(unittest.TestCase):
 
         self.assertAlmostEqual(0.25, density)
 
+    def test_render_oracle_failed_expectation_sets_failed_status_and_cli_exit(self) -> None:
+        entry = render_oracle.Entry(
+            category="visual_truth",
+            doc_id="failed-coverage",
+            pdf_path=Path("/tmp/failed-coverage.pdf"),
+            truth_text_path=None,
+            render_truth_path=Path("/tmp/failed-coverage.render.json"),
+            visual_case_tags=(),
+        )
+        truth = {
+            "expected_page_count": 1,
+            "expected_issue_tags": [],
+            "min_text_bbox_coverage": 1.0,
+            "max_blank_bbox_rate": 1.0,
+            "min_ruling_pixel_coverage": 0.0,
+            "min_image_region_overlap": 0.0,
+        }
+        row = render_oracle.evaluate_page(
+            repo_root=ROOT,
+            entry=entry,
+            truth=truth,
+            artifacts=[],
+            image=render_oracle.Image.new("RGB", (20, 20), "white"),
+            renderer="poppler",
+            dpi=144,
+            page_index=0,
+            materialize_dir=None,
+        )
+
+        self.assertEqual("failed", row["status"])
+        self.assertIn("text_bbox_coverage_ok", row["reason"])
+
+        with (
+            mock.patch.object(render_oracle, "load_entries", return_value=[entry]),
+            mock.patch.object(render_oracle, "load_render_truth", return_value=truth),
+            mock.patch.object(render_oracle, "run_entry", return_value=[row]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exit_code = render_oracle.main_with_args_for_test(["--no-ensure-releasefast"])
+
+        self.assertEqual(1, exit_code)
+
+    def test_render_oracle_rejects_extra_pages_from_document_manifest(self) -> None:
+        artifacts = [{"record_type": "document_manifest", "page_count": 2}]
+
+        with self.assertRaisesRegex(ValueError, "page count mismatch: expected 1, got 2"):
+            render_oracle.validate_page_count(artifacts, 1)
+
+    def test_render_oracle_rotation_tag_requires_orientation_evidence(self) -> None:
+        viewbox = render_oracle.ViewBox(0.0, 0.0, 612.0, 792.0)
+
+        self.assertTrue(render_oracle.rotation_geometry_observed(viewbox, (1584, 1224)))
+        self.assertFalse(render_oracle.rotation_geometry_observed(viewbox, (1224, 1584)))
+
+        observed = render_oracle.observed_issue_tags(
+            text_bbox_coverage=1.0,
+            blank_bbox_rate=0.0,
+            low_ink_rate=0.0,
+            ruling_pixel_coverage=0.0,
+            image_region_overlap=0.0,
+            rotated_geometry=False,
+        )
+        self.assertNotIn("rotated_geometry", observed)
+
     def test_render_oracle_jsonl_rows_parse_line_by_line(self) -> None:
         row = {
             "record_type": "render_oracle_page",
@@ -583,7 +648,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
         row = table_compare.skipped(entry, "pymupdf-find-tables", "PyMuPDF is not installed")
 
         self.assertEqual("table_compare_result", row["record_type"])
-        self.assertEqual("0.1.0", row["table_compare_schema_version"])
+        self.assertEqual("0.2.0", row["table_compare_schema_version"])
         self.assertEqual("skipped", row["status"])
         self.assertEqual(["invoice"], row["table_case_tags"])
 

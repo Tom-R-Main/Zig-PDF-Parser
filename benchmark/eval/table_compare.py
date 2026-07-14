@@ -8,15 +8,16 @@ import contextlib
 import csv
 import io
 import json
+import math
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
-TABLE_COMPARE_SCHEMA_VERSION = "0.1.0"
+TABLE_COMPARE_SCHEMA_VERSION = "0.2.0"
 DEFAULT_TOOLS = ("pdf-parser", "pymupdf-find-tables", "pdfplumber")
 
 
@@ -28,6 +29,8 @@ class Entry:
     truth_text_path: Path | None
     table_truth_path: Path | None
     table_case_tags: tuple[str, ...]
+    table_quality_floors: dict[str, dict[str, float]] = field(default_factory=dict)
+    table_known_unsupported_tools: tuple[str, ...] = ()
 
 
 class OptionalBaselineMissing(RuntimeError):
@@ -147,9 +150,46 @@ def load_entries(manifest_path: Path, repo_root: Path) -> list[Entry]:
                     truth_text_path=resolve_manifest_path(repo_root, fields[3]) if fields[3] else None,
                     table_truth_path=resolve_manifest_path(repo_root, table_truth_path) if table_truth_path else None,
                     table_case_tags=tuple(meta.get("table_case_tags", [])),
+                    table_quality_floors=parse_quality_floors(meta.get("table_quality_floors")),
+                    table_known_unsupported_tools=parse_known_unsupported_tools(
+                        meta.get("table_known_unsupported_tools")
+                    ),
                 )
             )
     return entries
+
+
+def parse_quality_floors(value: Any) -> dict[str, dict[str, float]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("table_quality_floors must be an object keyed by tool")
+    parsed: dict[str, dict[str, float]] = {}
+    for tool, raw_metrics in value.items():
+        if not isinstance(tool, str) or not isinstance(raw_metrics, dict):
+            raise ValueError("table_quality_floors must map tool names to metric objects")
+        metrics: dict[str, float] = {}
+        for metric, raw_floor in raw_metrics.items():
+            if (
+                not isinstance(metric, str)
+                or isinstance(raw_floor, bool)
+                or not isinstance(raw_floor, (int, float))
+            ):
+                raise ValueError("table quality floors must be numeric")
+            floor = float(raw_floor)
+            if not math.isfinite(floor) or floor < 0.0 or floor > 1.0:
+                raise ValueError("table quality floors must be finite and between 0 and 1")
+            metrics[metric] = floor
+        parsed[tool] = metrics
+    return parsed
+
+
+def parse_known_unsupported_tools(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or any(not isinstance(tool, str) or not tool for tool in value):
+        raise ValueError("table_known_unsupported_tools must be an array of non-empty tool names")
+    return tuple(value)
 
 
 def load_metadata(path: Path) -> dict[tuple[str, str], dict[str, Any]]:
@@ -209,18 +249,39 @@ def run_tool(
         return failed(entry, tool, str(err))
 
     wall_ms = (time.perf_counter() - started) * 1000.0
+    metrics = table_metrics(predicted, truth)
+    quality_floors = entry.table_quality_floors.get(tool, {})
+    violations = quality_violations(metrics, quality_floors)
+    known_unsupported = tool in entry.table_known_unsupported_tools
+    status = "failed" if violations else "known_unsupported" if known_unsupported else "ok"
+    notes = violations or (["known unsupported baseline; metrics are observational and non-blocking"] if known_unsupported else [])
     return {
         "record_type": "table_compare_result",
         "table_compare_schema_version": TABLE_COMPARE_SCHEMA_VERSION,
         "category": entry.category,
         "doc_id": entry.doc_id,
         "tool": tool,
-        "status": "ok",
+        "status": status,
         "table_case_tags": list(entry.table_case_tags),
-        "metrics": table_metrics(predicted, truth),
+        "metrics": metrics,
+        "quality_floors": quality_floors,
         "wall_ms": round(wall_ms, 3),
-        "notes": [],
+        "notes": notes,
     }
+
+
+def quality_violations(
+    metrics: dict[str, float | None],
+    floors: dict[str, float],
+) -> list[str]:
+    violations: list[str] = []
+    for metric, floor in sorted(floors.items()):
+        value = metrics.get(metric)
+        if value is None:
+            violations.append(f"{metric} is unavailable; required floor is {floor:.6f}")
+        elif value + 1e-12 < floor:
+            violations.append(f"{metric} {value:.6f} is below required floor {floor:.6f}")
+    return violations
 
 
 def extract_pdf_parser(repo_root: Path, parser_command: Path, entry: Entry) -> list[dict[str, Any]]:
@@ -254,6 +315,7 @@ def extract_pymupdf_tables(entry: Entry) -> list[dict[str, Any]]:
     tables: list[dict[str, Any]] = []
     with fitz.open(entry.pdf_path) as doc:
         for page_index, page in enumerate(doc):
+            page_height = float(page.rect.height)
             finder = getattr(page, "find_tables", None)
             if finder is None:
                 raise OptionalBaselineMissing("PyMuPDF Page.find_tables() is unavailable")
@@ -264,11 +326,18 @@ def extract_pymupdf_tables(entry: Entry) -> list[dict[str, Any]]:
                     {
                         "table_id": f"pymupdf-{page_index}-{table_index}",
                         "page_index": page_index,
-                        "bbox": list(getattr(table, "bbox", []) or []),
+                        "bbox": top_origin_bbox_to_pdf(getattr(table, "bbox", None), page_height),
                         "rows": [[{"text": cell or ""} for cell in row] for row in rows],
                     }
                 )
     return tables
+
+
+def top_origin_bbox_to_pdf(value: Any, page_height: float) -> list[float]:
+    box = parse_bbox(value)
+    if box is None:
+        return []
+    return [box[0], page_height - box[3], box[2], page_height - box[1]]
 
 
 def extract_pdfplumber_tables(entry: Entry) -> list[dict[str, Any]]:

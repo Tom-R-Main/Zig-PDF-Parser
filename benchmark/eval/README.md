@@ -107,6 +107,14 @@ records unless `--require-baselines` is supplied. Truth sidecars preserve the
 simple `rows/cells` shape and may add `bbox`, `page`, `role`, `rowspan`,
 `colspan`, `numeric`, continuation ids, and source-span requirements.
 
+Table comparator records use schema `0.2.0`. Per-document
+`table_quality_floors` in `table_stress/metadata.jsonl` are enforced for the
+named tool; the checked-in floors gate `pdf-parser`, while optional baseline
+tools remain observational. The `legal-schedule-out-of-order` fixture records
+`pdf-parser` in `table_known_unsupported_tools`: its result is emitted with
+`status: known_unsupported` and does not block the suite. This keeps the gap
+visible without representing it as a quality pass.
+
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
 and profiling work rather than truth-labeled correctness scoring:
@@ -218,9 +226,12 @@ accuracy for page/text sequence. Form JSON labels add field accuracy for
 value-bearing AcroForm name/type/value sequence. Table JSON labels with role,
 rowspan, colspan, page, or continuation fields add structure accuracy metrics
 for header/row-header/data/note/footer semantics, row spans, column spans, page
-identity, continuation links, and source-span coverage. The result schema also
-has slots for table detection F1, TEDS, GriTS, and formula CDM so local
-specialist adapters can report into the same records as they come online.
+identity, continuation links, and source-span coverage. Benchmark schema
+`0.2.0` adds the compatible table metrics `table_bbox_iou`,
+`table_numeric_accuracy`, `table_header_accuracy`, and
+`table_footnote_accuracy`. The result schema also has slots for table detection
+F1, TEDS, GriTS, and formula CDM so local specialist adapters can report into
+the same records as they come online.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.
@@ -240,8 +251,10 @@ pdf-parser benchmark \
   --jsonl benchmark/eval/outputs/scorecards/tiny-corpus.records.jsonl
 ```
 
-The full JSON scorecard and JSONL stream use benchmark schema `0.1.0`, separate
-from adaptive extraction schemas. Records include `benchmark_run`,
+The full JSON scorecard and JSONL stream use benchmark schema `0.2.0`, separate
+from adaptive extraction schemas. Benchmark versions follow the public output
+schema policy: compatible additive metrics use a MINOR bump. Records include
+`benchmark_run`,
 `benchmark_suite`, `benchmark_lane`, `benchmark_document_result`,
 `benchmark_category_summary`, `benchmark_regression`, and
 `benchmark_scorecard`. Each record carries `run_id`, `suite_id`,

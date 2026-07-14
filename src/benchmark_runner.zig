@@ -10,7 +10,7 @@ const eval = @import("eval.zig");
 const eval_runner = @import("eval_runner.zig");
 const schema = @import("schema.zig");
 
-pub const benchmark_schema_version = "0.1.0";
+pub const benchmark_schema_version = "0.2.0";
 
 const MetricName = enum {
     cer,
@@ -1299,7 +1299,17 @@ test "benchmark scorecard JSONL records parse line by line" {
         if (line.len == 0) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
-        try std.testing.expect(parsed.value.object.get("benchmark_schema_version") != null);
+        try std.testing.expectEqualStrings(
+            benchmark_schema_version,
+            parsed.value.object.get("benchmark_schema_version").?.string,
+        );
+        if (std.mem.eql(u8, parsed.value.object.get("record_type").?.string, "benchmark_document_result")) {
+            const metrics = parsed.value.object.get("metrics").?.object;
+            try std.testing.expect(metrics.get("table_bbox_iou") != null);
+            try std.testing.expect(metrics.get("table_numeric_accuracy") != null);
+            try std.testing.expect(metrics.get("table_header_accuracy") != null);
+            try std.testing.expect(metrics.get("table_footnote_accuracy") != null);
+        }
         count += 1;
     }
     try std.testing.expect(count >= 4);
