@@ -1,0 +1,26 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Vendor", "role": "header" },
+        { "text": "Materials", "role": "header" },
+        { "text": "Labor", "role": "header", "colspan": 2 },
+        { "text": "Total", "role": "header" }
+      ],
+      [
+        { "text": "Northwind", "role": "row_header" },
+        { "text": "10 hrs", "role": "data" },
+        { "text": "500", "role": "data", "numeric": { "is_numeric": true, "value": 500.0 } },
+        { "text": "900", "role": "data", "numeric": { "is_numeric": true, "value": 900.0 } },
+        { "text": "1,400", "role": "data", "numeric": { "is_numeric": true, "value": 1400.0 } }
+      ],
+      [
+        { "text": "Contoso", "role": "row_header" },
+        { "text": "8 hrs", "role": "data" },
+        { "text": "450", "role": "data", "numeric": { "is_numeric": true, "value": 450.0 } },
+        { "text": "840", "role": "data", "numeric": { "is_numeric": true, "value": 840.0 } },
+        { "text": "1,290", "role": "data", "numeric": { "is_numeric": true, "value": 1290.0 } }
+      ]
+    ]
+  }
+]

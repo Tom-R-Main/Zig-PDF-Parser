@@ -19,6 +19,8 @@ pub const CorpusCategory = enum {
     manuals,
     forms,
     weird_fonts,
+    visual_truth,
+    financial_table_stress,
     adversarial_corrupt,
 
     pub fn parse(text: []const u8) ?CorpusCategory {
@@ -37,6 +39,8 @@ pub const corpus_categories = [_]CorpusCategory{
     .manuals,
     .forms,
     .weird_fonts,
+    .visual_truth,
+    .financial_table_stress,
     .adversarial_corrupt,
 };
 
@@ -69,6 +73,10 @@ pub const TableMetrics = struct {
     page_accuracy: ?f64 = null,
     continuation_accuracy: ?f64 = null,
     source_span_coverage: ?f64 = null,
+    bbox_iou: ?f64 = null,
+    numeric_accuracy: ?f64 = null,
+    header_accuracy: ?f64 = null,
+    footnote_accuracy: ?f64 = null,
 };
 
 pub const FormulaMetrics = struct {
@@ -282,6 +290,14 @@ pub fn writeJsonlResult(writer: anytype, result: DocumentResult) !void {
     try writeOptionalFloat(writer, result.table.continuation_accuracy);
     try writer.writeAll(",\"table_source_span_coverage\":");
     try writeOptionalFloat(writer, result.table.source_span_coverage);
+    try writer.writeAll(",\"table_bbox_iou\":");
+    try writeOptionalFloat(writer, result.table.bbox_iou);
+    try writer.writeAll(",\"table_numeric_accuracy\":");
+    try writeOptionalFloat(writer, result.table.numeric_accuracy);
+    try writer.writeAll(",\"table_header_accuracy\":");
+    try writeOptionalFloat(writer, result.table.header_accuracy);
+    try writer.writeAll(",\"table_footnote_accuracy\":");
+    try writeOptionalFloat(writer, result.table.footnote_accuracy);
     try writer.writeAll(",\"formula_bleu\":");
     try writeOptionalFloat(writer, result.formula.bleu);
     try writer.writeAll(",\"formula_edit_distance\":");
@@ -566,9 +582,9 @@ fn writeJsonEscaped(writer: anytype, text: []const u8) !void {
 }
 
 test "corpus categories include requested benchmark classes" {
-    try std.testing.expectEqual(@as(usize, 11), corpus_categories.len);
+    try std.testing.expectEqual(@as(usize, 13), corpus_categories.len);
     try std.testing.expectEqual(CorpusCategory.scientific_math, CorpusCategory.parse("scientific_math").?);
-    try std.testing.expectEqual(CorpusCategory.adversarial_corrupt, corpus_categories[10]);
+    try std.testing.expectEqual(CorpusCategory.adversarial_corrupt, corpus_categories[12]);
 }
 
 test "text metrics track character word token and order quality" {
@@ -615,6 +631,10 @@ test "result jsonl exposes all north-star metrics" {
             .rowspan_accuracy = 0.77,
             .colspan_accuracy = 0.88,
             .source_span_coverage = 0.55,
+            .bbox_iou = 0.44,
+            .numeric_accuracy = 0.33,
+            .header_accuracy = 0.22,
+            .footnote_accuracy = 0.11,
         },
         .formula = .{ .bleu = 0.9, .cdm = 0.8, .structure_accuracy = 0.75 },
         .form = .{ .field_accuracy = 0.5 },
@@ -630,6 +650,10 @@ test "result jsonl exposes all north-star metrics" {
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_rowspan_accuracy\":0.770000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_colspan_accuracy\":0.880000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_source_span_coverage\":0.550000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_bbox_iou\":0.440000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_numeric_accuracy\":0.330000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_header_accuracy\":0.220000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_footnote_accuracy\":0.110000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"formula_edit_distance\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"formula_structure_accuracy\":0.750000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"form_field_accuracy\":0.500000") != null);

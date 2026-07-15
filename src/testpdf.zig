@@ -623,6 +623,73 @@ pub fn generateActualTextRepairPdf(allocator: std.mem.Allocator) ![]u8 {
     return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
 }
 
+/// Generate a page-level rotation fixture for render-backed geometry checks.
+pub fn generateRotatedPageTextPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate 90 ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    const content = "BT\n/F1 18 Tf\n100 100 Td\n(Rotated page text) Tj\nET\n";
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}\nendstream\nendobj\n", .{ content.len, content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 6\n");
+    try writer.writeAll("0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n", .{obj1_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj2_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj3_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj4_offset});
+    try writer.print("{d:0>10} 00000 n \n", .{obj5_offset});
+    try writer.writeAll("trailer\n<< /Size 6 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
+/// Generate a page with a clipping path that hides part of extractable text.
+pub fn generateClippedTextPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n/F1 12 Tf\n72 740 Td\n(Clipped fixture) Tj\nET\n" ++
+        "q\n100 690 50 24 re W n\n" ++
+        "BT\n/F1 18 Tf\n100 700 Td\n(Clipped hidden tail) Tj\nET\n" ++
+        "Q\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
+/// Generate white-on-white text that mimics a hidden OCR layer.
+pub fn generateInvisibleOcrLayerPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n/F1 12 Tf\n72 740 Td\n(Visible anchor) Tj\nET\n" ++
+        "1 1 1 rg\n" ++
+        "BT\n/F1 14 Tf\n72 700 Td\n(Invisible OCR Layer) Tj\nET\n" ++
+        "0 0 0 rg\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
 /// Generate a deterministic Type3 font fixture using WinAnsi text mapping.
 pub fn generateType3SimplePdf(allocator: std.mem.Allocator) ![]u8 {
     const widths = try repeatedWidths(allocator, 91, "600");
@@ -2320,6 +2387,192 @@ pub fn generateMultipageFinancialStatementPdf(allocator: std.mem.Allocator) ![]u
         .{ .x0 = 302, .y0 = 640, .x1 = 302, .y1 = 724 },
     };
     return generateTwoPagePositionedTextAndRulingsPdf(allocator, &page1, &rulings, &page2, &rulings);
+}
+
+/// Generate a two-page SEC-style statement stress fixture with repeated
+/// headers, continuation links, accountant notation, and footnotes.
+pub fn generateSecStatementStressPdf(allocator: std.mem.Allocator) ![]u8 {
+    const page1 = [_]PositionedText{
+        .{ .text = "Consolidated Statement", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "2025", .x = 230, .y = 708 },
+        .{ .text = "2024", .x = 318, .y = 708 },
+        .{ .text = "Revenue", .x = 84, .y = 680 },
+        .{ .text = "12,450", .x = 230, .y = 680 },
+        .{ .text = "11,200", .x = 318, .y = 680 },
+        .{ .text = "Cost", .x = 84, .y = 652 },
+        .{ .text = "of", .x = 118, .y = 652 },
+        .{ .text = "revenue", .x = 136, .y = 652 },
+        .{ .text = "(7,100)", .x = 230, .y = 652 },
+        .{ .text = "(6,850)", .x = 318, .y = 652 },
+        .{ .text = "See note 1", .x = 84, .y = 632 },
+    };
+    const page2 = [_]PositionedText{
+        .{ .text = "Consolidated Statement continued", .x = 72, .y = 742 },
+        .{ .text = "Account", .x = 84, .y = 708 },
+        .{ .text = "2025", .x = 230, .y = 708 },
+        .{ .text = "2024", .x = 318, .y = 708 },
+        .{ .text = "Operating", .x = 84, .y = 680 },
+        .{ .text = "income", .x = 148, .y = 680 },
+        .{ .text = "2,300", .x = 230, .y = 680 },
+        .{ .text = "1,950", .x = 318, .y = 680 },
+        .{ .text = "Net", .x = 84, .y = 652 },
+        .{ .text = "income", .x = 112, .y = 652 },
+        .{ .text = "1,700", .x = 230, .y = 652 },
+        .{ .text = "1,420", .x = 318, .y = 652 },
+        .{ .text = "See note 2", .x = 84, .y = 632 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 412, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 412, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 668, .x1 = 412, .y1 = 668 },
+        .{ .x0 = 72, .y0 = 640, .x1 = 412, .y1 = 640 },
+        .{ .x0 = 72, .y0 = 624, .x1 = 412, .y1 = 624 },
+        .{ .x0 = 72, .y0 = 624, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 214, .y0 = 640, .x1 = 214, .y1 = 724 },
+        .{ .x0 = 304, .y0 = 640, .x1 = 304, .y1 = 724 },
+        .{ .x0 = 412, .y0 = 624, .x1 = 412, .y1 = 724 },
+    };
+    return generateTwoPagePositionedTextAndRulingsPdf(allocator, &page1, &rulings, &page2, &rulings);
+}
+
+/// Generate a sparse borderless bank-statement transaction table.
+pub fn generateBankStatementStressPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Bank Activity", .x = 72, .y = 742 },
+        .{ .text = "Date", .x = 76, .y = 708 },
+        .{ .text = "Description", .x = 132, .y = 708 },
+        .{ .text = "Debit", .x = 292, .y = 708 },
+        .{ .text = "Credit", .x = 372, .y = 708 },
+        .{ .text = "Balance", .x = 456, .y = 708 },
+        .{ .text = "01/02", .x = 76, .y = 682 },
+        .{ .text = "Payroll", .x = 132, .y = 682 },
+        .{ .text = "ACME", .x = 184, .y = 682 },
+        .{ .text = "2,450", .x = 372, .y = 682 },
+        .{ .text = "4,100", .x = 456, .y = 682 },
+        .{ .text = "01/03", .x = 76, .y = 656 },
+        .{ .text = "Rent", .x = 132, .y = 656 },
+        .{ .text = "(1,200)", .x = 292, .y = 656 },
+        .{ .text = "2,900", .x = 456, .y = 656 },
+        .{ .text = "01/05", .x = 76, .y = 630 },
+        .{ .text = "Card", .x = 132, .y = 630 },
+        .{ .text = "Services", .x = 170, .y = 630 },
+        .{ .text = "(86.35)", .x = 292, .y = 630 },
+        .{ .text = "2,813.65", .x = 456, .y = 630 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
+}
+
+/// Generate an invoice table with wrapped descriptions and footer total rows.
+pub fn generateInvoiceStressPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Invoice 1007", .x = 72, .y = 742 },
+        .{ .text = "Item", .x = 76, .y = 708 },
+        .{ .text = "Description", .x = 132, .y = 708 },
+        .{ .text = "Qty", .x = 318, .y = 708 },
+        .{ .text = "Unit", .x = 372, .y = 708 },
+        .{ .text = "Total", .x = 456, .y = 708 },
+        .{ .text = "A-1", .x = 76, .y = 682 },
+        .{ .text = "Implementation", .x = 132, .y = 686 },
+        .{ .text = "services", .x = 132, .y = 670 },
+        .{ .text = "2", .x = 318, .y = 678 },
+        .{ .text = "1,250", .x = 372, .y = 678 },
+        .{ .text = "2,500", .x = 456, .y = 678 },
+        .{ .text = "B-9", .x = 76, .y = 642 },
+        .{ .text = "Support", .x = 132, .y = 642 },
+        .{ .text = "retainer", .x = 190, .y = 642 },
+        .{ .text = "1", .x = 318, .y = 642 },
+        .{ .text = "850", .x = 372, .y = 642 },
+        .{ .text = "850", .x = 456, .y = 642 },
+        .{ .text = "Subtotal", .x = 372, .y = 604 },
+        .{ .text = "3,350", .x = 456, .y = 604 },
+        .{ .text = "Tax", .x = 372, .y = 584 },
+        .{ .text = "268", .x = 456, .y = 584 },
+        .{ .text = "Total", .x = 372, .y = 564 },
+        .{ .text = "3,618", .x = 456, .y = 564 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 724, .x1 = 524, .y1 = 724 },
+        .{ .x0 = 72, .y0 = 696, .x1 = 524, .y1 = 696 },
+        .{ .x0 = 72, .y0 = 658, .x1 = 524, .y1 = 658 },
+        .{ .x0 = 72, .y0 = 626, .x1 = 524, .y1 = 626 },
+        .{ .x0 = 360, .y0 = 616, .x1 = 524, .y1 = 616 },
+        .{ .x0 = 360, .y0 = 556, .x1 = 524, .y1 = 556 },
+        .{ .x0 = 72, .y0 = 626, .x1 = 72, .y1 = 724 },
+        .{ .x0 = 120, .y0 = 626, .x1 = 120, .y1 = 724 },
+        .{ .x0 = 304, .y0 = 626, .x1 = 304, .y1 = 724 },
+        .{ .x0 = 360, .y0 = 556, .x1 = 360, .y1 = 724 },
+        .{ .x0 = 444, .y0 = 556, .x1 = 444, .y1 = 724 },
+        .{ .x0 = 524, .y0 = 556, .x1 = 524, .y1 = 724 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a procurement table with nested header semantics.
+pub fn generateProcurementStressPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Procurement Schedule", .x = 72, .y = 742 },
+        .{ .text = "Vendor", .x = 84, .y = 708 },
+        .{ .text = "Materials", .x = 188, .y = 708 },
+        .{ .text = "Labor", .x = 288, .y = 720 },
+        .{ .text = "Cost", .x = 264, .y = 700 },
+        .{ .text = "Fees", .x = 332, .y = 700 },
+        .{ .text = "Total", .x = 416, .y = 708 },
+        .{ .text = "Northwind", .x = 84, .y = 672 },
+        .{ .text = "10", .x = 188, .y = 672 },
+        .{ .text = "hrs", .x = 210, .y = 672 },
+        .{ .text = "500", .x = 264, .y = 672 },
+        .{ .text = "900", .x = 332, .y = 672 },
+        .{ .text = "1,400", .x = 416, .y = 672 },
+        .{ .text = "Contoso", .x = 84, .y = 644 },
+        .{ .text = "8", .x = 188, .y = 644 },
+        .{ .text = "hrs", .x = 204, .y = 644 },
+        .{ .text = "450", .x = 264, .y = 644 },
+        .{ .text = "840", .x = 332, .y = 644 },
+        .{ .text = "1,290", .x = 416, .y = 644 },
+    };
+    const rulings = [_]RulingSegment{
+        .{ .x0 = 72, .y0 = 730, .x1 = 500, .y1 = 730 },
+        .{ .x0 = 72, .y0 = 690, .x1 = 500, .y1 = 690 },
+        .{ .x0 = 72, .y0 = 662, .x1 = 500, .y1 = 662 },
+        .{ .x0 = 72, .y0 = 634, .x1 = 500, .y1 = 634 },
+        .{ .x0 = 72, .y0 = 634, .x1 = 72, .y1 = 730 },
+        .{ .x0 = 176, .y0 = 634, .x1 = 176, .y1 = 730 },
+        .{ .x0 = 252, .y0 = 634, .x1 = 252, .y1 = 730 },
+        .{ .x0 = 316, .y0 = 634, .x1 = 316, .y1 = 690 },
+        .{ .x0 = 400, .y0 = 634, .x1 = 400, .y1 = 730 },
+        .{ .x0 = 500, .y0 = 634, .x1 = 500, .y1 = 730 },
+    };
+    return generatePositionedTextAndRulingsPdf(allocator, &cells, &rulings);
+}
+
+/// Generate a borderless legal schedule where content-stream order differs
+/// from visual row/column order.
+pub fn generateLegalScheduleStressPdf(allocator: std.mem.Allocator) ![]u8 {
+    const cells = [_]PositionedText{
+        .{ .text = "Schedule A", .x = 72, .y = 742 },
+        .{ .text = "Amount", .x = 282, .y = 708 },
+        .{ .text = "Notes", .x = 360, .y = 708 },
+        .{ .text = "Clause", .x = 76, .y = 708 },
+        .{ .text = "Party", .x = 164, .y = 708 },
+        .{ .text = "1,000", .x = 282, .y = 680 },
+        .{ .text = "Escrow", .x = 360, .y = 680 },
+        .{ .text = "release", .x = 414, .y = 680 },
+        .{ .text = "1.1", .x = 76, .y = 680 },
+        .{ .text = "Seller", .x = 164, .y = 680 },
+        .{ .text = "Subject", .x = 360, .y = 652 },
+        .{ .text = "to", .x = 414, .y = 652 },
+        .{ .text = "audit", .x = 434, .y = 652 },
+        .{ .text = "2.4", .x = 76, .y = 652 },
+        .{ .text = "Buyer", .x = 164, .y = 652 },
+        .{ .text = "N/M", .x = 282, .y = 652 },
+        .{ .text = "(250)", .x = 282, .y = 624 },
+        .{ .text = "Credit", .x = 360, .y = 624 },
+        .{ .text = "memo", .x = 410, .y = 624 },
+        .{ .text = "3.2", .x = 76, .y = 624 },
+        .{ .text = "Seller", .x = 164, .y = 624 },
+    };
+    return generatePositionedTextPdf(allocator, &cells);
 }
 
 /// Generate a formula-like page with compact math-heavy notation.

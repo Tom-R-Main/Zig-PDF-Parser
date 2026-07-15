@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +32,8 @@ analyze_baseline = load_module("analyze_baseline", EVAL_DIR / "analyze_baseline.
 run_baseline = load_module("run_baseline", EVAL_DIR / "run_baseline.py")
 structural_compare = load_module("structural_compare", EVAL_DIR / "structural_compare.py")
 font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
+render_oracle = load_module("render_oracle", EVAL_DIR / "render_oracle.py")
+table_compare = load_module("table_compare", EVAL_DIR / "table_compare.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
@@ -358,6 +361,308 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual(0.0, metrics["cer"])
         self.assertEqual(0.0, metrics["wer"])
         self.assertEqual(1.0, metrics["token_f1"])
+
+    def test_render_oracle_loads_metadata_sidecar_and_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "visual.pdf"
+            text_path = temp_path / "visual.txt"
+            truth_path = temp_path / "render.json"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            text_path.write_text("Visual truth\n", encoding="utf-8")
+            truth_path.write_text(
+                json.dumps(
+                    {
+                        "expected_page_count": 1,
+                        "expected_issue_tags": ["clipped_text"],
+                        "min_text_bbox_coverage": 0.0,
+                        "max_blank_bbox_rate": 1.0,
+                        "min_ruling_pixel_coverage": 0.0,
+                        "min_image_region_overlap": 0.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest_path = temp_path / "manifest.tsv"
+            manifest_path.write_text(
+                f"visual_truth\tclipped-text\t{pdf_path}\t{text_path}\n",
+                encoding="utf-8",
+            )
+            metadata_path = temp_path / "metadata.jsonl"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "category": "visual_truth",
+                        "doc_id": "clipped-text",
+                        "render_truth_path": str(truth_path),
+                        "visual_case_tags": ["clipped_text"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = render_oracle.load_entries(manifest_path, ROOT)
+            truth = render_oracle.load_render_truth(entries[0])
+
+        self.assertEqual("clipped-text", entries[0].doc_id)
+        self.assertEqual(("clipped_text",), entries[0].visual_case_tags)
+        self.assertEqual(["clipped_text"], truth["expected_issue_tags"])
+
+    def test_render_oracle_validates_truth_shape(self) -> None:
+        with self.assertRaises(ValueError):
+            render_oracle.validate_render_truth({"expected_page_count": 1})
+
+    def test_render_oracle_bbox_to_pixels_inverts_y_axis(self) -> None:
+        viewbox = render_oracle.ViewBox(0.0, 0.0, 612.0, 792.0)
+        bbox = {"x0": 72, "y0": 700, "x1": 172, "y1": 724}
+
+        box = render_oracle.bbox_to_pixels(bbox, viewbox, (1224, 1584))
+
+        self.assertEqual(render_oracle.PixelBox(144, 136, 344, 184), box)
+
+    def test_render_oracle_builds_poppler_command(self) -> None:
+        cmd = render_oracle.build_poppler_command(Path("/tmp/doc.pdf"), 2, 144, Path("/tmp/page"))
+
+        self.assertEqual("pdftoppm", cmd[0])
+        self.assertIn("-singlefile", cmd)
+        self.assertEqual("3", cmd[cmd.index("-f") + 1])
+        self.assertEqual("144", cmd[cmd.index("-r") + 1])
+
+    def test_render_oracle_skipped_missing_renderer_record_is_stable(self) -> None:
+        entry = render_oracle.Entry(
+            category="visual_truth",
+            doc_id="doc",
+            pdf_path=Path("/tmp/doc.pdf"),
+            truth_text_path=None,
+            render_truth_path=None,
+            visual_case_tags=("image_region",),
+        )
+
+        row = render_oracle.skipped(entry, "mutool", "mutool is not installed")
+
+        self.assertEqual("render_oracle_page", row["record_type"])
+        self.assertEqual("0.1.0", row["render_oracle_schema_version"])
+        self.assertEqual("skipped", row["status"])
+
+    def test_render_oracle_pixel_density_classifies_ink(self) -> None:
+        image = render_oracle.Image.new("RGB", (20, 20), "white")
+        for y in range(5, 15):
+            for x in range(5, 15):
+                image.putpixel((x, y), (0, 0, 0))
+
+        density = render_oracle.ink_density(image, render_oracle.PixelBox(0, 0, 20, 20))
+
+        self.assertAlmostEqual(0.25, density)
+
+    def test_render_oracle_failed_expectation_sets_failed_status_and_cli_exit(self) -> None:
+        entry = render_oracle.Entry(
+            category="visual_truth",
+            doc_id="failed-coverage",
+            pdf_path=Path("/tmp/failed-coverage.pdf"),
+            truth_text_path=None,
+            render_truth_path=Path("/tmp/failed-coverage.render.json"),
+            visual_case_tags=(),
+        )
+        truth = {
+            "expected_page_count": 1,
+            "expected_issue_tags": [],
+            "min_text_bbox_coverage": 1.0,
+            "max_blank_bbox_rate": 1.0,
+            "min_ruling_pixel_coverage": 0.0,
+            "min_image_region_overlap": 0.0,
+        }
+        row = render_oracle.evaluate_page(
+            repo_root=ROOT,
+            entry=entry,
+            truth=truth,
+            artifacts=[],
+            image=render_oracle.Image.new("RGB", (20, 20), "white"),
+            renderer="poppler",
+            dpi=144,
+            page_index=0,
+            materialize_dir=None,
+        )
+
+        self.assertEqual("failed", row["status"])
+        self.assertIn("text_bbox_coverage_ok", row["reason"])
+
+        with (
+            mock.patch.object(render_oracle, "load_entries", return_value=[entry]),
+            mock.patch.object(render_oracle, "load_render_truth", return_value=truth),
+            mock.patch.object(render_oracle, "run_entry", return_value=[row]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exit_code = render_oracle.main_with_args_for_test(["--no-ensure-releasefast"])
+
+        self.assertEqual(1, exit_code)
+
+    def test_render_oracle_rejects_extra_pages_from_document_manifest(self) -> None:
+        artifacts = [{"record_type": "document_manifest", "page_count": 2}]
+
+        with self.assertRaisesRegex(ValueError, "page count mismatch: expected 1, got 2"):
+            render_oracle.validate_page_count(artifacts, 1)
+
+    def test_render_oracle_rotation_tag_requires_orientation_evidence(self) -> None:
+        viewbox = render_oracle.ViewBox(0.0, 0.0, 612.0, 792.0)
+
+        self.assertTrue(render_oracle.rotation_geometry_observed(viewbox, (1584, 1224)))
+        self.assertFalse(render_oracle.rotation_geometry_observed(viewbox, (1224, 1584)))
+
+        observed = render_oracle.observed_issue_tags(
+            text_bbox_coverage=1.0,
+            blank_bbox_rate=0.0,
+            low_ink_rate=0.0,
+            ruling_pixel_coverage=0.0,
+            image_region_overlap=0.0,
+            rotated_geometry=False,
+        )
+        self.assertNotIn("rotated_geometry", observed)
+
+    def test_render_oracle_jsonl_rows_parse_line_by_line(self) -> None:
+        row = {
+            "record_type": "render_oracle_page",
+            "render_oracle_schema_version": "0.1.0",
+            "status": "ok",
+        }
+        output = io.StringIO()
+
+        render_oracle.write_row(output, row)
+
+        self.assertEqual(row, json.loads(output.getvalue()))
+
+    def test_table_compare_loads_metadata_sidecar_and_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "table.pdf"
+            text_path = temp_path / "table.txt"
+            truth_path = temp_path / "table.json"
+            pdf_path.write_bytes(b"%PDF placeholder\n")
+            text_path.write_text("Table truth\n", encoding="utf-8")
+            truth_path.write_text(
+                json.dumps([{"rows": [[{"text": "Amount", "role": "header"}]]}]),
+                encoding="utf-8",
+            )
+            manifest_path = temp_path / "manifest.tsv"
+            manifest_path.write_text(
+                f"financial_table_stress\tinvoice\t{pdf_path}\t{text_path}\t{truth_path}\n",
+                encoding="utf-8",
+            )
+            metadata_path = temp_path / "metadata.jsonl"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "category": "financial_table_stress",
+                        "doc_id": "invoice",
+                        "table_case_tags": ["invoice", "accounting_notation"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            entries = table_compare.load_entries(manifest_path, ROOT)
+            truth = table_compare.load_table_truth(entries[0])
+
+        self.assertEqual("invoice", entries[0].doc_id)
+        self.assertEqual(("invoice", "accounting_notation"), entries[0].table_case_tags)
+        self.assertEqual("Amount", truth[0]["rows"][0][0]["text"])
+
+    def test_table_compare_numeric_normalization_and_metrics(self) -> None:
+        predicted = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "role": "header"},
+                        {"text": "(950)", "role": "data", "numeric": {"is_numeric": True, "value": -950.0}},
+                        {"text": "N/M", "role": "data", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+        truth = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "role": "header"},
+                        {"text": "(950)", "role": "data", "numeric": {"is_numeric": True, "value": -950.0}},
+                        {"text": "N/M", "role": "data", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertEqual(-950.0, table_compare.parse_accounting_number("(950)"))
+        self.assertIsNone(table_compare.parse_accounting_number("N/M"))
+        self.assertEqual(1.0, metrics["cell_text_accuracy"])
+        self.assertEqual(1.0, metrics["numeric_accuracy"])
+
+    def test_table_compare_numeric_accuracy_aligns_asymmetric_annotations_by_cell(self) -> None:
+        predicted = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount", "numeric": {"is_numeric": False, "value": None}},
+                        {"text": "1,200", "numeric": {"is_numeric": True, "value": 1200.0}},
+                        {"text": "Memo", "numeric": {"is_numeric": False, "value": None}},
+                    ]
+                ]
+            }
+        ]
+        truth = [
+            {
+                "rows": [
+                    [
+                        {"text": "Amount"},
+                        {"text": "1,200", "numeric": {"is_numeric": True, "value": 1200.0}},
+                        {"text": "Memo"},
+                    ]
+                ]
+            }
+        ]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertEqual(1.0, metrics["numeric_accuracy"])
+
+    def test_table_compare_bbox_iou(self) -> None:
+        predicted = [{"bbox": [0, 0, 10, 10], "rows": []}]
+        truth = [{"bbox": [5, 0, 15, 10], "rows": []}]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertAlmostEqual(1.0 / 3.0, metrics["bbox_iou"])
+
+    def test_table_compare_skipped_baseline_record_is_stable(self) -> None:
+        entry = table_compare.Entry(
+            category="financial_table_stress",
+            doc_id="invoice",
+            pdf_path=Path("/tmp/invoice.pdf"),
+            truth_text_path=None,
+            table_truth_path=None,
+            table_case_tags=("invoice",),
+        )
+
+        row = table_compare.skipped(entry, "pymupdf-find-tables", "PyMuPDF is not installed")
+
+        self.assertEqual("table_compare_result", row["record_type"])
+        self.assertEqual("0.2.0", row["table_compare_schema_version"])
+        self.assertEqual("skipped", row["status"])
+        self.assertEqual(["invoice"], row["table_case_tags"])
+
+    def test_table_compare_jsonl_rows_parse_line_by_line(self) -> None:
+        row = {
+            "record_type": "table_compare_result",
+            "table_compare_schema_version": "0.1.0",
+            "status": "ok",
+        }
+        output = io.StringIO()
+
+        table_compare.write_row(output, row)
+
+        self.assertEqual(row, json.loads(output.getvalue()))
 
     def test_profile_output_jsonl_parses_line_by_line(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

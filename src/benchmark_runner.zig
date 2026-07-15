@@ -10,7 +10,7 @@ const eval = @import("eval.zig");
 const eval_runner = @import("eval_runner.zig");
 const schema = @import("schema.zig");
 
-pub const benchmark_schema_version = "0.1.0";
+pub const benchmark_schema_version = "0.2.0";
 
 const MetricName = enum {
     cer,
@@ -26,6 +26,10 @@ const MetricName = enum {
     table_page_accuracy,
     table_continuation_accuracy,
     table_source_span_coverage,
+    table_bbox_iou,
+    table_numeric_accuracy,
+    table_header_accuracy,
+    table_footnote_accuracy,
     formula_structure_accuracy,
     form_field_accuracy,
     latency_ms,
@@ -58,6 +62,10 @@ const default_specs = [_]MetricSpec{
     .{ .name = .table_page_accuracy, .direction = .higher, .max_regression = 0.03 },
     .{ .name = .table_continuation_accuracy, .direction = .higher, .max_regression = 0.03 },
     .{ .name = .table_source_span_coverage, .direction = .higher, .max_regression = 0.05 },
+    .{ .name = .table_bbox_iou, .direction = .higher, .max_regression = 0.03 },
+    .{ .name = .table_numeric_accuracy, .direction = .higher, .max_regression = 0.03 },
+    .{ .name = .table_header_accuracy, .direction = .higher, .max_regression = 0.03 },
+    .{ .name = .table_footnote_accuracy, .direction = .higher, .max_regression = 0.03 },
     .{ .name = .formula_structure_accuracy, .direction = .higher, .max_regression = 0.03 },
     .{ .name = .form_field_accuracy, .direction = .higher, .max_regression = 0.03 },
     .{ .name = .latency_ms, .direction = .lower, .max_regression = 25.0 },
@@ -109,6 +117,10 @@ const Metrics = struct {
     table_page_accuracy: ?f64 = null,
     table_continuation_accuracy: ?f64 = null,
     table_source_span_coverage: ?f64 = null,
+    table_bbox_iou: ?f64 = null,
+    table_numeric_accuracy: ?f64 = null,
+    table_header_accuracy: ?f64 = null,
+    table_footnote_accuracy: ?f64 = null,
     formula_structure_accuracy: ?f64 = null,
     form_field_accuracy: ?f64 = null,
     latency_ms: ?f64 = null,
@@ -662,6 +674,10 @@ fn parseEvalJsonlResult(
             .table_page_accuracy = jsonFloat(metrics_object.get("table_page_accuracy")),
             .table_continuation_accuracy = jsonFloat(metrics_object.get("table_continuation_accuracy")),
             .table_source_span_coverage = jsonFloat(metrics_object.get("table_source_span_coverage")),
+            .table_bbox_iou = jsonFloat(metrics_object.get("table_bbox_iou")),
+            .table_numeric_accuracy = jsonFloat(metrics_object.get("table_numeric_accuracy")),
+            .table_header_accuracy = jsonFloat(metrics_object.get("table_header_accuracy")),
+            .table_footnote_accuracy = jsonFloat(metrics_object.get("table_footnote_accuracy")),
             .formula_structure_accuracy = jsonFloat(metrics_object.get("formula_structure_accuracy")),
             .form_field_accuracy = jsonFloat(metrics_object.get("form_field_accuracy")),
             .latency_ms = jsonFloat(metrics_object.get("median_ms_per_page")),
@@ -958,6 +974,10 @@ fn writeCategorySummaries(writer: anytype, ctx: RenderContext, jsonl: bool) !voi
             try writer.writeByte(',');
             try writeMetricAggregate(writer, ctx.results, lane.id, category_name, .table_cell_accuracy);
             try writer.writeByte(',');
+            try writeMetricAggregate(writer, ctx.results, lane.id, category_name, .table_numeric_accuracy);
+            try writer.writeByte(',');
+            try writeMetricAggregate(writer, ctx.results, lane.id, category_name, .table_bbox_iou);
+            try writer.writeByte(',');
             try writeMetricAggregate(writer, ctx.results, lane.id, category_name, .latency_ms);
             try writer.writeAll("}}");
         }
@@ -1095,6 +1115,10 @@ fn metricValue(metrics: Metrics, metric: MetricName) ?f64 {
         .table_page_accuracy => metrics.table_page_accuracy,
         .table_continuation_accuracy => metrics.table_continuation_accuracy,
         .table_source_span_coverage => metrics.table_source_span_coverage,
+        .table_bbox_iou => metrics.table_bbox_iou,
+        .table_numeric_accuracy => metrics.table_numeric_accuracy,
+        .table_header_accuracy => metrics.table_header_accuracy,
+        .table_footnote_accuracy => metrics.table_footnote_accuracy,
         .formula_structure_accuracy => metrics.formula_structure_accuracy,
         .form_field_accuracy => metrics.form_field_accuracy,
         .latency_ms => metrics.latency_ms,
@@ -1275,7 +1299,17 @@ test "benchmark scorecard JSONL records parse line by line" {
         if (line.len == 0) continue;
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer parsed.deinit();
-        try std.testing.expect(parsed.value.object.get("benchmark_schema_version") != null);
+        try std.testing.expectEqualStrings(
+            benchmark_schema_version,
+            parsed.value.object.get("benchmark_schema_version").?.string,
+        );
+        if (std.mem.eql(u8, parsed.value.object.get("record_type").?.string, "benchmark_document_result")) {
+            const metrics = parsed.value.object.get("metrics").?.object;
+            try std.testing.expect(metrics.get("table_bbox_iou") != null);
+            try std.testing.expect(metrics.get("table_numeric_accuracy") != null);
+            try std.testing.expect(metrics.get("table_header_accuracy") != null);
+            try std.testing.expect(metrics.get("table_footnote_accuracy") != null);
+        }
         count += 1;
     }
     try std.testing.expect(count >= 4);

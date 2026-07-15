@@ -1,0 +1,95 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 805 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 742 Tm
+(Procurement Schedule) Tj
+1 0 0 1 84 708 Tm
+(Vendor) Tj
+1 0 0 1 188 708 Tm
+(Materials) Tj
+1 0 0 1 288 720 Tm
+(Labor) Tj
+1 0 0 1 264 700 Tm
+(Cost) Tj
+1 0 0 1 332 700 Tm
+(Fees) Tj
+1 0 0 1 416 708 Tm
+(Total) Tj
+1 0 0 1 84 672 Tm
+(Northwind) Tj
+1 0 0 1 188 672 Tm
+(10) Tj
+1 0 0 1 210 672 Tm
+(hrs) Tj
+1 0 0 1 264 672 Tm
+(500) Tj
+1 0 0 1 332 672 Tm
+(900) Tj
+1 0 0 1 416 672 Tm
+(1,400) Tj
+1 0 0 1 84 644 Tm
+(Contoso) Tj
+1 0 0 1 188 644 Tm
+(8) Tj
+1 0 0 1 204 644 Tm
+(hrs) Tj
+1 0 0 1 264 644 Tm
+(450) Tj
+1 0 0 1 332 644 Tm
+(840) Tj
+1 0 0 1 416 644 Tm
+(1,290) Tj
+ET
+1 w
+72 730 m 500 730 l
+S
+72 690 m 500 690 l
+S
+72 662 m 500 662 l
+S
+72 634 m 500 634 l
+S
+72 634 m 72 730 l
+S
+176 634 m 176 730 l
+S
+252 634 m 252 730 l
+S
+316 634 m 316 690 l
+S
+400 634 m 400 730 l
+S
+500 634 m 500 730 l
+S
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001103 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1200
+%%EOF

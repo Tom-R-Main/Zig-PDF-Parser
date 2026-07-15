@@ -33,7 +33,7 @@ zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
 That command emits one JSONL record for each current fixture category:
 clean born-digital text, academic two-column layout, scientific math notation,
 scanned/typewritten image-only input, financial tables, forms, weird-font
-fixtures, and adversarial page-tree recovery.
+fixtures, visual truth fixtures, and adversarial page-tree recovery.
 
 `benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
 checked-in corpus. Each row records the fixture id, source note, redistribution
@@ -63,6 +63,58 @@ This is a differential accuracy harness: the sidecar truth defines the expected
 behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an
 absolute oracle.
 
+Render-oracle sidecars live under
+`benchmark/eval/ground_truth/render_oracle/`. They keep visual expectations out
+of the main manifest while allowing optional pixel-backed checks for rotated
+pages, clipped text, invisible OCR-style layers, ruled tables, and mixed image
+regions:
+
+```sh
+.venv/bin/python benchmark/eval/render_oracle.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --category visual_truth \
+  --output /tmp/pdf-parser-render-oracle.jsonl
+```
+
+The render oracle is benchmark evidence, not parser core code. It requires
+Pillow in the Python environment, then runs
+`pdf-parser extract-adaptive --format artifact-jsonl --debug-assets-dir ...`,
+renders pages with Poppler `pdftoppm` at 144 DPI by default, maps public
+PDF-coordinate bboxes into raster pixels using the materialized page overlay
+SVG `viewBox`, and emits JSONL records with coverage signals. Optional
+renderers are available through `--renderer all` when pypdfium2 or `mutool draw`
+are installed; use `--require-renderers` when missing optional engines should
+fail. `--materialize-dir` writes rendered pages and low-coverage crops for
+review, but generated PNGs/crops are local outputs and should not be committed.
+
+Financial table stress fixtures live under `benchmark/eval/table_stress/`.
+They are checked-in synthetic reductions for real-world table shapes: SEC
+statement continuation pages, borderless bank transactions, wrapped invoice
+totals, procurement nested headers, and legal schedules drawn out of content
+order. The stress pack has its own manifest so the tiny default correctness
+corpus stays quick:
+
+```sh
+zig build eval -- --adaptive --manifest benchmark/eval/table_stress/manifest.tsv
+.venv/bin/python benchmark/eval/table_compare.py \
+  --manifest benchmark/eval/table_stress/manifest.tsv \
+  --output /tmp/pdf-parser-table-stress.jsonl
+```
+
+`table_compare.py` treats `pdf-parser`, PyMuPDF `Page.find_tables()`, and
+optional pdfplumber as neutral lanes. Missing optional baselines emit skipped
+records unless `--require-baselines` is supplied. Truth sidecars preserve the
+simple `rows/cells` shape and may add `bbox`, `page`, `role`, `rowspan`,
+`colspan`, `numeric`, continuation ids, and source-span requirements.
+
+Table comparator records use schema `0.2.0`. Per-document
+`table_quality_floors` in `table_stress/metadata.jsonl` are enforced for the
+named tool; the checked-in floors gate `pdf-parser`, while optional baseline
+tools remain observational. The `legal-schedule-out-of-order` fixture records
+`pdf-parser` in `table_known_unsupported_tools`: its result is emitted with
+`status: known_unsupported` and does not block the suite. This keeps the gap
+visible without representing it as a quality pass.
+
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
 and profiling work rather than truth-labeled correctness scoring:
@@ -91,7 +143,10 @@ over formula page/text sequence; form JSON truth emits `form_field_accuracy`
 over field name/type/value sequence. Richer table truth may include `rowspan`, `colspan`,
 `role`, `bbox`, and `page`; when span fields are present the runner also emits
 `table_span_accuracy`, and when role fields are present it emits
-`table_role_accuracy`.
+`table_role_accuracy`. Table truth with bbox, numeric, header/footer/note, or
+continuation labels also enables `table_bbox_iou`, `table_numeric_accuracy`,
+`table_header_accuracy`, `table_footnote_accuracy`, and
+`table_continuation_accuracy`.
 
 External task evaluators can feed their scores into the same record:
 
@@ -131,6 +186,8 @@ benchmark/eval/
     manuals/
     forms/
     weird_fonts/
+    visual_truth/
+    financial_table_stress/
     adversarial_corrupt/
   ground_truth/
     page_text/
@@ -140,6 +197,7 @@ benchmark/eval/
     formulas_json/
     form_fields/
     fonts/
+    render_oracle/
     reading_order/
   outputs/
     pdf-parser/
@@ -150,6 +208,11 @@ benchmark/eval/
     openparse/
     tesseract_pipeline/
     optional_vlm_oracle/
+  table_stress/
+    manifest.tsv
+    metadata.jsonl
+    corpus/
+    ground_truth/
 ```
 
 ## Metrics
@@ -163,9 +226,12 @@ accuracy for page/text sequence. Form JSON labels add field accuracy for
 value-bearing AcroForm name/type/value sequence. Table JSON labels with role,
 rowspan, colspan, page, or continuation fields add structure accuracy metrics
 for header/row-header/data/note/footer semantics, row spans, column spans, page
-identity, continuation links, and source-span coverage. The result schema also
-has slots for table detection F1, TEDS, GriTS, and formula CDM so local
-specialist adapters can report into the same records as they come online.
+identity, continuation links, and source-span coverage. Benchmark schema
+`0.2.0` adds the compatible table metrics `table_bbox_iou`,
+`table_numeric_accuracy`, `table_header_accuracy`, and
+`table_footnote_accuracy`. The result schema also has slots for table detection
+F1, TEDS, GriTS, and formula CDM so local specialist adapters can report into
+the same records as they come online.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.
@@ -185,8 +251,10 @@ pdf-parser benchmark \
   --jsonl benchmark/eval/outputs/scorecards/tiny-corpus.records.jsonl
 ```
 
-The full JSON scorecard and JSONL stream use benchmark schema `0.1.0`, separate
-from adaptive extraction schemas. Records include `benchmark_run`,
+The full JSON scorecard and JSONL stream use benchmark schema `0.2.0`, separate
+from adaptive extraction schemas. Benchmark versions follow the public output
+schema policy: compatible additive metrics use a MINOR bump. Records include
+`benchmark_run`,
 `benchmark_suite`, `benchmark_lane`, `benchmark_document_result`,
 `benchmark_category_summary`, `benchmark_regression`, and
 `benchmark_scorecard`. Each record carries `run_id`, `suite_id`,

@@ -114,6 +114,13 @@ pdf-parser benchmark \
 .venv/bin/python benchmark/eval/font_compare.py \
   --manifest benchmark/eval/corpus/manifest.tsv \
   --output /tmp/pdf-parser-font-diff.jsonl
+.venv/bin/python benchmark/eval/render_oracle.py \
+  --manifest benchmark/eval/corpus/manifest.tsv \
+  --category visual_truth \
+  --output /tmp/pdf-parser-render-oracle.jsonl
+.venv/bin/python benchmark/eval/table_compare.py \
+  --manifest benchmark/eval/table_stress/manifest.tsv \
+  --output /tmp/pdf-parser-table-stress.jsonl
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
 .venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
@@ -130,13 +137,34 @@ pdf-parser benchmark \
 
 Current fixture classes include clean born-digital text, academic two-column
 layout, scientific formulas, image-only scans, mixed native/scan pages,
-financial tables, AcroForms, weird-font cases, and corrupt/adversarial PDFs.
+financial tables, AcroForms, weird-font cases, visual truth fixtures, and
+corrupt/adversarial PDFs.
 `benchmark/eval/font_compare.py` runs the weird-font subset against
 `pdf-parser`, PyMuPDF, and pypdfium2; use it as differential accuracy evidence,
 not as a claim that the Python tools are universal ground truth. Financial
 table truth can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and
 bbox-aware provenance. Form truth asserts field name/type/value sequences.
 Formula truth can assert both text and simple structure records.
+
+`benchmark/eval/render_oracle.py` is an optional render-backed differential
+lane. It runs `extract-adaptive --format artifact-jsonl --debug-assets-dir`,
+renders pages with Poppler `pdftoppm` by default, maps span/block/table/route
+geometry into raster pixels using the emitted SVG overlay viewBox, and reports
+coverage signals for rotated pages, clipped text, invisible OCR-like layers,
+ruled-table pixels, and mixed image regions. Use `--renderer all` to include
+optional pypdfium2 and `mutool draw` lanes, and `--materialize-dir` to write
+rendered pages or low-coverage crops for review. Generated PNGs and crops are
+local artifacts only; they should not be committed.
+
+`benchmark/eval/table_stress` is a separate checked-in financial table stress
+pack. It contains small synthetic reductions for SEC statement continuations,
+borderless bank statements, wrapped invoice totals, procurement nested headers,
+and legal schedules drawn out of order. Use `benchmark/eval/table_compare.py`
+to compare structured table artifacts against PyMuPDF `Page.find_tables()` and
+optional pdfplumber lanes. The stress runner reports cell text, role, bbox IoU,
+numeric, continuation, and source-span coverage metrics where the truth sidecar
+provides labels. Larger source PDFs and redistribution-unclear page reductions
+belong under ignored benchmark cache paths, not git.
 
 `pdf-parser benchmark` is the product-facing corpus runner. It emits a full
 scorecard JSON plus optional record-oriented JSONL with `benchmark_run`,
@@ -187,8 +215,8 @@ cache is populated.
 
 - Zig 0.16.0
 - Optional: `tesseract` and `pdftoppm` for OCR eval routes
-- Optional: Python virtualenv with PyMuPDF, pypdfium2, and pdfplumber for
-  cross-parser comparison
+- Optional: Python virtualenv with Pillow for render-oracle checks, plus
+  PyMuPDF, pypdfium2, and pdfplumber for cross-parser comparison
 
 ## Building
 

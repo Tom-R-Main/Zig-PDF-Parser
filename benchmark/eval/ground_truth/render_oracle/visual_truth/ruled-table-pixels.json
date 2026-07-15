@@ -1,0 +1,8 @@
+{
+  "expected_page_count": 1,
+  "expected_issue_tags": ["ruling_lines"],
+  "min_text_bbox_coverage": 0.2,
+  "max_blank_bbox_rate": 0.8,
+  "min_ruling_pixel_coverage": 0.2,
+  "min_image_region_overlap": 0.0
+}

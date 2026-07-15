@@ -1,0 +1,30 @@
+[
+  {
+    "rows": [
+      [
+        { "text": "Clause", "role": "header" },
+        { "text": "Party", "role": "header" },
+        { "text": "Amount", "role": "header" },
+        { "text": "Notes", "role": "header" }
+      ],
+      [
+        { "text": "1.1", "role": "row_header" },
+        { "text": "Seller", "role": "data" },
+        { "text": "1,000", "role": "data", "numeric": { "is_numeric": true, "value": 1000.0 } },
+        { "text": "Escrow release", "role": "data" }
+      ],
+      [
+        { "text": "2.4", "role": "row_header" },
+        { "text": "Buyer", "role": "data" },
+        { "text": "N/M", "role": "data", "numeric": { "is_numeric": false, "value": null } },
+        { "text": "Subject to audit", "role": "data" }
+      ],
+      [
+        { "text": "3.2", "role": "row_header" },
+        { "text": "Seller", "role": "data" },
+        { "text": "(250)", "role": "data", "numeric": { "is_numeric": true, "value": -250.0 } },
+        { "text": "Credit memo", "role": "data" }
+      ]
+    ]
+  }
+]

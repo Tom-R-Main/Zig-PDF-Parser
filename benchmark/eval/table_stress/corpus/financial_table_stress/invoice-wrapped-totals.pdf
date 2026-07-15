@@ -1,0 +1,109 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1003 >>
+stream
+BT
+/F1 12 Tf
+1 0 0 1 72 742 Tm
+(Invoice 1007) Tj
+1 0 0 1 76 708 Tm
+(Item) Tj
+1 0 0 1 132 708 Tm
+(Description) Tj
+1 0 0 1 318 708 Tm
+(Qty) Tj
+1 0 0 1 372 708 Tm
+(Unit) Tj
+1 0 0 1 456 708 Tm
+(Total) Tj
+1 0 0 1 76 682 Tm
+(A-1) Tj
+1 0 0 1 132 686 Tm
+(Implementation) Tj
+1 0 0 1 132 670 Tm
+(services) Tj
+1 0 0 1 318 678 Tm
+(2) Tj
+1 0 0 1 372 678 Tm
+(1,250) Tj
+1 0 0 1 456 678 Tm
+(2,500) Tj
+1 0 0 1 76 642 Tm
+(B-9) Tj
+1 0 0 1 132 642 Tm
+(Support) Tj
+1 0 0 1 190 642 Tm
+(retainer) Tj
+1 0 0 1 318 642 Tm
+(1) Tj
+1 0 0 1 372 642 Tm
+(850) Tj
+1 0 0 1 456 642 Tm
+(850) Tj
+1 0 0 1 372 604 Tm
+(Subtotal) Tj
+1 0 0 1 456 604 Tm
+(3,350) Tj
+1 0 0 1 372 584 Tm
+(Tax) Tj
+1 0 0 1 456 584 Tm
+(268) Tj
+1 0 0 1 372 564 Tm
+(Total) Tj
+1 0 0 1 456 564 Tm
+(3,618) Tj
+ET
+1 w
+72 724 m 524 724 l
+S
+72 696 m 524 696 l
+S
+72 658 m 524 658 l
+S
+72 626 m 524 626 l
+S
+360 616 m 524 616 l
+S
+360 556 m 524 556 l
+S
+72 626 m 72 724 l
+S
+120 626 m 120 724 l
+S
+304 626 m 304 724 l
+S
+360 556 m 360 724 l
+S
+444 556 m 444 724 l
+S
+524 556 m 524 724 l
+S
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001302 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1399
+%%EOF
