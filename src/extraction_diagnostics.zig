@@ -76,6 +76,15 @@ pub const Report = struct {
     output_codepoints: usize = 0,
     invalid_utf8_pages: usize = 0,
     pages_with_text_operators_without_glyphs: usize = 0,
+    form_xobjects_decoded: usize = 0,
+    selection_inventory_codepoints: usize = 0,
+    selection_candidate_codepoints: usize = 0,
+    selection_missing_codepoints: usize = 0,
+    selection_extra_codepoints: usize = 0,
+    pages_selected_structured: usize = 0,
+    pages_selected_table: usize = 0,
+    pages_selected_full_context: usize = 0,
+    pages_selected_legacy_fallback: usize = 0,
 
     pub fn deinit(self: *Report) void {
         if (self.fonts.len > 0) {
@@ -104,10 +113,16 @@ pub const Report = struct {
         if (decoded_glyphs == 0) return 0;
         return @as(f64, @floatFromInt(self.unmapped_glyph_count)) / @as(f64, @floatFromInt(decoded_glyphs));
     }
+
+    pub fn candidateCoverageRatio(self: Report) f64 {
+        if (self.selection_inventory_codepoints == 0) return 1;
+        const covered = self.selection_inventory_codepoints -| self.selection_missing_codepoints;
+        return @as(f64, @floatFromInt(covered)) / @as(f64, @floatFromInt(self.selection_inventory_codepoints));
+    }
 };
 
 pub fn renderJson(writer: anytype, document_id: []const u8, report: Report) !void {
-    try writer.writeAll("{\"schema_name\":\"extraction_diagnostics\",\"schema_version\":\"0.2.0\",\"record_type\":\"extraction_diagnostics\",\"source_id\":\"");
+    try writer.writeAll("{\"schema_name\":\"extraction_diagnostics\",\"schema_version\":\"0.3.0\",\"record_type\":\"extraction_diagnostics\",\"source_id\":\"");
     try writeJsonEscaped(writer, document_id);
     try writer.writeAll("\",\"provenance\":{\"source_kind\":\"native_pdf\",\"operation\":\"inspect_extraction\"}");
     try writer.writeAll(",\"document_id\":\"");
@@ -144,6 +159,18 @@ pub fn renderJson(writer: anytype, document_id: []const u8, report: Report) !voi
         report.output_bytes,
         report.output_codepoints,
         report.invalid_utf8_pages,
+    });
+    try writer.print(",\"selection\":{{\"form_xobjects_decoded\":{},\"inventory_codepoints\":{},\"candidate_codepoints\":{},\"missing_codepoints\":{},\"extra_codepoints\":{},\"candidate_coverage_ratio\":{d:.6},\"pages_selected\":{{\"structured\":{},\"table\":{},\"full_context\":{},\"legacy_fallback\":{}}}}}", .{
+        report.form_xobjects_decoded,
+        report.selection_inventory_codepoints,
+        report.selection_candidate_codepoints,
+        report.selection_missing_codepoints,
+        report.selection_extra_codepoints,
+        report.candidateCoverageRatio(),
+        report.pages_selected_structured,
+        report.pages_selected_table,
+        report.pages_selected_full_context,
+        report.pages_selected_legacy_fallback,
     });
     try writer.print(",\"signals\":{{\"no_pages_discovered\":{},\"text_operators_without_glyphs\":{},\"unicode_mapping_failures\":{},\"unicode_mapping_failure_ratio\":{d:.6}}}", .{
         report.document_page_count == 0,
@@ -232,13 +259,22 @@ test "diagnostic JSON includes per-font mapping provenance" {
         .glyph_count = 8,
         .mapped_glyph_count = 8,
         .output_bytes = 12,
+        .form_xobjects_decoded = 2,
+        .selection_inventory_codepoints = 10,
+        .selection_candidate_codepoints = 8,
+        .selection_missing_codepoints = 2,
+        .pages_selected_full_context = 1,
         .fonts = &.{font},
     });
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.items, .{});
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("0.2.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.3.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("fixture.pdf", parsed.value.object.get("source_id").?.string);
     const rendered_font = parsed.value.object.get("fonts").?.array.items[0].object;
     try std.testing.expectEqual(@as(i64, 1111), rendered_font.get("font_object").?.integer);
     try std.testing.expectEqual(@as(i64, 8), rendered_font.get("mapping_sources").?.object.get("glyph_name").?.integer);
+    const selection = parsed.value.object.get("selection").?.object;
+    try std.testing.expectEqual(@as(i64, 2), selection.get("form_xobjects_decoded").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), selection.get("missing_codepoints").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), selection.get("pages_selected").?.object.get("full_context").?.integer);
 }

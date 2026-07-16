@@ -733,10 +733,22 @@ pub const Document = struct {
                 report.pages_with_text_operators_without_glyphs += 1;
             }
 
-            const output = self.extractTextStructured(page_num, scratch_allocator) catch {
+            var selection_metrics: StructuredSelectionMetrics = .{};
+            const output = self.extractTextStructuredWithMetrics(page_num, scratch_allocator, &selection_metrics) catch {
                 report.page_extraction_errors += 1;
                 continue;
             };
+            report.form_xobjects_decoded += selection_metrics.form_xobjects_decoded;
+            report.selection_inventory_codepoints += selection_metrics.inventory_codepoints;
+            report.selection_candidate_codepoints += selection_metrics.candidate_codepoints;
+            report.selection_missing_codepoints += selection_metrics.missing_codepoints;
+            report.selection_extra_codepoints += selection_metrics.extra_codepoints;
+            switch (selection_metrics.selected) {
+                .structured => report.pages_selected_structured += 1,
+                .table => report.pages_selected_table += 1,
+                .full_context => report.pages_selected_full_context += 1,
+                .legacy_fallback => report.pages_selected_legacy_fallback += 1,
+            }
             report.output_bytes += output.len;
             if (std.mem.trim(u8, output, " \t\r\n\x0c").len > 0) report.pages_with_output += 1;
             if (std.unicode.utf8ValidateSlice(output)) {
@@ -1038,7 +1050,17 @@ pub const Document = struct {
     /// Extract text using structure tree reading order (for tagged PDFs)
     /// Falls back to geometric sorting if no structure tree is present
     pub fn extractTextStructured(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
+        return self.extractTextStructuredWithMetrics(page_num, allocator, null);
+    }
+
+    fn extractTextStructuredWithMetrics(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        selection_metrics: ?*StructuredSelectionMetrics,
+    ) ![]u8 {
         if (page_num >= self.pages.items.len) return error.PageNotFound;
+        if (selection_metrics) |metrics| metrics.* = .{};
 
         // Ensure reading order is cached (done once per document)
         self.ensureReadingOrder();
@@ -1067,6 +1089,26 @@ pub const Document = struct {
         // Lazy-load fonts for this page
         self.ensurePageFonts(page_num);
 
+        // Build the completeness oracle with page resources and recursive Form
+        // XObject handling. Reading-order candidates may reorder this content,
+        // but they must not silently discard any non-whitespace Unicode scalar.
+        var full_context_text = self.extractTextFullContextFromContent(
+            page_num,
+            allocator,
+            scratch_allocator,
+            content,
+            selection_metrics,
+        ) catch |err| blk: {
+            if (err == error.OutOfMemory) return err;
+            break :blk null;
+        };
+        errdefer if (full_context_text) |text| allocator.free(text);
+        if (full_context_text) |text| {
+            if (selection_metrics) |metrics| {
+                metrics.inventory_codepoints = comparableCodepointCount(text);
+            }
+        }
+
         // Check if we have cached reading order for this page
         if (self.cached_reading_order) |*cache| {
             if (cache.get(page_num)) |mcids| {
@@ -1076,8 +1118,17 @@ pub const Document = struct {
 
                 {
                     var nw: NullWriter = .{};
-                    extractContentStream(content, .{ .structured = &extractor }, &self.font_cache, page_num, scratch_allocator, &nw) catch
-                        return self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
+                    extractContentStream(content, .{ .structured = &extractor }, &self.font_cache, page_num, scratch_allocator, &nw) catch |err| {
+                        if (err == error.OutOfMemory) return err;
+                        if (full_context_text) |inventory| {
+                            full_context_text = null;
+                            if (selection_metrics) |metrics| metrics.selected = .full_context;
+                            return self.withPageFormFields(page_num, allocator, inventory);
+                        }
+                        if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
+                        const geometric = try self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
+                        return self.withPageFormFields(page_num, allocator, geometric);
+                    };
                 }
 
                 // Collect text in structure tree order
@@ -1097,32 +1148,68 @@ pub const Document = struct {
 
                 if (result.items.len > 0) {
                     const structured = try result.toOwnedSlice(allocator);
-                    const stream_text = self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content) catch
-                        return self.withPageFormFields(page_num, allocator, structured);
-                    defer allocator.free(stream_text);
-                    // If structured covers ≥60% of stream content, trust the structure tree order
-                    if (structured.len >= stream_text.len * 6 / 10) {
+                    if (full_context_text) |inventory| {
+                        const comparison = compareTextContent(scratch_allocator, inventory, structured) catch |err| {
+                            allocator.free(structured);
+                            return err;
+                        };
+                        if (selection_metrics) |metrics| metrics.recordCandidate(comparison);
+                        if (comparison.equivalent()) {
+                            allocator.free(inventory);
+                            full_context_text = null;
+                            if (selection_metrics) |metrics| metrics.selected = .structured;
+                            return self.withPageFormFields(page_num, allocator, structured);
+                        }
+                        allocator.free(structured);
+                        full_context_text = null;
+                        if (selection_metrics) |metrics| metrics.selected = .full_context;
+                        return self.withPageFormFields(page_num, allocator, inventory);
+                    }
+                    if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
+                    if (std.mem.trim(u8, structured, " \t\r\n\x0c").len > 0) {
                         return self.withPageFormFields(page_num, allocator, structured);
                     }
-                    // Otherwise fall back to stream order (more complete for partially-tagged PDFs)
                     allocator.free(structured);
-                    return self.withPageFormFields(page_num, allocator, try allocator.dupe(u8, stream_text));
                 }
                 result.deinit(allocator);
             }
         }
 
         if (try self.extractTextTableAwareFromContent(page_num, allocator, scratch_allocator, content)) |table_text| {
+            if (full_context_text) |inventory| {
+                const comparison = compareTextContent(scratch_allocator, inventory, table_text) catch |err| {
+                    allocator.free(table_text);
+                    return err;
+                };
+                if (selection_metrics) |metrics| metrics.recordCandidate(comparison);
+                if (comparison.equivalent()) {
+                    allocator.free(inventory);
+                    full_context_text = null;
+                    if (selection_metrics) |metrics| metrics.selected = .table;
+                    return self.withPageFormFields(page_num, allocator, table_text);
+                }
+                allocator.free(table_text);
+                full_context_text = null;
+                if (selection_metrics) |metrics| metrics.selected = .full_context;
+                return self.withPageFormFields(page_num, allocator, inventory);
+            }
+            if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
             return self.withPageFormFields(page_num, allocator, table_text);
         }
 
-        // For untagged content, prefer stream-order extraction first.
-        // This generally tracks MuPDF text extraction more closely on large
-        // technical PDFs, while keeping geometric extraction as a fallback.
+        if (full_context_text) |inventory| {
+            full_context_text = null;
+            if (selection_metrics) |metrics| metrics.selected = .full_context;
+            return self.withPageFormFields(page_num, allocator, inventory);
+        }
+
+        // Legacy fallback for domain errors in full-context extraction.
         const stream_text = self.extractTextStreamOrderFromContent(page_num, allocator, scratch_allocator, content) catch |err| {
             if (err == error.OutOfMemory) return err;
+            if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
             return self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
         };
+        if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
         if (stream_text.len > 0) {
             return self.withPageFormFields(page_num, allocator, stream_text);
         }
@@ -1274,6 +1361,35 @@ pub const Document = struct {
     fn extractTextStreamOrderFromContentInto(self: *Document, page_num: usize, scratch_allocator: std.mem.Allocator, content: []const u8, writer: anytype) !void {
         self.ensurePageFonts(page_num);
         try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, writer);
+    }
+
+    fn extractTextFullContextFromContent(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+        selection_metrics: ?*StructuredSelectionMetrics,
+    ) ![]u8 {
+        var output: std.ArrayList(u8) = .empty;
+        errdefer output.deinit(allocator);
+        try output.ensureTotalCapacity(allocator, 2048);
+
+        const page = self.pages.items[page_num];
+        const ctx = ExtractionContext{
+            .parse_allocator = self.parsing_arena.allocator(),
+            .scratch_allocator = scratch_allocator,
+            .data = self.data,
+            .xref_table = &self.xref_table,
+            .object_cache = &self.object_cache,
+            .font_cache = &self.font_cache,
+            .page_num = page_num,
+            .depth = 0,
+            .security = self.securityHandler(),
+            .selection_metrics = selection_metrics,
+        };
+        try extractTextFromContentFull(content, page.resources, &ctx, runtime.arrayListWriter(&output, allocator));
+        return output.toOwnedSlice(allocator);
     }
 
     /// Extract text from all pages using structure tree order
@@ -2689,8 +2805,42 @@ const ExtractionContext = struct {
     page_num: usize,
     depth: u8, // Recursion depth for nested Form XObjects
     security: ?*const encryption.SecurityHandler,
+    selection_metrics: ?*StructuredSelectionMetrics = null,
 
     const MAX_DEPTH: u8 = 10; // Prevent infinite recursion
+};
+
+const TextSelection = enum {
+    structured,
+    table,
+    full_context,
+    legacy_fallback,
+};
+
+const StructuredSelectionMetrics = struct {
+    form_xobjects_decoded: usize = 0,
+    inventory_codepoints: usize = 0,
+    candidate_codepoints: usize = 0,
+    missing_codepoints: usize = 0,
+    extra_codepoints: usize = 0,
+    selected: TextSelection = .legacy_fallback,
+
+    fn recordCandidate(self: *StructuredSelectionMetrics, comparison: TextContentComparison) void {
+        self.candidate_codepoints = comparison.candidate_codepoints;
+        self.missing_codepoints = comparison.missing_codepoints;
+        self.extra_codepoints = comparison.extra_codepoints;
+    }
+};
+
+const TextContentComparison = struct {
+    inventory_codepoints: usize = 0,
+    candidate_codepoints: usize = 0,
+    missing_codepoints: usize = 0,
+    extra_codepoints: usize = 0,
+
+    fn equivalent(self: TextContentComparison) bool {
+        return self.missing_codepoints == 0 and self.extra_codepoints == 0;
+    }
 };
 
 /// Extraction mode: controls how operators are dispatched
@@ -2856,6 +3006,97 @@ fn utf8CodepointCount(text: []const u8) usize {
         if (byte & 0xC0 != 0x80) count += 1;
     }
     return count;
+}
+
+fn comparableCodepointCount(text: []const u8) usize {
+    var count: usize = 0;
+    var index: usize = 0;
+    while (nextComparableCodepoint(text, &index)) |_| count += 1;
+    return count;
+}
+
+fn compareTextContent(
+    allocator: std.mem.Allocator,
+    inventory: []const u8,
+    candidate: []const u8,
+) !TextContentComparison {
+    var remaining = std.AutoHashMap(u21, usize).init(allocator);
+    defer remaining.deinit();
+
+    var comparison: TextContentComparison = .{};
+    var index: usize = 0;
+    while (nextComparableCodepoint(inventory, &index)) |codepoint| {
+        comparison.inventory_codepoints += 1;
+        const entry = try remaining.getOrPut(codepoint);
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+
+    index = 0;
+    while (nextComparableCodepoint(candidate, &index)) |codepoint| {
+        comparison.candidate_codepoints += 1;
+        if (remaining.getPtr(codepoint)) |count| {
+            if (count.* > 0) {
+                count.* -= 1;
+                continue;
+            }
+        }
+        comparison.extra_codepoints += 1;
+    }
+
+    var iterator = remaining.valueIterator();
+    while (iterator.next()) |count| comparison.missing_codepoints += count.*;
+    return comparison;
+}
+
+fn nextComparableCodepoint(text: []const u8, index: *usize) ?u21 {
+    while (index.* < text.len) {
+        const start = index.*;
+        const sequence_len: usize = std.unicode.utf8ByteSequenceLength(text[start]) catch 1;
+        if (start + sequence_len > text.len) {
+            index.* += 1;
+            const fallback: u21 = @intCast(text[start]);
+            if (!isSelectionWhitespace(fallback)) return fallback;
+            continue;
+        }
+
+        const codepoint = std.unicode.utf8Decode(text[start .. start + sequence_len]) catch blk: {
+            index.* += 1;
+            break :blk @as(u21, @intCast(text[start]));
+        };
+        if (index.* == start) index.* += sequence_len;
+        if (!isSelectionWhitespace(codepoint)) return codepoint;
+    }
+    return null;
+}
+
+fn isSelectionWhitespace(codepoint: u21) bool {
+    return switch (codepoint) {
+        0x0009...0x000D,
+        0x0020,
+        0x0085,
+        0x00A0,
+        0x1680,
+        0x2000...0x200A,
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+        => true,
+        else => false,
+    };
+}
+
+test "structured selection compares Unicode content as a multiset" {
+    const reordered = try compareTextContent(std.testing.allocator, "alpha βeta", "βeta\nalpha");
+    try std.testing.expect(reordered.equivalent());
+    try std.testing.expectEqual(@as(usize, 9), reordered.inventory_codepoints);
+
+    const incomplete = try compareTextContent(std.testing.allocator, "main form", "main");
+    try std.testing.expect(!incomplete.equivalent());
+    try std.testing.expectEqual(@as(usize, 4), incomplete.missing_codepoints);
+    try std.testing.expectEqual(@as(usize, 0), incomplete.extra_codepoints);
 }
 
 /// Look up a font encoding in the cache by page number and font name.
@@ -3506,6 +3747,7 @@ fn handleDoOperator(
     const params = xobj_resolved.dict.get("DecodeParms");
     const form_content = decompress.decompressStream(ctx.scratch_allocator, xobj_resolved.data, filter, params) catch return;
     defer ctx.scratch_allocator.free(form_content);
+    if (ctx.selection_metrics) |metrics| metrics.form_xobjects_decoded += 1;
 
     // Get Form XObject's own resources (may inherit from parent)
     const form_resources = xobj_resolved.dict.getDict("Resources") orelse resources;
@@ -3521,6 +3763,7 @@ fn handleDoOperator(
         .page_num = ctx.page_num,
         .depth = ctx.depth + 1,
         .security = ctx.security,
+        .selection_metrics = ctx.selection_metrics,
     };
 
     extractContentStream(form_content, .{ .stream = .{

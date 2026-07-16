@@ -669,6 +669,53 @@ pub fn generateActualTextRepairPdf(allocator: std.mem.Allocator) ![]u8 {
     return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
 }
 
+/// Tagged page whose structure tree covers only the page stream while a Form
+/// XObject contains additional searchable text. This reproduces the class of
+/// completeness failure seen in Yamada without redistributing book content.
+pub fn generatePartiallyTaggedFormXObjectPdf(allocator: std.mem.Allocator) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    const page_content =
+        "BT /F1 12 Tf 100 700 Td /P << /MCID 0 >> BDC (Tagged main ) Tj EMC ET\n" ++
+        "q 1 0 0 1 100 650 cm /Fm1 Do Q\n";
+    const form_content = "BT /F1 12 Tf 0 0 Td (Form-only recall text) Tj ET\n";
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 7 0 R /MarkInfo << /Marked true >> >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /StructParents 0 /Resources << /Font << /F1 5 0 R >> /XObject << /Fm1 6 0 R >> >> >>\nendobj\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n{s}endstream\nendobj\n", .{ page_content.len, page_content });
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const obj6_offset = pdf.items.len;
+    try writer.print("6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 300 50] /Resources << /Font << /F1 5 0 R >> >> /Length {} >>\nstream\n{s}endstream\nendobj\n", .{ form_content.len, form_content });
+
+    const obj7_offset = pdf.items.len;
+    try writer.writeAll("7 0 obj\n<< /Type /StructTreeRoot /K << /Type /StructElem /S /Document /Pg 3 0 R /K << /Type /StructElem /S /P /Pg 3 0 R /K 0 >> >> >>\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 8\n0000000000 65535 f \n");
+    inline for (.{ obj1_offset, obj2_offset, obj3_offset, obj4_offset, obj5_offset, obj6_offset, obj7_offset }) |offset| {
+        try writer.print("{d:0>10} 00000 n \n", .{offset});
+    }
+    try writer.writeAll("trailer\n<< /Size 8 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Redistribution-safe reduction of the Sleisenger page-30 Symbol font case.
 /// The source used an embedded subset, but the failure was entirely in these
 /// explicit Adobe glyph names, so the copyrighted font program is omitted.

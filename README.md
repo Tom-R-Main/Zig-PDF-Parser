@@ -282,7 +282,10 @@ pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv \
 
 `inspect extraction` includes per-font CMap, CIDSystemInfo, ToUnicode,
 embedded-font, CIDToGIDMap, and Unicode mapping-provenance counters so missing
-text can be attributed to a specific font and mapping layer.
+text can be attributed to a specific font and mapping layer. Selection
+diagnostics also compare reading-order candidates with a Form-aware full-context
+Unicode inventory and report missing/extra codepoints, decoded Form XObjects,
+coverage, and the selected output path.
 
 Adaptive extraction keeps fast native extraction on the default path while
 recording when a page or region should be routed elsewhere. Current route names

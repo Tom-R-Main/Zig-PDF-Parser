@@ -134,6 +134,30 @@ test "Sleisenger MathematicalPi reduction decodes scoped private glyph names" {
     try std.testing.expectEqual(@as(usize, 4), glyph_name_count);
 }
 
+test "structured extraction preserves Form XObject text omitted by partial tags" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generatePartiallyTaggedFormXObjectPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const output = try doc.extractTextStructured(0, allocator);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings(
+        "Tagged main Form-only recall text",
+        std.mem.trim(u8, output, " \t\r\n\x0c"),
+    );
+
+    const pages = [_]usize{0};
+    var diagnostics = try doc.inspectExtraction(allocator, &pages);
+    defer diagnostics.deinit();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.form_xobjects_decoded);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.pages_selected_full_context);
+    try std.testing.expect(diagnostics.selection_missing_codepoints > 0);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.selection_extra_codepoints);
+}
+
 test "page tree resolves an indirect Kids array" {
     const allocator = std.testing.allocator;
 

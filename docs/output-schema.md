@@ -298,9 +298,13 @@ pdf-parser serve --host 0.0.0.0 --port 8080
 ```
 
 `inspect extraction` emits the separate `extraction_diagnostics` schema
-(`0.2.0`). Its counters distinguish page discovery, decoded page-content
+(`0.3.0`). Its counters distinguish page discovery, decoded page-content
 buffers, text-show operators and operand bytes, mapped/unmapped glyphs, and
-final structured output. Each `fonts[]` record identifies the font object,
+final structured output. The `selection` record reports decoded Form XObjects,
+the full-context Unicode inventory, candidate missing/extra codepoints, coverage,
+and how many pages selected structured, table, full-context, or legacy output.
+Selection coverage ignores whitespace so reading-order changes do not look like
+content loss. Each `fonts[]` record identifies the font object,
 subtype, base font, encoding CMap, CIDSystemInfo, ToUnicode presence and map/
 glyph coverage, embedded font type, CIDToGIDMap type, and glyph counts by
 mapping source: `explicit_to_unicode`, `actual_text`, `simple_encoding`,
