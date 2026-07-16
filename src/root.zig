@@ -42,6 +42,7 @@ pub const stream = @import("stream.zig");
 pub const adapter = @import("adapter.zig");
 pub const visual_assets = @import("visual_assets.zig");
 pub const eval = @import("eval.zig");
+pub const extraction_diagnostics = @import("extraction_diagnostics.zig");
 
 // Re-exports
 pub const Object = parser.Object;
@@ -107,6 +108,7 @@ pub const EncryptionCryptMethod = encryption.CryptMethod;
 pub const EncryptionPermissions = encryption.Permissions;
 pub const StructuralDiagnostic = structural.Diagnostic;
 pub const StructuralSummary = structural.Summary;
+pub const ExtractionDiagnostics = extraction_diagnostics.Report;
 
 /// Error handling configuration
 pub const ErrorConfig = struct {
@@ -555,12 +557,13 @@ pub const Document = struct {
             };
 
             // Use the comprehensive parseFontEncoding
-            const enc = encoding.parseFontEncoding(arena, fd, struct {
+            var enc = encoding.parseFontEncoding(arena, fd, struct {
                 fn wrapper(ctx: *const anyopaque, obj: parser.Object) parser.Object {
                     const r: *const Resolver = @ptrCast(@alignCast(ctx));
                     return r.resolve(obj);
                 }
             }.wrapper, &resolver) catch continue;
+            enc.font_object_num = font_obj_id;
 
             // Need to dupe key since bufPrint uses stack buffer
             const owned_key = arena.dupe(u8, key) catch continue;
@@ -656,6 +659,95 @@ pub const Document = struct {
     /// Get number of pages
     pub fn pageCount(self: *const Document) usize {
         return self.pages.items.len;
+    }
+
+    /// Inspect each extraction layer without changing the normal output path.
+    /// This intentionally runs the bounds and final structured paths so a
+    /// report can distinguish decoded operators/glyphs from usable output.
+    pub fn inspectExtraction(self: *Document, allocator: std.mem.Allocator, pages: []const usize) !ExtractionDiagnostics {
+        var report = ExtractionDiagnostics{
+            .allocator = allocator,
+            .document_page_count = self.pageCount(),
+            .selected_page_count = pages.len,
+        };
+        var font_reports: std.ArrayList(extraction_diagnostics.FontReport) = .empty;
+        defer font_reports.deinit(allocator);
+        errdefer for (font_reports.items) |font_report| allocator.free(font_report.resource_name);
+
+        for (pages) |page_num| {
+            if (page_num >= self.pageCount()) continue;
+            report.pages_scanned += 1;
+
+            var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch_arena.deinit();
+            const scratch_allocator = scratch_arena.allocator();
+
+            const content = self.getPageContentForScratch(page_num, scratch_allocator) catch {
+                report.content_stream_errors += 1;
+                continue;
+            };
+            if (content.len == 0) {
+                report.pages_without_content += 1;
+            } else {
+                report.pages_with_content += 1;
+                report.decoded_content_bytes += content.len;
+            }
+
+            const page_text_operators_before = report.text_show_operator_count;
+            scanExtractionOperators(scratch_allocator, content, &report) catch {
+                report.operator_scan_errors += 1;
+            };
+
+            self.ensurePageFonts(page_num);
+            var collector = interpreter.SpanCollector.init(scratch_allocator, @intCast(page_num));
+            defer collector.deinit();
+            var null_writer: NullWriter = .{};
+            extractContentStream(content, .{ .bounds = &collector }, &self.font_cache, page_num, scratch_allocator, &null_writer) catch {
+                report.page_extraction_errors += 1;
+                continue;
+            };
+            try collector.flush();
+
+            report.span_count += collector.getSpans().len;
+            const page_glyph_count = collector.getGlyphs().len;
+            report.glyph_count += page_glyph_count;
+            for (collector.getGlyphs()) |glyph| {
+                if (glyph.generated) continue;
+                if (glyph.mapping_source == .unresolved) {
+                    report.unmapped_glyph_count += 1;
+                } else {
+                    report.mapped_glyph_count += 1;
+                }
+
+                if (glyph.font_name) |resource_name| {
+                    var key_buf: [256]u8 = undefined;
+                    const key = std.fmt.bufPrint(&key_buf, "{d}:{s}", .{ page_num, resource_name }) catch continue;
+                    if (self.font_cache.getPtr(key)) |font| {
+                        const font_report = try ensureFontReport(allocator, &font_reports, resource_name, font);
+                        font_report.glyph_count += 1;
+                        font_report.mapping_counts[@intFromEnum(glyph.mapping_source)] += 1;
+                    }
+                }
+            }
+            if (report.text_show_operator_count > page_text_operators_before and page_glyph_count == 0) {
+                report.pages_with_text_operators_without_glyphs += 1;
+            }
+
+            const output = self.extractTextStructured(page_num, scratch_allocator) catch {
+                report.page_extraction_errors += 1;
+                continue;
+            };
+            report.output_bytes += output.len;
+            if (std.mem.trim(u8, output, " \t\r\n\x0c").len > 0) report.pages_with_output += 1;
+            if (std.unicode.utf8ValidateSlice(output)) {
+                report.output_codepoints += utf8CodepointCount(output);
+            } else {
+                report.invalid_utf8_pages += 1;
+            }
+        }
+
+        report.fonts = try font_reports.toOwnedSlice(allocator);
+        return report;
     }
 
     /// Free spans returned by extractTextWithBounds, including owned text.
@@ -2661,6 +2753,109 @@ fn pushOperand(operands: []interpreter.Operand, count: *usize, token: interprete
         },
     }
     return true;
+}
+
+fn scanExtractionOperators(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    report: *ExtractionDiagnostics,
+) !void {
+    var lexer = interpreter.ContentLexer.init(allocator, content);
+    var operands: [128]interpreter.Operand = undefined;
+    var operand_count: usize = 0;
+    var in_text = false;
+
+    while (try lexer.next()) |token| {
+        if (pushOperand(&operands, &operand_count, token)) continue;
+
+        const op = token.operator;
+        report.operator_count += 1;
+        if (std.mem.eql(u8, op, "BT")) {
+            in_text = true;
+            report.text_object_count += 1;
+        } else if (std.mem.eql(u8, op, "ET")) {
+            in_text = false;
+        } else if (in_text and std.mem.eql(u8, op, "Tj") and operand_count >= 1) {
+            report.text_show_operator_count += 1;
+            report.text_operand_bytes += extractionOperandBytes(operands[0]);
+        } else if (in_text and std.mem.eql(u8, op, "TJ") and operand_count >= 1) {
+            report.text_show_operator_count += 1;
+            report.text_operand_bytes += extractionOperandBytes(operands[0]);
+        } else if (in_text and std.mem.eql(u8, op, "'") and operand_count >= 1) {
+            report.text_show_operator_count += 1;
+            report.text_operand_bytes += extractionOperandBytes(operands[0]);
+        } else if (in_text and std.mem.eql(u8, op, "\"") and operand_count >= 3) {
+            report.text_show_operator_count += 1;
+            report.text_operand_bytes += extractionOperandBytes(operands[2]);
+        }
+        operand_count = 0;
+    }
+}
+
+fn ensureFontReport(
+    allocator: std.mem.Allocator,
+    reports: *std.ArrayList(extraction_diagnostics.FontReport),
+    resource_name: []const u8,
+    font: *const encoding.FontEncoding,
+) !*extraction_diagnostics.FontReport {
+    for (reports.items) |*report| {
+        if (font.font_object_num != null and report.font_object == font.font_object_num) return report;
+        if (font.font_object_num == null and report.font_object == null and
+            std.mem.eql(u8, report.resource_name, resource_name) and
+            std.mem.eql(u8, report.base_font, font.base_font orelse ""))
+        {
+            return report;
+        }
+    }
+
+    const owned_resource_name = try allocator.dupe(u8, resource_name);
+    errdefer allocator.free(owned_resource_name);
+    const embedded_font_type = if (font.embedded_font) |*embedded| embedded.name() else "none";
+    try reports.append(allocator, .{
+        .font_object = font.font_object_num,
+        .resource_name = owned_resource_name,
+        .subtype = font.subtype orelse "unknown",
+        .base_font = font.base_font orelse "",
+        .encoding_cmap_name = font.code_cmap.name orelse font.code_cmap.usecmap_name orelse "",
+        .cid_registry = if (font.is_cid) font.cid_system_info.registry else "",
+        .cid_ordering = if (font.is_cid) font.cid_system_info.ordering else "",
+        .cid_supplement = if (font.is_cid) font.cid_system_info.supplement else 0,
+        .to_unicode_present = font.to_unicode.explicit,
+        .to_unicode_mapped_codes = toUnicodeMappedCodeCount(&font.to_unicode),
+        .embedded_font_type = embedded_font_type,
+        .cid_to_gid_map_type = if (font.is_cid) font.cid_to_gid.name() else "not_applicable",
+    });
+    return &reports.items[reports.items.len - 1];
+}
+
+fn toUnicodeMappedCodeCount(map: *const encoding.CodeToUnicodeMap) usize {
+    var count: usize = @as(usize, map.scalar_map.count()) + @as(usize, map.multi_map.count());
+    for (map.ranges) |range| {
+        const range_count: usize = @intCast(range.src_end - range.src_start + 1);
+        count +|= range_count;
+    }
+    return count;
+}
+
+fn extractionOperandBytes(operand: interpreter.Operand) usize {
+    return switch (operand) {
+        .string => |bytes| bytes.len,
+        .hex_string => |bytes| bytes.len,
+        .array => |items| blk: {
+            var total: usize = 0;
+            for (items) |item| total += extractionOperandBytes(item);
+            break :blk total;
+        },
+        else => 0,
+    };
+}
+
+fn utf8CodepointCount(text: []const u8) usize {
+    var count: usize = 0;
+    for (text) |byte| {
+        if (byte & 0xC0 != 0x80) count += 1;
+    }
+    return count;
 }
 
 /// Look up a font encoding in the cache by page number and font name.

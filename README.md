@@ -141,7 +141,9 @@ financial tables, AcroForms, weird-font cases, visual truth fixtures, and
 corrupt/adversarial PDFs.
 `benchmark/eval/font_compare.py` runs the weird-font subset against
 `pdf-parser`, PyMuPDF, and pypdfium2; use it as differential accuracy evidence,
-not as a claim that the Python tools are universal ground truth. Financial
+not as a claim that the Python tools are universal ground truth. The Sleisenger
+reductions cover standard Symbol glyph names and family-scoped MathematicalPi
+private names with exact Unicode expectations. Financial
 table truth can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and
 bbox-aware provenance. Form truth asserts field name/type/value sequences.
 Formula truth can assert both text and simple structure records.
@@ -271,11 +273,16 @@ pdf-parser extract --adaptive -f alto doc.pdf
 pdf-parser extract --adaptive -f debug-svg doc.pdf
 pdf-parser extract --adaptive --trace doc.pdf
 pdf-parser inspect complexity doc.pdf --format json
+pdf-parser inspect extraction doc.pdf --format json
 pdf-parser info document.pdf                 # Show document info
 pdf-parser bench document.pdf                # Run benchmark
 pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv \
   --tools pdf-parser:adaptive --output /tmp/pdf-parser-scorecard.json
 ```
+
+`inspect extraction` includes per-font CMap, CIDSystemInfo, ToUnicode,
+embedded-font, CIDToGIDMap, and Unicode mapping-provenance counters so missing
+text can be attributed to a specific font and mapping layer.
 
 Adaptive extraction keeps fast native extraction on the default path while
 recording when a page or region should be routed elsewhere. Current route names
@@ -496,7 +503,9 @@ src/
 ├── pagetree.zig     # Page tree resolution
 ├── decompress.zig   # Stream decompression filters
 ├── encoding.zig     # Font encoding and CMap parsing
+├── font_mapping.zig # Independent code, CID, GID, and Unicode mapping stages
 ├── agl.zig          # Adobe Glyph List mappings
+├── legacy_font_mapping.zig # Family-scoped private glyph-name mappings
 ├── cff.zig          # CFF/Type1 font parsing
 ├── interpreter.zig  # Content stream interpreter
 ├── structtree.zig   # Structure tree parser (PDF/UA)

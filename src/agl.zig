@@ -124,8 +124,12 @@ const agl_table = &[_]Entry{
     .{ .name = "acute", .uv = 0x00B4 },
     .{ .name = "adieresis", .uv = 0x00E4 },
     .{ .name = "agrave", .uv = 0x00E0 },
+    .{ .name = "alpha", .uv = 0x03B1 },
     .{ .name = "ampersand", .uv = 0x0026 },
     .{ .name = "aring", .uv = 0x00E5 },
+    .{ .name = "arrowdown", .uv = 0x2193 },
+    .{ .name = "arrowright", .uv = 0x2192 },
+    .{ .name = "arrowup", .uv = 0x2191 },
     .{ .name = "asciicircum", .uv = 0x005E },
     .{ .name = "asciitilde", .uv = 0x007E },
     .{ .name = "asterisk", .uv = 0x002A },
@@ -134,6 +138,7 @@ const agl_table = &[_]Entry{
     .{ .name = "b", .uv = 0x0062 },
     .{ .name = "backslash", .uv = 0x005C },
     .{ .name = "bar", .uv = 0x007C },
+    .{ .name = "beta", .uv = 0x03B2 },
     .{ .name = "braceleft", .uv = 0x007B },
     .{ .name = "braceright", .uv = 0x007D },
     .{ .name = "bracketleft", .uv = 0x005B },
@@ -154,6 +159,7 @@ const agl_table = &[_]Entry{
     .{ .name = "dagger", .uv = 0x2020 },
     .{ .name = "daggerdbl", .uv = 0x2021 },
     .{ .name = "degree", .uv = 0x00B0 },
+    .{ .name = "delta", .uv = 0x03B4 },
     .{ .name = "dieresis", .uv = 0x00A8 },
     .{ .name = "divide", .uv = 0x00F7 },
     .{ .name = "dollar", .uv = 0x0024 },
@@ -182,9 +188,11 @@ const agl_table = &[_]Entry{
     .{ .name = "four", .uv = 0x0034 },
     .{ .name = "fraction", .uv = 0x2044 },
     .{ .name = "g", .uv = 0x0067 },
+    .{ .name = "gamma", .uv = 0x03B3 },
     .{ .name = "germandbls", .uv = 0x00DF },
     .{ .name = "grave", .uv = 0x0060 },
     .{ .name = "greater", .uv = 0x003E },
+    .{ .name = "greaterequal", .uv = 0x2265 },
     .{ .name = "guillemotleft", .uv = 0x00AB },
     .{ .name = "guillemotright", .uv = 0x00BB },
     .{ .name = "guilsinglleft", .uv = 0x2039 },
@@ -199,8 +207,10 @@ const agl_table = &[_]Entry{
     .{ .name = "igrave", .uv = 0x00EC },
     .{ .name = "j", .uv = 0x006A },
     .{ .name = "k", .uv = 0x006B },
+    .{ .name = "kappa", .uv = 0x03BA },
     .{ .name = "l", .uv = 0x006C },
     .{ .name = "less", .uv = 0x003C },
+    .{ .name = "lessequal", .uv = 0x2264 },
     .{ .name = "logicalnot", .uv = 0x00AC },
     .{ .name = "lslash", .uv = 0x0142 },
     .{ .name = "m", .uv = 0x006D },
@@ -235,6 +245,7 @@ const agl_table = &[_]Entry{
     .{ .name = "period", .uv = 0x002E },
     .{ .name = "periodcentered", .uv = 0x00B7 },
     .{ .name = "perthousand", .uv = 0x2030 },
+    .{ .name = "phi", .uv = 0x03C6 },
     .{ .name = "plus", .uv = 0x002B },
     .{ .name = "plusminus", .uv = 0x00B1 },
     .{ .name = "q", .uv = 0x0071 },
@@ -286,3 +297,17 @@ const agl_table = &[_]Entry{
     .{ .name = "zcaron", .uv = 0x017E },
     .{ .name = "zero", .uv = 0x0030 },
 };
+
+test "standard Greek and arrow glyph names map to Unicode" {
+    try std.testing.expectEqual(@as(?u21, 0x03B1), glyphNameToUnicode("alpha"));
+    try std.testing.expectEqual(@as(?u21, 0x03B2), glyphNameToUnicode("beta"));
+    try std.testing.expectEqual(@as(?u21, 0x03B3), glyphNameToUnicode("gamma"));
+    try std.testing.expectEqual(@as(?u21, 0x03B4), glyphNameToUnicode("delta"));
+    try std.testing.expectEqual(@as(?u21, 0x2192), glyphNameToUnicode("arrowright"));
+    try std.testing.expectEqual(@as(?u21, 0x2191), glyphNameToUnicode("arrowup"));
+    try std.testing.expectEqual(@as(?u21, 0x2193), glyphNameToUnicode("arrowdown"));
+    try std.testing.expectEqual(@as(?u21, 0x2265), glyphNameToUnicode("greaterequal"));
+    try std.testing.expectEqual(@as(?u21, 0x2264), glyphNameToUnicode("lessequal"));
+    try std.testing.expectEqual(@as(?u21, 0x03BA), glyphNameToUnicode("kappa"));
+    try std.testing.expectEqual(@as(?u21, 0x03C6), glyphNameToUnicode("phi"));
+}

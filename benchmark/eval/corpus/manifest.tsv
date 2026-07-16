@@ -15,6 +15,8 @@ forms	realistic-widget-fields	benchmark/eval/corpus/forms/realistic-widget-field
 forms	inherited-widget-fields	benchmark/eval/corpus/forms/inherited-widget-fields.pdf	benchmark/eval/ground_truth/page_text/forms/inherited-widget-fields.txt					benchmark/eval/ground_truth/form_fields/forms/inherited-widget-fields.json
 scanned_typewritten	mixed-native-scan	benchmark/eval/corpus/scanned_typewritten/mixed-native-scan.pdf	benchmark/eval/ground_truth/page_text/scanned_typewritten/mixed-native-scan.txt
 weird_fonts	actualtext-repair	benchmark/eval/corpus/weird_fonts/actualtext-repair.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/actualtext-repair.txt
+weird_fonts	sleisenger-symbol-names	benchmark/eval/corpus/weird_fonts/sleisenger-symbol-names.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/sleisenger-symbol-names.txt
+weird_fonts	sleisenger-mathematical-pi	benchmark/eval/corpus/weird_fonts/sleisenger-mathematical-pi.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/sleisenger-mathematical-pi.txt
 weird_fonts	type3-simple	benchmark/eval/corpus/weird_fonts/type3-simple.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-simple.txt
 weird_fonts	type3-tounicode	benchmark/eval/corpus/weird_fonts/type3-tounicode.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-tounicode.txt
 weird_fonts	identity-h-broken	benchmark/eval/corpus/weird_fonts/identity-h-broken.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-h-broken.txt

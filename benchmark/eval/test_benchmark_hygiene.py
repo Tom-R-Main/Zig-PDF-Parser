@@ -362,6 +362,10 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual(0.0, metrics["wer"])
         self.assertEqual(1.0, metrics["token_f1"])
 
+    def test_font_compare_exact_text_preserves_internal_unicode(self) -> None:
+        self.assertTrue(font_compare.exact_text_matches("δγ −↑+βα\n\f", "δγ −↑+βα\n"))
+        self.assertFalse(font_compare.exact_text_matches("δγ -↑+βα", "δγ −↑+βα"))
+
     def test_render_oracle_loads_metadata_sidecar_and_truth(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

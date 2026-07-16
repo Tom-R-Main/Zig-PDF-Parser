@@ -290,11 +290,27 @@ pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-asse
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 \
   --format artifact-jsonl --emit-specialist-requests requests.jsonl \
   --specialist-config specialists.json
+pdf-parser inspect extraction doc.pdf --format json
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser serve --host 0.0.0.0 --port 8080
 ```
+
+`inspect extraction` emits the separate `extraction_diagnostics` schema
+(`0.2.0`). Its counters distinguish page discovery, decoded page-content
+buffers, text-show operators and operand bytes, mapped/unmapped glyphs, and
+final structured output. Each `fonts[]` record identifies the font object,
+subtype, base font, encoding CMap, CIDSystemInfo, ToUnicode presence and map/
+glyph coverage, embedded font type, CIDToGIDMap type, and glyph counts by
+mapping source: `explicit_to_unicode`, `actual_text`, `simple_encoding`,
+`adobe_collection`, `embedded_font_cmap`, `glyph_name`, or `unresolved`.
+The top-level record includes `source_id` and diagnostic `provenance`.
+Status values are `ok`, `no_text`,
+`suspect_unicode`, `incomplete`, and `no_pages`; this report is diagnostic and
+does not alter adaptive artifact ordering or schema versions. The
+`suspect_unicode` status is raised when output is invalid UTF-8 or at least one
+percent of decoded glyphs report Unicode mapping failures.
 
 `jsonl` remains a compatibility format for reconciled span JSONL. Use
 `artifact-jsonl` for the full batch versioned stream, and `stream-jsonl` when

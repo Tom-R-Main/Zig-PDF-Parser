@@ -46,8 +46,9 @@ checked-in PDFs should stay small, redistributable reductions.
 Font-fidelity sidecars live under `benchmark/eval/ground_truth/fonts/`. They are
 discovered from `metadata.jsonl` instead of extra manifest columns so existing
 text/table/formula eval lanes stay compatible. The current `weird_fonts`
-category covers ActualText repair, Type3 fonts, broken Identity-H, and vertical
-CJK:
+category covers ActualText repair, Type3 fonts, broken Identity-H, vertical
+CJK, and redistribution-safe Sleisenger reductions for Symbol glyph names and
+family-scoped MathematicalPi-One private names:
 
 ```sh
 .venv/bin/python benchmark/eval/font_compare.py \
@@ -57,7 +58,9 @@ CJK:
 
 The font comparator runs `pdf-parser extract-adaptive --format artifact-jsonl
 --debug-assets-dir ...`, reads `page-*.glyph-trace.jsonl`, and compares the
-same PDFs with PyMuPDF and pypdfium2 when those optional packages are present.
+same PDFs with Poppler `pdftotext`, PyMuPDF, and pypdfium2 when those optional
+tools are present. A font truth sidecar can set `require_exact_text` to make
+Unicode differences fail instead of merely reporting CER/WER metrics.
 Use `--require-baselines` when missing Python baselines should fail the run.
 This is a differential accuracy harness: the sidecar truth defines the expected
 behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an

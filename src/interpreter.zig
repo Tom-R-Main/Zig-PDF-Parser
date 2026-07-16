@@ -36,6 +36,7 @@ pub const GlyphSpan = struct {
     source_byte_count: u8 = 0,
     text: []const u8 = "",
     advance: f64 = 0,
+    mapping_source: encoding_mod.MappingSource = .unresolved,
     unicode_map_error: bool = false,
     generated: bool = false,
     hyphen: bool = false,
@@ -53,6 +54,7 @@ pub const CharSpan = struct {
     font_size: f64 = 0,
     source_code: u32 = 0,
     text: []const u8 = "",
+    mapping_source: encoding_mod.MappingSource = .unresolved,
     unicode_map_error: bool = false,
     generated: bool = false,
     hyphen: bool = false,
@@ -560,6 +562,8 @@ pub const SpanCollector = struct {
     pub fn writeDecodedGlyph(self: *SpanCollector, decoded: encoding_mod.FontEncoding.DecodedGlyph) !void {
         self.current_writing_mode = decoded.writing_mode;
         const has_actual_text = self.current_actual_text != null;
+        const mapping_source: encoding_mod.MappingSource = if (has_actual_text) .actual_text else decoded.mapping_source;
+        const unicode_map_error = mapping_source == .unresolved;
         const advance = self.scaledAdvance(decoded);
         const bbox = self.currentGlyphBBox(advance, decoded);
         const text = try self.allocator.dupe(u8, decoded.utf8_text);
@@ -583,7 +587,8 @@ pub const SpanCollector = struct {
             .source_byte_count = @intCast(source_len),
             .text = text,
             .advance = advance,
-            .unicode_map_error = decoded.unicode_map_error,
+            .mapping_source = mapping_source,
+            .unicode_map_error = unicode_map_error,
             .generated = false,
             .hyphen = isHyphenText(decoded.utf8_text),
             .actual_text = has_actual_text,
@@ -591,14 +596,14 @@ pub const SpanCollector = struct {
             .writing_mode = decoded.writing_mode,
         });
 
-        try self.appendCharsForGlyph(glyph_index, bbox, decoded.source_code, decoded.utf8_text, decoded.unicode_map_error, false, has_actual_text, decoded.writing_mode);
+        try self.appendCharsForGlyph(glyph_index, bbox, decoded.source_code, decoded.utf8_text, mapping_source, unicode_map_error, false, has_actual_text, decoded.writing_mode);
         if (!has_actual_text) {
             try self.text_buffer.appendSlice(self.allocator, decoded.utf8_text);
         }
         self.pending_bbox = unionOptionalBBox(self.pending_bbox, bbox);
         self.pending_actual_text = self.pending_actual_text or has_actual_text;
         if (!has_actual_text) {
-            self.pending_unicode_map_error = self.pending_unicode_map_error or decoded.unicode_map_error;
+            self.pending_unicode_map_error = self.pending_unicode_map_error or unicode_map_error;
         }
 
         if (decoded.writing_mode == 1) {
@@ -629,6 +634,7 @@ pub const SpanCollector = struct {
                 .bytes_consumed = 1,
                 .utf8_text = text,
                 .glyph_width = 600,
+                .mapping_source = if (byte >= 128) .unresolved else .simple_encoding,
                 .unicode_map_error = byte >= 128,
                 .writing_mode = self.current_writing_mode,
             });
@@ -719,10 +725,10 @@ pub const SpanCollector = struct {
             .mcid = self.current_mcid,
             .writing_mode = self.current_writing_mode,
         });
-        try self.appendCharsForGlyph(glyph_index, bbox, ' ', " ", false, true, self.current_actual_text != null, self.current_writing_mode);
+        try self.appendCharsForGlyph(glyph_index, bbox, ' ', " ", .unresolved, false, true, self.current_actual_text != null, self.current_writing_mode);
     }
 
-    fn appendCharsForGlyph(self: *SpanCollector, glyph_index: u32, bbox: layout.BBox, source_code: u32, text: []const u8, unicode_map_error: bool, generated: bool, actual_text: bool, writing_mode: u8) !void {
+    fn appendCharsForGlyph(self: *SpanCollector, glyph_index: u32, bbox: layout.BBox, source_code: u32, text: []const u8, mapping_source: encoding_mod.MappingSource, unicode_map_error: bool, generated: bool, actual_text: bool, writing_mode: u8) !void {
         var index: usize = 0;
         while (index < text.len) {
             const len = std.unicode.utf8ByteSequenceLength(text[index]) catch 1;
@@ -740,6 +746,7 @@ pub const SpanCollector = struct {
                 .font_size = self.current_font_size,
                 .source_code = source_code,
                 .text = char_text,
+                .mapping_source = mapping_source,
                 .unicode_map_error = unicode_map_error,
                 .generated = generated,
                 .hyphen = isHyphenText(char_text),

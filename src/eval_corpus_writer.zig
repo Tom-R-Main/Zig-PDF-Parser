@@ -523,6 +523,52 @@ const fixtures = [_]Fixture{
     },
     .{
         .category = "weird_fonts",
+        .doc_id = "sleisenger-symbol-names",
+        .pdf_name = "sleisenger-symbol-names.pdf",
+        .source_note = "redistribution-safe structural reduction of the page-30 Symbol Differences encoding; original font program and book text omitted",
+        .truth =
+        \\δγ −↑+βα
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "δγ −↑+βα",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "glyph-name", "symbol", "sleisenger-reduction" },
+        .generate = testpdf.generateSleisengerSymbolNamesPdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "sleisenger-mathematical-pi",
+        .pdf_name = "sleisenger-mathematical-pi.pdf",
+        .source_note = "redistribution-safe structural reduction of visually validated MathematicalPi-One private glyph names; original font program and book text omitted",
+        .truth =
+        \\BMI <25 BMI >30 IRP ≥ upper limit → muscle
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "BMI <25 BMI >30 IRP ≥ upper limit → muscle",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "glyph-name", "legacy-font-map", "mathematical-pi", "sleisenger-reduction" },
+        .generate = testpdf.generateSleisengerMathematicalPiPdf,
+    },
+    .{
+        .category = "weird_fonts",
         .doc_id = "type3-simple",
         .pdf_name = "type3-simple.pdf",
         .source_note = "synthetic Type3 font fixture using WinAnsi text and deterministic width metadata",

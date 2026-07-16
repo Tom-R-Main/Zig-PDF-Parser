@@ -81,6 +81,52 @@ pub fn generateMinimalPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 
     return pdf.toOwnedSlice(allocator);
 }
 
+/// Generate a valid page tree whose /Kids entry references an indirect array.
+pub fn generateIndirectKidsPdf(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var pdf: std.ArrayList(u8) = .empty;
+    errdefer pdf.deinit(allocator);
+    var writer = runtime.arrayListWriter(&pdf, allocator);
+
+    try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+
+    const obj1_offset = pdf.items.len;
+    try writer.writeAll("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    const obj2_offset = pdf.items.len;
+    try writer.writeAll("2 0 obj\n<< /Type /Pages /Kids 6 0 R /Count 1 >>\nendobj\n");
+
+    const obj3_offset = pdf.items.len;
+    try writer.writeAll("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ");
+    try writer.writeAll("/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n");
+
+    var content: std.ArrayList(u8) = .empty;
+    defer content.deinit(allocator);
+    var content_writer = runtime.arrayListWriter(&content, allocator);
+    try content_writer.writeAll("BT\n/F1 12 Tf\n100 700 Td\n");
+    try content_writer.print("({s}) Tj\n", .{text});
+    try content_writer.writeAll("ET\n");
+
+    const obj4_offset = pdf.items.len;
+    try writer.print("4 0 obj\n<< /Length {} >>\nstream\n", .{content.items.len});
+    try writer.writeAll(content.items);
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    const obj5_offset = pdf.items.len;
+    try writer.writeAll("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\nendobj\n");
+
+    const obj6_offset = pdf.items.len;
+    try writer.writeAll("6 0 obj\n[3 0 R]\nendobj\n");
+
+    const xref_offset = pdf.items.len;
+    try writer.writeAll("xref\n0 7\n0000000000 65535 f \n");
+    try writer.print("{d:0>10} 00000 n \n{d:0>10} 00000 n \n{d:0>10} 00000 n \n", .{ obj1_offset, obj2_offset, obj3_offset });
+    try writer.print("{d:0>10} 00000 n \n{d:0>10} 00000 n \n{d:0>10} 00000 n \n", .{ obj4_offset, obj5_offset, obj6_offset });
+    try writer.writeAll("trailer\n<< /Size 7 /Root 1 0 R >>\n");
+    try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
+
+    return pdf.toOwnedSlice(allocator);
+}
+
 /// Generate a PDF with a stroked rectangle that should be detected as rulings.
 pub fn generateRulingLinesPdf(allocator: std.mem.Allocator) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
@@ -621,6 +667,72 @@ pub fn generateActualTextRepairPdf(allocator: std.mem.Allocator) ![]u8 {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
         "endobj\n";
     return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{font});
+}
+
+/// Redistribution-safe reduction of the Sleisenger page-30 Symbol font case.
+/// The source used an embedded subset, but the failure was entirely in these
+/// explicit Adobe glyph names, so the copyrighted font program is omitted.
+pub fn generateSleisengerSymbolNamesPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content = "BT\n/F1 16 Tf\n100 700 Td\n<18191A1B1C1D1E1F> Tj\nET\n";
+    const font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Symbol /FirstChar 24 /LastChar 31 " ++
+        "/Widths [494 411 250 549 603 549 549 631] /Encoding 6 0 R >>\n" ++
+        "endobj\n";
+    const font_encoding =
+        "6 0 obj\n" ++
+        "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding " ++
+        "/Differences [24 /delta /gamma /space /minus /arrowup /plus /beta /alpha] >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, font_encoding });
+}
+
+/// Redistribution-safe reduction of the Sleisenger MathematicalPi-One cases.
+/// The private H-names are meaningful only within this legacy font family, so
+/// the fixture also carries a different-font guard through the standard text.
+pub fn generateSleisengerMathematicalPiPdf(allocator: std.mem.Allocator) ![]u8 {
+    const content =
+        "BT\n" ++
+        "/F1 16 Tf\n100 700 Td\n(BMI ) Tj\n" ++
+        "/F2 16 Tf\n<28> Tj\n" ++
+        "/F1 16 Tf\n(25 BMI ) Tj\n" ++
+        "/F2 16 Tf\n<1D> Tj\n" ++
+        "/F1 16 Tf\n(30 IRP ) Tj\n" ++
+        "/F2 16 Tf\n<1F> Tj\n" ++
+        "/F1 16 Tf\n( upper limit ) Tj\n" ++
+        "/F3 16 Tf\n<1D> Tj\n" ++
+        "/F1 16 Tf\n( muscle) Tj\n" ++
+        "ET\n";
+    const standard_font =
+        "5 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>\n" ++
+        "endobj\n";
+    const math_font =
+        "6 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+MathematicalPi-One " ++
+        "/FirstChar 29 /LastChar 40 /Widths [833 833 833 833 833 833 833 833 833 833 833 833] " ++
+        "/Encoding 7 0 R >>\n" ++
+        "endobj\n";
+    const math_encoding =
+        "7 0 obj\n" ++
+        "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding " ++
+        "/Differences [29 /H11022 31 /H11350 40 /H11021] >>\n" ++
+        "endobj\n";
+    const symbol_font =
+        "8 0 obj\n" ++
+        "<< /Type /Font /Subtype /Type1 /BaseFont /ABCDEF+Symbol " ++
+        "/FirstChar 29 /LastChar 29 /Widths [987] /Encoding 9 0 R >>\n" ++
+        "endobj\n";
+    const symbol_encoding =
+        "9 0 obj\n" ++
+        "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [29 /arrowright] >>\n" ++
+        "endobj\n";
+    return generateSinglePageFontFixturePdf(
+        allocator,
+        "/F1 5 0 R /F2 6 0 R /F3 8 0 R",
+        content,
+        &.{ standard_font, math_font, math_encoding, symbol_font, symbol_encoding },
+    );
 }
 
 /// Generate a page-level rotation fixture for render-backed geometry checks.

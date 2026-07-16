@@ -428,7 +428,17 @@ fn walkPageTree(
 
     if (std.mem.eql(u8, type_name, "Pages")) {
         // Intermediate node - recurse into Kids
-        const kids = dict.getArray("Kids") orelse {
+        const kids = blk: {
+            const kids_obj = dict.get("Kids") orelse break :blk null;
+            const resolved = switch (kids_obj) {
+                .reference => |ref| resolveRefWithOptions(allocator, data, xref, ref, cache, options) catch break :blk null,
+                else => kids_obj,
+            };
+            break :blk switch (resolved) {
+                .array => |items| items,
+                else => null,
+            };
+        } orelse {
             emit(allocator, options, .{
                 .code = .page_tree_missing_kids,
                 .severity = if (options.recover) .warning else .error_,

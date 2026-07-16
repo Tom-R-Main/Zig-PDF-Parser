@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import subprocess
 import tempfile
 import time
@@ -14,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 
-FONT_COMPARE_SCHEMA_VERSION = "0.1.0"
-DEFAULT_TOOLS = ("pdf-parser", "pymupdf", "pypdfium2")
+FONT_COMPARE_SCHEMA_VERSION = "0.2.0"
+DEFAULT_TOOLS = ("pdf-parser", "pdftotext", "pymupdf", "pypdfium2")
 REQUIRED_TRUTH_KEYS = {
     "expected_text",
     "expect_actual_text",
@@ -195,6 +196,8 @@ def run_tool(
     try:
         if tool == "pdf-parser":
             result = extract_pdf_parser(repo_root, parser_command, entry)
+        elif tool == "pdftotext":
+            result = extract_pdftotext(entry)
         elif tool == "pymupdf":
             result = extract_pymupdf(entry)
         elif tool == "pypdfium2":
@@ -209,20 +212,23 @@ def run_tool(
         return failed(entry, tool, str(err))
 
     wall_ms = (time.perf_counter() - started) * 1000.0
+    expectations = expectation_results(tool, truth, result)
+    exact_text_ok = exact_text_matches(result["text"], truth["expected_text"])
+    expectations["exact_text_ok"] = exact_text_ok if truth.get("require_exact_text") else None
     return {
         "record_type": "font_compare_result",
         "font_compare_schema_version": FONT_COMPARE_SCHEMA_VERSION,
         "category": entry.category,
         "doc_id": entry.doc_id,
         "tool": tool,
-        "status": "ok",
+        "status": "failed" if truth.get("require_exact_text") and not exact_text_ok else "ok",
         "font_case_tags": list(entry.font_case_tags),
         "wall_ms": round(wall_ms, 3),
         "text": result["text"],
         "metrics": text_metrics(truth["expected_text"], result["text"]),
         "char_count": result.get("char_count"),
         "bbox_count": result.get("bbox_count"),
-        "expectations": expectation_results(tool, truth, result),
+        "expectations": expectations,
         "notes": result.get("notes", []),
     }
 
@@ -290,6 +296,27 @@ def extract_pymupdf(entry: Entry) -> dict[str, Any]:
         }
     finally:
         doc.close()
+
+
+def extract_pdftotext(entry: Entry) -> dict[str, Any]:
+    executable = shutil.which("pdftotext")
+    if executable is None:
+        raise OptionalBaselineMissing("pdftotext is not installed")
+    proc = subprocess.run(
+        [executable, "-enc", "UTF-8", "-layout", str(entry.pdf_path), "-"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "pdftotext failed")
+    text = proc.stdout.rstrip("\n\f")
+    return {
+        "text": text,
+        "char_count": len(text),
+        "bbox_count": None,
+        "notes": ["Poppler pdftotext -layout UTF-8 baseline"],
+    }
 
 
 def extract_pypdfium2(entry: Entry) -> dict[str, Any]:
@@ -388,6 +415,13 @@ def expectation_results(tool: str, truth: dict[str, Any], result: dict[str, Any]
 
 def text_contains_expected(text: str, expected: str) -> bool:
     return normalize_text(expected) in normalize_text(text)
+
+
+def exact_text_matches(actual: str, expected: str) -> bool:
+    def canonical(value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n").strip("\n\f")
+
+    return canonical(actual) == canonical(expected)
 
 
 def text_metrics(expected: str, actual: str) -> dict[str, float]:

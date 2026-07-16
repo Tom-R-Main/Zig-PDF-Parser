@@ -88,6 +88,68 @@ test "extract text from minimal PDF" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "Test123") != null);
 }
 
+test "Sleisenger Symbol reduction decodes exact Adobe glyph-name Unicode" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateSleisengerSymbolNamesPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const output = try doc.extractTextStructured(0, allocator);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("δγ −↑+βα", std.mem.trim(u8, output, " \t\r\n\x0c"));
+
+    const pages = [_]usize{0};
+    var diagnostics = try doc.inspectExtraction(allocator, &pages);
+    defer diagnostics.deinit();
+    try std.testing.expectEqual(@as(usize, 8), diagnostics.mapped_glyph_count);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.unmapped_glyph_count);
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.fonts.len);
+    try std.testing.expectEqual(@as(usize, 8), diagnostics.fonts[0].count(.glyph_name));
+}
+
+test "Sleisenger MathematicalPi reduction decodes scoped private glyph names" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateSleisengerMathematicalPiPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    const output = try doc.extractTextStructured(0, allocator);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings(
+        "BMI <25 BMI >30 IRP ≥ upper limit → muscle",
+        std.mem.trim(u8, output, " \t\r\n\x0c"),
+    );
+
+    const pages = [_]usize{0};
+    var diagnostics = try doc.inspectExtraction(allocator, &pages);
+    defer diagnostics.deinit();
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.unmapped_glyph_count);
+
+    var glyph_name_count: usize = 0;
+    for (diagnostics.fonts) |font| glyph_name_count += font.count(.glyph_name);
+    try std.testing.expectEqual(@as(usize, 4), glyph_name_count);
+}
+
+test "page tree resolves an indirect Kids array" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateIndirectKidsPdf(allocator, "IndirectKids");
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    try std.testing.expectEqual(@as(usize, 1), doc.pageCount());
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try doc.extractText(0, runtime.arrayListWriter(&output, allocator));
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "IndirectKids") != null);
+}
+
 test "adaptive extraction returns native spans routes traces and chunks" {
     const allocator = std.testing.allocator;
 

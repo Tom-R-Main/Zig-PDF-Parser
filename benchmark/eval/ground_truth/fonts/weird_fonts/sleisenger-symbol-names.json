@@ -1,0 +1,8 @@
+{
+  "expected_text": "δγ −↑+βα",
+  "require_exact_text": true,
+  "expect_actual_text": false,
+  "expect_unicode_map_error": false,
+  "expected_writing_mode": 0,
+  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+}

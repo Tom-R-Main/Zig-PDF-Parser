@@ -2,7 +2,7 @@
 //!
 //! Usage: pdf-parser extract [options] input.pdf [pages]
 //!        pdf-parser extract-adaptive --input input.pdf [options]
-//!        pdf-parser inspect complexity [options] input.pdf
+//!        pdf-parser inspect complexity|extraction [options] input.pdf
 //!        pdf-parser check [options] input.pdf
 //!        pdf-parser info input.pdf
 //!        pdf-parser bench input.pdf
@@ -67,7 +67,7 @@ fn printUsage() !void {
         \\  extract     Extract text from PDF (like mutool draw -F txt)
         \\  extract-adaptive
         \\              Host adapter extraction surface for adaptive artifacts
-        \\  inspect     Inspect parser decisions and document signals
+        \\  inspect     Inspect structure, extraction layers, and route signals
         \\  check       Run structural parser check and recovery diagnostics
         \\  info        Show PDF structure information (metadata, outline, etc.)
         \\  search      Search for text across all pages
@@ -122,6 +122,7 @@ fn printUsage() !void {
         \\  pdf-parser extract --adaptive -f debug-svg doc.pdf
         \\  pdf-parser extract doc.pdf --adaptive --trace
         \\  pdf-parser inspect complexity doc.pdf --format json
+        \\  pdf-parser inspect extraction doc.pdf --format json
         \\  pdf-parser inspect structure doc.pdf --format json
         \\  pdf-parser check doc.pdf --format json
         \\  pdf-parser extract --reading-order doc.pdf   # Visual reading order
@@ -307,6 +308,11 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return err;
     };
     defer doc.close();
+
+    if (doc.pageCount() == 0) {
+        std.debug.print("Error: parser discovered no pages in {s}; run `pdf-parser inspect structure` for page-tree diagnostics.\n", .{path});
+        return error.NoPagesDiscovered;
+    }
 
     // Warn about encrypted PDFs
     if (doc.isEncrypted() and !doc.isAuthenticated()) {
@@ -878,6 +884,11 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     };
     defer doc.close();
 
+    if (doc.pageCount() == 0) {
+        std.debug.print("Error: parser discovered no pages in {s}; run `pdf-parser inspect structure` for page-tree diagnostics.\n", .{path});
+        return error.NoPagesDiscovered;
+    }
+
     const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
         std.debug.print("Error parsing page range: {}\n", .{err});
         return;
@@ -944,7 +955,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
 
 fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (args.len == 0) {
-        std.debug.print("Usage: pdf-parser inspect complexity|structure [--format json] <input.pdf>\n", .{});
+        std.debug.print("Usage: pdf-parser inspect complexity|extraction|structure [--format json] <input.pdf>\n", .{});
         return;
     }
 
@@ -953,8 +964,12 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
         try runStructureCheck(allocator, args[1..]);
         return;
     }
+    if (std.mem.eql(u8, subject, "extraction")) {
+        try runExtractionInspection(allocator, args[1..]);
+        return;
+    }
     if (!std.mem.eql(u8, subject, "complexity")) {
-        std.debug.print("Unknown inspect subject: {s}. Use complexity or structure.\n", .{subject});
+        std.debug.print("Unknown inspect subject: {s}. Use complexity, extraction, or structure.\n", .{subject});
         return;
     }
 
@@ -1058,6 +1073,87 @@ fn runInspect(allocator: std.mem.Allocator, args: []const []const u8) !void {
             std.debug.print("Error writing output: {}\n", .{err});
             return;
         };
+    }
+}
+
+fn runExtractionInspection(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var input_file: ?[]const u8 = null;
+    var output_file: ?[]const u8 = null;
+    var page_range: ?[]const u8 = null;
+    var format: []const u8 = "json";
+    var error_mode: zpdf.ErrorConfig = zpdf.ErrorConfig.default();
+    var password: ?[]const u8 = null;
+    var password_file: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            i += 1;
+            if (i < args.len) output_file = args[i];
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pages")) {
+            i += 1;
+            if (i < args.len) page_range = args[i];
+        } else if (std.mem.eql(u8, arg, "--password")) {
+            i += 1;
+            if (i < args.len) password = args[i];
+        } else if (std.mem.eql(u8, arg, "--password-file")) {
+            i += 1;
+            if (i < args.len) password_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
+            i += 1;
+            if (i < args.len) format = args[i];
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            error_mode = zpdf.ErrorConfig.strict();
+        } else if (std.mem.eql(u8, arg, "--permissive")) {
+            error_mode = zpdf.ErrorConfig.permissive();
+        } else if (!std.mem.startsWith(u8, arg, "-")) {
+            input_file = arg;
+        }
+    }
+
+    if (!std.mem.eql(u8, format, "json")) {
+        std.debug.print("inspect extraction currently supports only --format json.\n", .{});
+        return;
+    }
+
+    const path = input_file orelse {
+        std.debug.print("Error: No input file specified\n", .{});
+        return;
+    };
+
+    var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
+        std.debug.print("Error loading password input: {}\n", .{err});
+        return err;
+    };
+    defer password_input.deinit(allocator);
+    error_mode.password = password_input.value;
+
+    const doc = zpdf.Document.openWithConfig(allocator, path, error_mode) catch |err| {
+        std.debug.print("Error opening {s}: {}\n", .{ path, err });
+        return err;
+    };
+    defer doc.close();
+
+    const pages = try parsePageRange(allocator, page_range, doc.pageCount());
+    defer allocator.free(pages);
+    var report = try doc.inspectExtraction(allocator, pages);
+    defer report.deinit();
+
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(allocator);
+    try zpdf.extraction_diagnostics.renderJson(
+        runtime.arrayListWriter(&rendered, allocator),
+        doc.source_path orelse "document",
+        report,
+    );
+
+    if (output_file) |out_path| {
+        const output_handle = try runtime.createFileCwd(out_path);
+        defer runtime.closeFile(output_handle);
+        try runtime.writeAllFile(output_handle, rendered.items);
+    } else {
+        try runtime.writeAllStdout(rendered.items);
     }
 }
 
@@ -1539,6 +1635,40 @@ test "inspect complexity reports native route as JSON" {
     try std.testing.expect(std.mem.indexOf(u8, output, "\"span_count\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\"confidence\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "\"native_fast_path\"") != null);
+}
+
+test "inspect extraction reports traversal operators glyphs and output" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "Diagnostic text");
+    defer allocator.free(pdf_data);
+
+    var input_buf: [112]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-inspect-extraction-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var output_buf: [112]u8 = undefined;
+    const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-inspect-extraction-{x}.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(output_path);
+    defer runtime.deleteFileCwd(output_path);
+
+    try runInspect(allocator, &.{ "extraction", input_path, "--format", "json", "-o", output_path });
+    const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"status\":\"ok\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"document_page_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"text_show\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"mapped_glyphs\":15") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"pages_with_output\":1") != null);
 }
 
 test "inspect structure and check emit structural diagnostics JSON" {
