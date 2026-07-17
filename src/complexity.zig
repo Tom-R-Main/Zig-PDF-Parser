@@ -115,9 +115,10 @@ fn decideRoute(signals: SignalScores, span_count: usize, char_count: usize) Rout
         signals.sparse_text >= 0.85 and
         signals.image_dominance >= 0.20 and
         (char_count < 40 or signals.missing_tounicode >= 0.35);
+    const corroborated_text_failure = (signals.bad_unicode >= 0.35 or signals.hidden_ocr >= 0.45) and
+        (signals.sparse_text >= 0.85 or signals.image_dominance >= 0.20);
     route.needs_ocr = image_only_needs_ocr or
-        signals.bad_unicode >= 0.35 or
-        signals.hidden_ocr >= 0.45 or
+        corroborated_text_failure or
         sparse_image_needs_ocr;
     route.needs_table_model = signals.table_alignment >= 0.60;
     route.needs_formula_model = signals.formula_density >= 0.55;
@@ -597,6 +598,23 @@ test "bad unicode and hidden OCR layer are OCR signals" {
     try std.testing.expect(page.score.signals.hidden_ocr >= 0.9);
     try std.testing.expect(page.score.signals.missing_tounicode >= 0.9);
     try std.testing.expect(page.score.route.needs_ocr);
+}
+
+test "dense native text layer does not OCR solely for broken Unicode metadata" {
+    const prose = "Clinical history and diagnosis remain readable in the native text layer despite incomplete font metadata.";
+    const spans = [_]TextSpan{
+        TextSpan.init(.{ .bbox = .{ .x0 = 20, .y0 = 400, .x1 = 290, .y1 = 760 }, .text = prose, .font = .{ .name = "Arial", .size = 12, .has_to_unicode = false }, .unicode_map_error = true }),
+        TextSpan.init(.{ .bbox = .{ .x0 = 310, .y0 = 400, .x1 = 590, .y1 = 760 }, .text = prose, .font = .{ .name = "Arial", .size = 12, .has_to_unicode = false }, .unicode_map_error = true }),
+        TextSpan.init(.{ .bbox = .{ .x0 = 20, .y0 = 20, .x1 = 290, .y1 = 380 }, .text = prose, .font = .{ .name = "Arial", .size = 12, .has_to_unicode = false }, .unicode_map_error = true }),
+        TextSpan.init(.{ .bbox = .{ .x0 = 310, .y0 = 20, .x1 = 590, .y1 = 380 }, .text = prose, .font = .{ .name = "Arial", .size = 12, .has_to_unicode = false }, .unicode_map_error = true }),
+    };
+    const page = scorePage(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .spans = &spans,
+    });
+    try std.testing.expect(page.score.signals.bad_unicode >= 0.9);
+    try std.testing.expect(page.score.signals.sparse_text < 0.85);
+    try std.testing.expect(!page.score.route.needs_ocr);
 }
 
 test "unicode map error spans contribute to bad unicode routing signal" {

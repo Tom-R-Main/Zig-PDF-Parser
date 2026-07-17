@@ -7,6 +7,7 @@ pub const SourceKind = enum(u8) {
     table_model,
     formula_model,
     manual,
+    poppler_text,
 };
 
 pub const BBox = struct {
@@ -546,8 +547,6 @@ pub fn analyzeLayoutWithRulings(
     }
 
     const line_threshold: f64 = 10;
-    const half_page = page_width / 2;
-    const column_margin = page_width * 0.05; // 5% margin for column detection
 
     // Sort all spans by Y (top to bottom), then X (left to right)
     const sorted = try allocator.alloc(TextSpan, spans.len);
@@ -562,50 +561,21 @@ pub fn analyzeLayoutWithRulings(
         }
     }.cmp);
 
-    // Analyze column structure: count how many lines have both left and right content
-    var left_only: usize = 0;
-    var right_only: usize = 0;
-    var both_columns: usize = 0;
+    // Count visual line bands, then use whitespace occupancy to locate a real
+    // gutter. A page midpoint is not evidence of a column boundary.
+    var total_lines: usize = 1;
     var current_y: f64 = sorted[0].y0;
-    var has_left = false;
-    var has_right = false;
-
     for (sorted) |span| {
         if (@abs(span.y0 - current_y) > line_threshold) {
-            // Commit previous line stats
-            if (has_left and has_right) {
-                both_columns += 1;
-            } else if (has_left) {
-                left_only += 1;
-            } else if (has_right) {
-                right_only += 1;
-            }
+            total_lines += 1;
             current_y = span.y0;
-            has_left = false;
-            has_right = false;
         }
-        const mid_x = (span.x0 + span.x1) / 2;
-        if (mid_x < half_page - column_margin) {
-            has_left = true;
-        } else if (mid_x > half_page + column_margin) {
-            has_right = true;
-        } else {
-            has_left = true; // Center content goes to left
-        }
-    }
-    // Count last line
-    if (has_left and has_right) {
-        both_columns += 1;
-    } else if (has_left) {
-        left_only += 1;
-    } else if (has_right) {
-        right_only += 1;
     }
 
-    const total_lines = left_only + right_only + both_columns;
     const table_like_rows = countTableLikeRowsInSpans(sorted, line_threshold);
     const table_heavy_page = table_like_rows >= 2 and table_like_rows * 2 >= total_lines;
-    const is_two_column = !table_heavy_page and both_columns > total_lines / 3; // >33% of non-table-heavy lines have both columns
+    const gutter = if (table_heavy_page) null else detectSpanGutter(sorted, page_width, line_threshold);
+    const is_two_column = gutter != null;
 
     var result_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len);
 
@@ -617,11 +587,10 @@ pub fn analyzeLayoutWithRulings(
         defer right_spans.deinit(allocator);
 
         for (sorted) |span| {
-            const mid_x = (span.x0 + span.x1) / 2;
-            if (mid_x < half_page) {
-                try left_spans.append(allocator, span);
-            } else {
+            if (spanRegion(span, gutter.?) == 1) {
                 try right_spans.append(allocator, span);
+            } else {
+                try left_spans.append(allocator, span);
             }
         }
 
@@ -674,11 +643,10 @@ pub fn analyzeLayoutWithRulings(
             errdefer right_lines.deinit(allocator);
 
             for (lines.items) |line| {
-                const mid_x = (line.bounds.x0 + line.bounds.x1) / 2;
-                if (mid_x < half_page) {
-                    try left_lines.append(allocator, line);
-                } else {
+                if (spanRegion(line.bounds, gutter.?) == 1) {
                     try right_lines.append(allocator, line);
+                } else {
+                    try left_lines.append(allocator, line);
                 }
             }
 
@@ -762,6 +730,84 @@ fn countTableLikeRowsInSpans(sorted: []const TextSpan, line_threshold: f64) usiz
     }
     if (spanRowLooksLikeTable(sorted[row_start..])) count += 1;
     return count;
+}
+
+const SpanGutter = struct { x0: f64, x1: f64 };
+
+fn detectSpanGutter(spans: []const TextSpan, page_width: f64, line_threshold: f64) ?SpanGutter {
+    if (spans.len < 4 or page_width <= 0) return null;
+    const bin_count = 64;
+    var occupancy: [bin_count]u32 = @splat(0);
+    for (spans) |span| {
+        const x0 = @max(0, @min(page_width, span.x0));
+        const x1 = @max(0, @min(page_width, span.x1));
+        const first: usize = @min(bin_count - 1, @as(usize, @intFromFloat(@floor(x0 / page_width * bin_count))));
+        const last: usize = @min(bin_count - 1, @as(usize, @intFromFloat(@floor(x1 / page_width * bin_count))));
+        var bin = first;
+        while (bin <= last) : (bin += 1) occupancy[bin] += 1;
+    }
+
+    const search_start = bin_count / 4;
+    const search_end = bin_count * 3 / 4;
+    var best_start: usize = 0;
+    var best_len: usize = 0;
+    var run_start: ?usize = null;
+    for (search_start..search_end) |bin| {
+        if (occupancy[bin] == 0) {
+            if (run_start == null) run_start = bin;
+        } else if (run_start) |start| {
+            if (bin - start > best_len) {
+                best_start = start;
+                best_len = bin - start;
+            }
+            run_start = null;
+        }
+    }
+    if (run_start) |start| {
+        if (search_end - start > best_len) {
+            best_start = start;
+            best_len = search_end - start;
+        }
+    }
+    if (best_len == 0) return null;
+    const gutter = SpanGutter{
+        .x0 = @as(f64, @floatFromInt(best_start)) / bin_count * page_width,
+        .x1 = @as(f64, @floatFromInt(best_start + best_len)) / bin_count * page_width,
+    };
+    if (gutter.x1 - gutter.x0 < @max(12.0, page_width * 0.025)) return null;
+
+    var left_count: usize = 0;
+    var right_count: usize = 0;
+    var left_bands: [32]f64 = undefined;
+    var right_bands: [32]f64 = undefined;
+    var left_band_count: usize = 0;
+    var right_band_count: usize = 0;
+    for (spans) |span| switch (spanRegion(span, gutter)) {
+        0 => {
+            left_count += 1;
+            appendBaselineBand(&left_bands, &left_band_count, span.y0, line_threshold);
+        },
+        1 => {
+            right_count += 1;
+            appendBaselineBand(&right_bands, &right_band_count, span.y0, line_threshold);
+        },
+        else => {},
+    };
+    if (left_count < 2 or right_count < 2 or left_band_count < 2 or right_band_count < 2) return null;
+    return gutter;
+}
+
+fn appendBaselineBand(bands: *[32]f64, count: *usize, baseline: f64, tolerance: f64) void {
+    for (bands[0..count.*]) |existing| if (@abs(existing - baseline) <= tolerance) return;
+    if (count.* == bands.len) return;
+    bands[count.*] = baseline;
+    count.* += 1;
+}
+
+fn spanRegion(span: TextSpan, gutter: SpanGutter) u32 {
+    if (span.x1 <= gutter.x0) return 0;
+    if (span.x0 >= gutter.x1) return 1;
+    return 2;
 }
 
 fn spanRowLooksLikeTable(row: []const TextSpan) bool {

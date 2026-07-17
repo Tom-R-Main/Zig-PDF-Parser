@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.9.0`
+Current schema version: `0.10.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -30,7 +30,10 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.9.0` adds the `glyph_trace_jsonl` debug asset kind for page-scoped
+Schema `0.10.0` adds `poppler_text` as a span source and `external_text` as its
+provenance source kind. This source appears only when native readable layout
+fails its quality gate and a single document-level `pdftotext` fallback
+succeeds. Schema `0.9.0` added the `glyph_trace_jsonl` debug asset kind for page-scoped
 character/glyph review evidence. Earlier schema `0.8.0` added
 encrypted-document manifest metadata for known-password PDF parsing.
 
@@ -49,8 +52,8 @@ prefer provenance for evidence and routing context.
 - `artifact_id`
 - `page_index`, or `null` for document-scoped records
 - `bbox`, or `null` for document-scoped records
-- `source_kind`: `native`, `embedded_ocr`, `fresh_ocr`, `table_model`, `form`,
-  `formula`, `debug`, `lifecycle`, `mixed`, or `unknown`
+- `source_kind`: `native`, `external_text`, `embedded_ocr`, `fresh_ocr`,
+  `table_model`, `form`, `formula`, `debug`, `lifecycle`, `mixed`, or `unknown`
 - `confidence`
 - `span_ids`
 - `block_ids`

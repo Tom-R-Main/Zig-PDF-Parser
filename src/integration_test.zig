@@ -316,6 +316,26 @@ test "adaptive extraction preserves layout reading order for two columns" {
     }
 }
 
+test "adaptive extraction uses document fallback after native readable quality failure" {
+    const allocator = std.testing.allocator;
+    const long_token: [200]u8 = @splat('a');
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, &long_token);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+    var native = try doc.analyzeNativePageLayout(0, allocator);
+    defer native.deinit();
+    try std.testing.expect(!native.quality.quality_pass);
+
+    var result = try doc.extractAdaptive(allocator, .{ .fallback_document_text = "Readable fallback" });
+    defer result.deinit();
+    const text = try result.render(allocator, .text);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("Readable fallback", text);
+    try std.testing.expectEqual(zpdf.layout.SourceKind.poppler_text, result.reconciled.spans[0].chosen_source);
+}
+
 test "adaptive extraction renders reconstructed complex financial tables" {
     const allocator = std.testing.allocator;
 
@@ -368,7 +388,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.9.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.10.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);
@@ -413,7 +433,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
-    try std.testing.expectEqualStrings("0.9.0", debug_assets[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.10.0", debug_assets[0].object.get("schema_version").?.string);
     try std.testing.expect(debug_assets[0].object.get("asset_kind") != null);
     try std.testing.expect(debug_assets[0].object.get("path") != null);
     try std.testing.expectEqual(.null, debug_assets[0].object.get("path").?);
@@ -424,7 +444,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.9.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.10.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -548,7 +568,7 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.9.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.10.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
@@ -578,7 +598,7 @@ test "specialist protocol emits batch request records for routed table formula r
     const requests = parsed.value.object.get("specialist_requests").?.array.items;
     try std.testing.expect(requests.len > 0);
     try expectProvenanceObject(requests[0]);
-    try std.testing.expectEqualStrings("0.9.0", requests[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.10.0", requests[0].object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("specialist_request", requests[0].object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-specialist", requests[0].object.get("source_id").?.string);
     try std.testing.expect(requests[0].object.get("requested_kind") != null);
@@ -828,7 +848,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
-    try std.testing.expectEqualStrings("0.9.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.10.0", tables[0].object.get("schema_version").?.string);
     try std.testing.expect(tables[0].object.get("logical_table_id") != null);
     try std.testing.expect(tables[0].object.get("table_part_index") != null);
     try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
@@ -838,7 +858,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
     try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.9.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.10.0", cells[0].object.get("schema_version").?.string);
     try std.testing.expect(cells[0].object.get("cell_id") != null);
     try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
     try std.testing.expect(cells[0].object.get("raw_text") != null);

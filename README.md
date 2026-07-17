@@ -258,6 +258,7 @@ pub fn main(init: std.process.Init) !void {
 pdf-parser extract document.pdf              # Extract all pages (uses structure tree for reading order)
 pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
 pdf-parser extract -o out.txt document.pdf   # Output to file
+pdf-parser extract --raw-recall document.pdf # Loss-minimizing search/diagnostic channel
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f jsonl doc.pdf
 pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
@@ -287,6 +288,16 @@ diagnostics also compare reading-order candidates with a Form-aware full-context
 Unicode inventory and report missing/extra codepoints, decoded Form XObjects,
 coverage, and the selected output path.
 
+Readable extraction now preserves glyph geometry through a native layout pass
+that classifies joins, spaces, line breaks, block breaks, and region breaks with
+confidence and provenance. The raw recall channel remains separate. Before
+readable/RAG output, native layout is gated on boundary/token/line metrics,
+extreme token and line rates, and non-whitespace recall. If it fails, the CLI
+runs one document-level `pdftotext` process and marks those spans as
+`poppler_text` (`external_text` provenance). Native region/gutter segmentation
+is used for columns; adaptive region routing emits one primary specialist
+request per region.
+
 Adaptive extraction keeps fast native extraction on the default path while
 recording when a page or region should be routed elsewhere. Current route names
 include `use_native`, `queue_ocr`, `candidate_layout`, `candidate_table`,
@@ -309,7 +320,7 @@ debug assets, then `document_finished`. `jsonl` remains a compatibility span
 stream, and `rag-jsonl` remains chunk-only. The schema is documented in
 [docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets are formal `debug_asset` records in schema `0.9.0`. By
+Visual review assets are formal `debug_asset` records in schema `0.10.0`. By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
 `page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`,
@@ -555,7 +566,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.9.0`. Every emitted record carries a `provenance` envelope with document and
+`0.10.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

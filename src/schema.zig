@@ -2023,6 +2023,7 @@ fn provenanceSourceKind(source: layout.SourceKind) []const u8 {
         .table_model => "table_model",
         .formula_model => "formula",
         .manual => "form",
+        .poppler_text => "external_text",
     };
 }
 
@@ -2035,6 +2036,7 @@ fn provenanceSourceKindFromMask(mask: u32) []const u8 {
     if (hasSource(mask, .table_model)) return provenanceSourceKind(.table_model);
     if (hasSource(mask, .formula_model)) return provenanceSourceKind(.formula_model);
     if (hasSource(mask, .manual)) return provenanceSourceKind(.manual);
+    if (hasSource(mask, .poppler_text)) return provenanceSourceKind(.poppler_text);
     return "unknown";
 }
 
@@ -2321,11 +2323,13 @@ fn sourceKindName(source: layout.SourceKind) []const u8 {
         .table_model => "table_model",
         .formula_model => "formula_model",
         .manual => "manual",
+        .poppler_text => "poppler_text",
     };
 }
 
 fn sourceMaskName(mask: u32) []const u8 {
     if (hasSource(mask, .manual)) return "manual";
+    if (hasSource(mask, .poppler_text) and countSourceBits(mask) == 1) return "poppler_text";
     if (hasSource(mask, .native_pdf) and countSourceBits(mask) == 1) return "native_pdf";
     if (hasSource(mask, .table_model) and countSourceBits(mask) == 1) return "table_model";
     if (hasSource(mask, .formula_model) and countSourceBits(mask) == 1) return "formula_model";

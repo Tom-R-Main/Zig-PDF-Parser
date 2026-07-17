@@ -607,9 +607,11 @@ pub const SpanCollector = struct {
         }
 
         if (decoded.writing_mode == 1) {
-            self.current_y -= advance;
+            self.current_x -= self.current_text_matrix[2] * advance;
+            self.current_y -= self.current_text_matrix[3] * advance;
         } else {
-            self.current_x += advance;
+            self.current_x += self.current_text_matrix[0] * advance;
+            self.current_y += self.current_text_matrix[1] * advance;
         }
         self.current_text_matrix[4] = self.current_x;
         self.current_text_matrix[5] = self.current_y;
@@ -647,9 +649,11 @@ pub const SpanCollector = struct {
             try self.appendGeneratedSpace(adjustment);
         }
         if (self.current_writing_mode == 1) {
-            self.current_y += adjustment;
+            self.current_x += self.current_text_matrix[2] * adjustment;
+            self.current_y += self.current_text_matrix[3] * adjustment;
         } else {
-            self.current_x += adjustment;
+            self.current_x += self.current_text_matrix[0] * adjustment;
+            self.current_y += self.current_text_matrix[1] * adjustment;
         }
         self.current_text_matrix[4] = self.current_x;
         self.current_text_matrix[5] = self.current_y;
@@ -702,11 +706,17 @@ pub const SpanCollector = struct {
         return self.spans.toOwnedSlice(self.allocator);
     }
 
+    /// Transfer glyph geometry to the caller. Glyph text and font names remain
+    /// caller-owned and must be released with the returned slice.
+    pub fn toOwnedGlyphSlice(self: *SpanCollector) ![]GlyphSpan {
+        return self.glyphs.toOwnedSlice(self.allocator);
+    }
+
     fn appendGeneratedSpace(self: *SpanCollector, advance: f64) !void {
         const bbox = if (self.current_writing_mode == 1)
-            layout.BBox{ .x0 = self.current_x, .y0 = self.current_y - advance, .x1 = self.current_x + self.current_font_size * 0.35, .y1 = self.current_y }
+            transformedBounds(self.current_text_matrix, .{ .x0 = 0, .y0 = -advance, .x1 = self.current_font_size * 0.35, .y1 = 0 })
         else
-            layout.BBox{ .x0 = self.current_x, .y0 = self.current_y, .x1 = self.current_x + advance, .y1 = self.current_y + self.current_font_size };
+            transformedBounds(self.current_text_matrix, .{ .x0 = 0, .y0 = 0, .x1 = advance, .y1 = self.current_font_size });
         const text = try self.allocator.dupe(u8, " ");
         errdefer self.allocator.free(text);
         const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
@@ -769,21 +779,37 @@ pub const SpanCollector = struct {
     fn currentGlyphBBox(self: *const SpanCollector, advance: f64, decoded: encoding_mod.FontEncoding.DecodedGlyph) layout.BBox {
         const ascender = decoded.ascender / 1000.0 * self.current_font_size;
         const descender = decoded.descender / 1000.0 * self.current_font_size;
-        const y0 = self.current_y + self.current_text_rise + descender;
-        const y1 = self.current_y + self.current_text_rise + ascender;
-        if (decoded.writing_mode == 1) {
-            return .{
-                .x0 = self.current_x + descender,
-                .y0 = self.current_y - advance,
-                .x1 = self.current_x + ascender,
-                .y1 = self.current_y,
-            };
+        const local = if (decoded.writing_mode == 1)
+            layout.BBox{ .x0 = descender, .y0 = -advance, .x1 = ascender, .y1 = 0 }
+        else
+            layout.BBox{ .x0 = 0, .y0 = self.current_text_rise + descender, .x1 = advance, .y1 = self.current_text_rise + ascender };
+        return transformedBounds(self.current_text_matrix, local);
+    }
+
+    fn transformedBounds(matrix: [6]f64, box: layout.BBox) layout.BBox {
+        const points = [_][2]f64{
+            transformPoint(matrix, box.x0, box.y0),
+            transformPoint(matrix, box.x1, box.y0),
+            transformPoint(matrix, box.x1, box.y1),
+            transformPoint(matrix, box.x0, box.y1),
+        };
+        var x0 = points[0][0];
+        var y0 = points[0][1];
+        var x1 = x0;
+        var y1 = y0;
+        for (points[1..]) |point| {
+            x0 = @min(x0, point[0]);
+            y0 = @min(y0, point[1]);
+            x1 = @max(x1, point[0]);
+            y1 = @max(y1, point[1]);
         }
+        return .{ .x0 = x0, .y0 = y0, .x1 = x1, .y1 = y1 };
+    }
+
+    fn transformPoint(matrix: [6]f64, x: f64, y: f64) [2]f64 {
         return .{
-            .x0 = self.current_x,
-            .y0 = y0,
-            .x1 = self.current_x + advance,
-            .y1 = y1,
+            matrix[0] * x + matrix[2] * y + matrix[4],
+            matrix[1] * x + matrix[3] * y + matrix[5],
         };
     }
 

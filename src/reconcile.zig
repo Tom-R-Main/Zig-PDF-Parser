@@ -704,6 +704,7 @@ fn sourcePriority(source: SourceKind) f32 {
         .formula_model => 0.92,
         .fresh_ocr => 0.82,
         .manual => 1.0,
+        .poppler_text => 0.98,
     };
 }
 
@@ -741,6 +742,7 @@ fn countSourceBits(mask: SourceMask) u8 {
 
 fn sourceMaskName(mask: SourceMask) []const u8 {
     if (hasSource(mask, .manual)) return "manual";
+    if (hasSource(mask, .poppler_text) and countSourceBits(mask) == 1) return "poppler_text";
     if (hasSource(mask, .native_pdf) and countSourceBits(mask) == 1) return "native_pdf";
     if (hasSource(mask, .table_model) and countSourceBits(mask) == 1) return "table_model";
     if (hasSource(mask, .formula_model) and countSourceBits(mask) == 1) return "formula_model";
@@ -757,6 +759,7 @@ fn sourceKindName(source: SourceKind) []const u8 {
         .table_model => "table_model",
         .formula_model => "formula_model",
         .manual => "manual",
+        .poppler_text => "poppler_text",
     };
 }
 

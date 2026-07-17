@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const layout = @import("layout.zig");
+const native_layout = @import("native_layout.zig");
 const complexity = @import("complexity.zig");
 const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
@@ -25,6 +26,10 @@ pub const ExtractOptions = struct {
     enable_ocr: bool = true,
     ocr_config: ocr.OcrConfig = .{},
     preserve_layout_order: bool = true,
+    /// Optional output from one document-level `pdftotext <input> -` process.
+    /// It is consumed page-by-page only when native readable layout fails its
+    /// quality gate; ownership remains with the caller.
+    fallback_document_text: ?[]const u8 = null,
     reconcile_options: ReconcileOptions = .{},
 };
 
@@ -157,6 +162,20 @@ pub const RegionRoute = struct {
                 else => {},
             }
         }
+        const table_confidence = if (table) |score| score.confidence else if (route.needs_table_model) route.max_signal else 0;
+        const formula_confidence = if (formula) |score| score.confidence else if (route.needs_formula_model) route.max_signal else 0;
+        if (route.needs_table_model or route.needs_formula_model) {
+            if (table_confidence >= formula_confidence) {
+                route.needs_table_model = true;
+                route.needs_formula_model = false;
+            } else {
+                route.needs_table_model = false;
+                route.needs_formula_model = true;
+            }
+            // A table/formula specialist already receives the region geometry;
+            // a second generic layout request for the same block is redundant.
+            route.needs_layout_model = false;
+        }
         return .{
             .page_index = args.score.page_index,
             .region_index = args.region_index,
@@ -279,8 +298,38 @@ pub fn extractDocument(
         const content_scratch_allocator = content_scratch_arena.allocator();
         const page_content = document.getPageContentForScratch(page_idx, content_scratch_allocator) catch &.{};
 
-        const spans = try document.extractTextWithBoundsFromContent(page_idx, allocator, content_scratch_allocator, page_content);
+        var geometry = try document.extractNativePageGeometryFromContent(page_idx, allocator, content_scratch_allocator, page_content);
+        defer geometry.deinit();
+        const spans = try cloneTextSpans(allocator, geometry.spans);
         try native_pages.append(allocator, spans);
+
+        const raw_recall_text = document.extractTextRawRecall(page_idx, allocator) catch try allocator.alloc(u8, 0);
+        defer allocator.free(raw_recall_text);
+        var native_result = try native_layout.analyze(allocator, geometry.glyphs, page_bbox, raw_recall_text);
+        defer native_result.deinit();
+        if (options.fallback_document_text) |document_text| {
+            if (documentTextPage(document_text, page_idx)) |reference_text| {
+                native_result.quality = try native_layout.compareAgainstReference(
+                    allocator,
+                    raw_recall_text,
+                    native_result.text,
+                    reference_text,
+                );
+            }
+        }
+
+        var readable_spans: []layout.TextSpan = undefined;
+        if (native_result.quality.quality_pass) {
+            readable_spans = try native_layout.buildLineSpans(allocator, geometry.glyphs, &native_result, page_index);
+        } else if (options.fallback_document_text) |document_text| {
+            readable_spans = try fallbackTextSpans(allocator, document_text, page_idx, page_index, page_bbox);
+        } else {
+            // Keep the best native readable reconstruction available when the
+            // external comparator is unavailable, while preserving the failed
+            // quality result as a hard routing signal below.
+            readable_spans = try native_layout.buildLineSpans(allocator, geometry.glyphs, &native_result, page_index);
+        }
+        try layout_pages.append(allocator, readable_spans);
         try trace_records.append(allocator, .{
             .page_index = page_index,
             .stage = .native_spans,
@@ -314,7 +363,8 @@ pub fn extractDocument(
         };
 
         const page_score = complexity.scorePage(page_input);
-        const page_route = PageRoute.fromScore(page_score);
+        var page_route = PageRoute.fromScore(page_score);
+        if (!native_result.quality.quality_pass) suppressLayoutSpecialists(&page_route.route, &page_route.reason_mask);
         try page_routes.append(allocator, page_route);
         try trace_records.append(allocator, .{
             .page_index = page_index,
@@ -389,7 +439,7 @@ pub fn extractDocument(
             try tables.append(allocator, try copyTableGrid(allocator, table));
         }
 
-        if (page_layout.tables.len > 0) {
+        if (page_layout.tables.len > 0 and native_result.quality.quality_pass) {
             const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
             if (layout_spans.len > 0) {
                 try layout_pages.append(allocator, layout_spans);
@@ -407,9 +457,8 @@ pub fn extractDocument(
             }
         } else {
             try layers.append(allocator, .{
-                .source = .native_pdf,
-                .spans = spans,
-                .trust = 1.0,
+                .spans = readable_spans,
+                .trust = if (native_result.quality.quality_pass) 1.0 else 0.88,
             });
         }
 
@@ -438,11 +487,12 @@ pub fn extractDocument(
                 .spans = spans,
                 .ruling_lines = ruling_lines,
             });
-            const route = RegionRoute.fromScore(.{
+            var route = RegionRoute.fromScore(.{
                 .region_index = region_index,
                 .score = score,
                 .specialist = specialist,
             });
+            if (!native_result.quality.quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
             try region_routes.append(allocator, route);
             try appendRouteTraces(
                 allocator,
@@ -469,13 +519,14 @@ pub fn extractDocument(
                 .spans = spans,
                 .ruling_lines = ruling_lines,
             });
-            const route = RegionRoute.fromScore(.{
+            var route = RegionRoute.fromScore(.{
                 .region_index = region_index,
                 .layout_block_index = block_index_u32,
                 .block_kind = block.kind,
                 .score = score,
                 .specialist = specialist,
             });
+            if (!native_result.quality.quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
             try region_routes.append(allocator, route);
             try appendRouteTraces(
                 allocator,
@@ -540,6 +591,19 @@ pub fn extractDocument(
         .form_fields = form_fields,
         .tables = owned_tables,
     };
+}
+
+fn suppressLayoutSpecialists(route: *RouteDecision, mask: *RouteReasonMask) void {
+    route.native_fast_path = false;
+    route.needs_layout_model = false;
+    route.needs_table_model = false;
+    route.needs_formula_model = false;
+    mask.* &= ~(reasonBit(.low_reading_order_confidence) |
+        reasonBit(.table_alignment) |
+        reasonBit(.formula_density) |
+        reasonBit(.layout_route_stub) |
+        reasonBit(.table_route_stub) |
+        reasonBit(.formula_route_stub));
 }
 
 fn collectFormFields(allocator: std.mem.Allocator, document: anytype) ![]FormField {
@@ -1354,6 +1418,7 @@ fn sourceName(source: layout.SourceKind) []const u8 {
         .table_model => "table_model",
         .formula_model => "formula_model",
         .manual => "manual",
+        .poppler_text => "poppler_text",
     };
 }
 
@@ -1387,6 +1452,57 @@ fn freeTextSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
     if (spans.len == 0) return;
     for (spans) |span| freeOwnedTextSpan(allocator, span);
     allocator.free(spans);
+}
+
+fn cloneTextSpans(allocator: std.mem.Allocator, source: []const layout.TextSpan) ![]layout.TextSpan {
+    const cloned = try allocator.alloc(layout.TextSpan, source.len);
+    errdefer allocator.free(cloned);
+    var initialized: usize = 0;
+    errdefer for (cloned[0..initialized]) |span| freeOwnedTextSpan(allocator, span);
+    for (source, cloned) |span, *copy| {
+        copy.* = span;
+        copy.text = try allocator.dupe(u8, span.text);
+        errdefer allocator.free(@constCast(copy.text));
+        if (span.font.name) |name| copy.font.name = try allocator.dupe(u8, name);
+        initialized += 1;
+    }
+    return cloned;
+}
+
+fn fallbackTextSpans(
+    allocator: std.mem.Allocator,
+    document_text: []const u8,
+    page_number: usize,
+    page_index: u32,
+    page_bbox: BBox,
+) ![]layout.TextSpan {
+    const page_text = documentTextPage(document_text, page_number) orelse return allocator.alloc(layout.TextSpan, 0);
+    const trimmed = std.mem.trim(u8, page_text, " \t\r\n");
+    if (trimmed.len == 0) return allocator.alloc(layout.TextSpan, 0);
+    const spans = try allocator.alloc(layout.TextSpan, 1);
+    errdefer allocator.free(spans);
+    const text = try allocator.dupe(u8, trimmed);
+    spans[0] = layout.TextSpan.init(.{
+        .page_index = page_index,
+        .bbox = page_bbox,
+        .text = text,
+        .source = .poppler_text,
+        .confidence = 0.98,
+    });
+    return spans;
+}
+
+fn documentTextPage(document_text: []const u8, wanted_page: usize) ?[]const u8 {
+    var page: usize = 0;
+    var start: usize = 0;
+    for (document_text, 0..) |byte, index| {
+        if (byte != '\x0c') continue;
+        if (page == wanted_page) return document_text[start..index];
+        page += 1;
+        start = index + 1;
+    }
+    if (page == wanted_page) return document_text[start..];
+    return null;
 }
 
 fn freeOwnedTextSpan(allocator: std.mem.Allocator, span: layout.TextSpan) void {

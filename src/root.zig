@@ -28,6 +28,7 @@ pub const encryption = @import("encryption.zig");
 pub const structural = @import("structural.zig");
 pub const simd = @import("simd.zig");
 pub const layout = @import("layout.zig");
+pub const native_layout = @import("native_layout.zig");
 pub const structtree = @import("structtree.zig");
 pub const markdown = @import("markdown.zig");
 pub const outline = @import("outline.zig");
@@ -51,6 +52,9 @@ pub const XRefTable = xref.XRefTable;
 pub const Page = pagetree.Page;
 pub const FontEncoding = encoding.FontEncoding;
 pub const TextSpan = layout.TextSpan;
+pub const GlyphSpan = interpreter.GlyphSpan;
+pub const NativeLayoutResult = native_layout.Result;
+pub const NativeLayoutQuality = native_layout.QualityMetrics;
 pub const LineRole = layout.LineRole;
 pub const BlockKind = layout.BlockKind;
 pub const CandidateKind = layout.CandidateKind;
@@ -101,7 +105,7 @@ pub const StructTree = structtree.StructTree;
 pub const StructElement = structtree.StructElement;
 pub const MarkdownOptions = markdown.MarkdownOptions;
 pub const MarkdownRenderer = markdown.MarkdownRenderer;
-pub const FullTextMode = enum { accuracy, fast };
+pub const FullTextMode = enum { accuracy, raw_recall, fast };
 pub const EncryptionInfo = encryption.Info;
 pub const EncryptionAuthType = encryption.AuthType;
 pub const EncryptionCryptMethod = encryption.CryptMethod;
@@ -109,6 +113,17 @@ pub const EncryptionPermissions = encryption.Permissions;
 pub const StructuralDiagnostic = structural.Diagnostic;
 pub const StructuralSummary = structural.Summary;
 pub const ExtractionDiagnostics = extraction_diagnostics.Report;
+
+pub const NativePageGeometry = struct {
+    allocator: std.mem.Allocator,
+    spans: []TextSpan,
+    glyphs: []GlyphSpan,
+
+    pub fn deinit(self: *NativePageGeometry) void {
+        Document.freeTextSpans(self.allocator, self.spans);
+        Document.freeGlyphSpans(self.allocator, self.glyphs);
+    }
+};
 
 /// Error handling configuration
 pub const ErrorConfig = struct {
@@ -776,6 +791,16 @@ pub const Document = struct {
         allocator.free(spans);
     }
 
+    /// Free glyph geometry returned by extractNativePageGeometry.
+    pub fn freeGlyphSpans(allocator: std.mem.Allocator, glyphs: []GlyphSpan) void {
+        if (glyphs.len == 0) return;
+        for (glyphs) |glyph| {
+            if (glyph.text.len > 0) allocator.free(@constCast(glyph.text));
+            if (glyph.font_name) |name| allocator.free(@constCast(name));
+        }
+        allocator.free(glyphs);
+    }
+
     /// Resolve an object reference
     pub fn resolve(self: *Document, ref: ObjRef) !Object {
         return pagetree.resolveRefWithSecurity(
@@ -904,6 +929,70 @@ pub const Document = struct {
         const spans = try collector.toOwnedSlice();
         collector.deinit();
         return spans;
+    }
+
+    /// Extract both compatibility spans and glyph-level geometry for native
+    /// layout reconstruction. Ownership of both slices belongs to the caller.
+    pub fn extractNativePageGeometry(self: *Document, page_num: usize, allocator: std.mem.Allocator) !NativePageGeometry {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+        const content = self.getPageContentForScratch(page_num, scratch_allocator) catch return .{
+            .allocator = allocator,
+            .spans = try allocator.alloc(TextSpan, 0),
+            .glyphs = try allocator.alloc(GlyphSpan, 0),
+        };
+        return self.extractNativePageGeometryFromContent(page_num, allocator, scratch_allocator, content);
+    }
+
+    pub fn extractNativePageGeometryFromContent(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+    ) !NativePageGeometry {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+        if (content.len == 0) return .{
+            .allocator = allocator,
+            .spans = try allocator.alloc(TextSpan, 0),
+            .glyphs = try allocator.alloc(GlyphSpan, 0),
+        };
+
+        self.ensurePageFonts(page_num);
+        var collector = interpreter.SpanCollector.init(allocator, @intCast(page_num));
+        errdefer collector.deinit();
+        var null_writer: NullWriter = .{};
+        try extractContentStream(content, .{ .bounds = &collector }, &self.font_cache, page_num, scratch_allocator, &null_writer);
+        try collector.flush();
+
+        const spans = try collector.toOwnedSlice();
+        errdefer Document.freeTextSpans(allocator, spans);
+        const glyphs = try collector.toOwnedGlyphSlice();
+        collector.deinit();
+        return .{ .allocator = allocator, .spans = spans, .glyphs = glyphs };
+    }
+
+    /// Glyph-first native layout for a page. The raw recall text is used only
+    /// as a completeness oracle; it is retained independently by callers.
+    pub fn analyzeNativePageLayout(self: *Document, page_num: usize, allocator: std.mem.Allocator) !NativeLayoutResult {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+        const content = try self.getPageContentForScratch(page_num, scratch_allocator);
+        const raw = try self.extractTextFullContextFromContent(page_num, allocator, scratch_allocator, content, null);
+        defer allocator.free(raw);
+        var geometry = try self.extractNativePageGeometryFromContent(page_num, allocator, scratch_allocator, content);
+        defer geometry.deinit();
+        const page = self.pages.items[page_num];
+        return native_layout.analyze(allocator, geometry.glyphs, .{
+            .x0 = page.media_box[0],
+            .y0 = page.media_box[1],
+            .x1 = page.media_box[2],
+            .y1 = page.media_box[3],
+        }, raw);
     }
 
     /// Analyze page layout (columns, paragraphs, reading order)
@@ -1123,7 +1212,8 @@ pub const Document = struct {
                         if (full_context_text) |inventory| {
                             full_context_text = null;
                             if (selection_metrics) |metrics| metrics.selected = .full_context;
-                            return self.withPageFormFields(page_num, allocator, inventory);
+                            const readable = try self.readableFromInventory(page_num, allocator, scratch_allocator, content, inventory);
+                            return self.withPageFormFields(page_num, allocator, readable);
                         }
                         if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
                         const geometric = try self.extractTextGeometricFromContent(page_num, allocator, scratch_allocator, content);
@@ -1163,7 +1253,8 @@ pub const Document = struct {
                         allocator.free(structured);
                         full_context_text = null;
                         if (selection_metrics) |metrics| metrics.selected = .full_context;
-                        return self.withPageFormFields(page_num, allocator, inventory);
+                        const readable = try self.readableFromInventory(page_num, allocator, scratch_allocator, content, inventory);
+                        return self.withPageFormFields(page_num, allocator, readable);
                     }
                     if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
                     if (std.mem.trim(u8, structured, " \t\r\n\x0c").len > 0) {
@@ -1191,7 +1282,8 @@ pub const Document = struct {
                 allocator.free(table_text);
                 full_context_text = null;
                 if (selection_metrics) |metrics| metrics.selected = .full_context;
-                return self.withPageFormFields(page_num, allocator, inventory);
+                const readable = try self.readableFromInventory(page_num, allocator, scratch_allocator, content, inventory);
+                return self.withPageFormFields(page_num, allocator, readable);
             }
             if (selection_metrics) |metrics| metrics.selected = .legacy_fallback;
             return self.withPageFormFields(page_num, allocator, table_text);
@@ -1200,7 +1292,8 @@ pub const Document = struct {
         if (full_context_text) |inventory| {
             full_context_text = null;
             if (selection_metrics) |metrics| metrics.selected = .full_context;
-            return self.withPageFormFields(page_num, allocator, inventory);
+            const readable = try self.readableFromInventory(page_num, allocator, scratch_allocator, content, inventory);
+            return self.withPageFormFields(page_num, allocator, readable);
         }
 
         // Legacy fallback for domain errors in full-context extraction.
@@ -1363,6 +1456,61 @@ pub const Document = struct {
         try extractTextFromContent(scratch_allocator, content, page_num, &self.font_cache, writer);
     }
 
+    fn extractTextNativeLayoutFromContent(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+        raw_recall_text: []const u8,
+        quality: ?*NativeLayoutQuality,
+    ) ![]u8 {
+        var geometry = try self.extractNativePageGeometryFromContent(page_num, allocator, scratch_allocator, content);
+        defer geometry.deinit();
+        const page = self.pages.items[page_num];
+        var native_result = try native_layout.analyze(allocator, geometry.glyphs, .{
+            .x0 = page.media_box[0],
+            .y0 = page.media_box[1],
+            .x1 = page.media_box[2],
+            .y1 = page.media_box[3],
+        }, raw_recall_text);
+        defer native_result.deinit();
+        if (quality) |out| out.* = native_result.quality;
+        return allocator.dupe(u8, native_result.text);
+    }
+
+    fn readableFromInventory(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        scratch_allocator: std.mem.Allocator,
+        content: []const u8,
+        inventory: []u8,
+    ) ![]u8 {
+        var quality: NativeLayoutQuality = .{};
+        const readable = self.extractTextNativeLayoutFromContent(
+            page_num,
+            allocator,
+            scratch_allocator,
+            content,
+            inventory,
+            &quality,
+        ) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            return inventory;
+        };
+
+        // Layout may reorder whitespace, but it must not silently trade away
+        // native content recall. Keep the loss-minimizing inventory if the
+        // glyph pass cannot account for nearly all non-whitespace characters.
+        if (quality.raw_non_whitespace_recall < 0.995) {
+            allocator.free(readable);
+            return inventory;
+        }
+        allocator.free(inventory);
+        return readable;
+    }
+
     fn extractTextFullContextFromContent(
         self: *Document,
         page_num: usize,
@@ -1390,6 +1538,33 @@ pub const Document = struct {
         };
         try extractTextFromContentFull(content, page.resources, &ctx, runtime.arrayListWriter(&output, allocator));
         return output.toOwnedSlice(allocator);
+    }
+
+    /// Loss-minimizing content-stream text. This is intentionally separate
+    /// from readable extraction so search/diagnostics can retain raw recall.
+    pub fn extractTextRawRecall(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+        const content = try self.getPageContentForScratch(page_num, scratch_allocator);
+        return self.extractTextFullContextFromContent(page_num, allocator, scratch_allocator, content, null);
+    }
+
+    pub fn extractTextReadable(
+        self: *Document,
+        page_num: usize,
+        allocator: std.mem.Allocator,
+        quality: ?*NativeLayoutQuality,
+    ) ![]u8 {
+        if (page_num >= self.pages.items.len) return error.PageNotFound;
+        var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer scratch_arena.deinit();
+        const scratch_allocator = scratch_arena.allocator();
+        const content = try self.getPageContentForScratch(page_num, scratch_allocator);
+        const raw = try self.extractTextFullContextFromContent(page_num, allocator, scratch_allocator, content, null);
+        defer allocator.free(raw);
+        return self.extractTextNativeLayoutFromContent(page_num, allocator, scratch_allocator, content, raw, quality);
     }
 
     /// Extract text from all pages using structure tree order
@@ -1428,6 +1603,20 @@ pub const Document = struct {
             }
         }
 
+        return result.toOwnedSlice(allocator);
+    }
+
+    /// Extract every page through the loss-minimizing raw recall channel.
+    pub fn extractAllTextRawRecall(self: *Document, allocator: std.mem.Allocator) ![]u8 {
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(allocator);
+        try result.ensureTotalCapacity(allocator, self.pages.items.len * 2048);
+        for (0..self.pages.items.len) |page_num| {
+            if (page_num > 0) try result.append(allocator, '\x0c');
+            const page_text = self.extractTextRawRecall(page_num, allocator) catch continue;
+            defer allocator.free(page_text);
+            try result.appendSlice(allocator, page_text);
+        }
         return result.toOwnedSlice(allocator);
     }
 
@@ -1486,6 +1675,7 @@ pub const Document = struct {
     pub fn extractAllTextWithMode(self: *Document, allocator: std.mem.Allocator, mode: FullTextMode) ![]u8 {
         return switch (mode) {
             .accuracy => self.extractAllTextStructured(allocator),
+            .raw_recall => self.extractAllTextRawRecall(allocator),
             .fast => self.extractAllTextFast(allocator),
         };
     }

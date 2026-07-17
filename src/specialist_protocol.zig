@@ -10,7 +10,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.9.0";
+pub const schema_version = "0.10.0";
 
 pub const SpecialistKind = enum {
     ocr,
@@ -186,9 +186,7 @@ pub fn countRequests(result: anytype) usize {
         count += requestKindCount(route.route, route.reason_mask);
     }
     for (result.trace_records) |record| {
-        const kinds = [_]SpecialistKind{ .ocr, .table, .formula, .layout };
-        for (kinds) |kind| {
-            if (!routeNeedsKindOrReason(record.route, kind, record.reason_mask)) continue;
+        if (primaryRequestKind(record.route, record.reason_mask)) |kind| {
             if (requestAlreadyCovered(result, kind, record.page_index, record.region_index)) continue;
             count += 1;
         }
@@ -370,9 +368,7 @@ fn writeRequests(
     }
     for (result.region_routes) |route| {
         if (!matchesPage(page_filter, route.page_index)) continue;
-        const kinds = [_]SpecialistKind{ .table, .formula, .layout };
-        for (kinds) |kind| {
-            if (!routeNeedsKindOrReason(route.route, kind, route.reason_mask)) continue;
+        if (primaryRegionKind(route.route, route.reason_mask)) |kind| {
             try writeRecordSeparator(writer, jsonl, wrote);
             try writeRequestRecord(writer, result, context, kind, request_index, route.page_index, route.region_index, route.bbox, route.route, route.reason_mask, route.signals, event_index, span_lookup, block_lookup);
             request_index += 1;
@@ -380,9 +376,7 @@ fn writeRequests(
     }
     for (result.trace_records) |record| {
         if (!matchesPage(page_filter, record.page_index)) continue;
-        const kinds = [_]SpecialistKind{ .ocr, .table, .formula, .layout };
-        for (kinds) |kind| {
-            if (!routeNeedsKindOrReason(record.route, kind, record.reason_mask)) continue;
+        if (primaryRequestKind(record.route, record.reason_mask)) |kind| {
             if (requestAlreadyCovered(result, kind, record.page_index, record.region_index)) continue;
             const bbox = traceBBox(result, record) orelse layout.BBox{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
             try writeRecordSeparator(writer, jsonl, wrote);
@@ -522,11 +516,19 @@ fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext
 }
 
 fn requestKindCount(route: complexity.RouteDecision, reason_mask: u32) usize {
-    var count: usize = 0;
-    if (routeNeedsKindOrReason(route, .table, reason_mask)) count += 1;
-    if (routeNeedsKindOrReason(route, .formula, reason_mask)) count += 1;
-    if (routeNeedsKindOrReason(route, .layout, reason_mask)) count += 1;
-    return count;
+    return if (primaryRegionKind(route, reason_mask) == null) 0 else 1;
+}
+
+fn primaryRequestKind(route: complexity.RouteDecision, reason_mask: u32) ?SpecialistKind {
+    if (routeNeedsKindOrReason(route, .ocr, reason_mask)) return .ocr;
+    return primaryRegionKind(route, reason_mask);
+}
+
+fn primaryRegionKind(route: complexity.RouteDecision, reason_mask: u32) ?SpecialistKind {
+    if (routeNeedsKindOrReason(route, .table, reason_mask)) return .table;
+    if (routeNeedsKindOrReason(route, .formula, reason_mask)) return .formula;
+    if (routeNeedsKindOrReason(route, .layout, reason_mask)) return .layout;
+    return null;
 }
 
 fn routeNeedsKind(route: complexity.RouteDecision, kind: SpecialistKind) bool {
@@ -835,6 +837,7 @@ fn sourceKindName(source: layout.SourceKind) []const u8 {
         .table_model => "table_model",
         .formula_model => "formula",
         .manual => "form",
+        .poppler_text => "external_text",
     };
 }
 
@@ -966,6 +969,16 @@ test "entity request writer exposes entity protocol shape" {
     }, 0);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"requested_kind\":\"entity\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"record_type\":\"specialist_request\"") != null);
+}
+
+test "region routing consolidates table formula and layout to one request" {
+    const route = complexity.RouteDecision{
+        .needs_table_model = true,
+        .needs_formula_model = true,
+        .needs_layout_model = true,
+    };
+    try std.testing.expectEqual(@as(usize, 1), requestKindCount(route, 0));
+    try std.testing.expectEqual(SpecialistKind.table, primaryRegionKind(route, 0).?);
 }
 
 test "page specialist request writer scopes requests and spans to page" {
