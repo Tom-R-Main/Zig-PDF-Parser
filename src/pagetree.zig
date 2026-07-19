@@ -14,6 +14,7 @@ const structural = @import("structural.zig");
 const Object = parser.Object;
 const ObjRef = parser.ObjRef;
 const XRefTable = xref_mod.XRefTable;
+const MAX_PAGE_TREE_DEPTH: usize = 256;
 
 pub const Page = struct {
     /// Object reference for this page
@@ -151,7 +152,10 @@ fn resolveCompressedObject(
     resolved_cache: *std.AutoHashMap(u32, Object),
     options: BuildOptions,
 ) !Object {
-    const objstm_num: u32 = @intCast(entry.offset);
+    const objstm_num = std.math.cast(u32, entry.offset) orelse {
+        emit(allocator, options, objectStreamDiagnostic(0, null, "Object stream number exceeds u32"));
+        return Object{ .null = {} };
+    };
     const index = entry.gen_or_index;
 
     // Get the object stream
@@ -230,7 +234,10 @@ fn resolveCompressedObject(
             break;
         };
         const num: u32 = switch (obj) {
-            .integer => |int| @intCast(int),
+            .integer => |int| std.math.cast(u32, int) orelse {
+                emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream header contains an invalid object number"));
+                break;
+            },
             else => break,
         };
 
@@ -239,7 +246,10 @@ fn resolveCompressedObject(
             break;
         };
         const offset: u64 = switch (offset_obj) {
-            .integer => |int| @intCast(int),
+            .integer => |int| std.math.cast(u64, int) orelse {
+                emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream header contains an invalid object offset"));
+                break;
+            },
             else => break,
         };
 
@@ -254,13 +264,17 @@ fn resolveCompressedObject(
 
     const obj_offset: usize = @intCast(first);
     const rel_offset = offsets.items[index].offset;
+    const rel_offset_usize = std.math.cast(usize, rel_offset) orelse {
+        emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream target offset exceeds addressable memory"));
+        return Object{ .null = {} };
+    };
 
-    if (obj_offset + rel_offset >= decoded.len) {
+    if (obj_offset >= decoded.len or rel_offset_usize >= decoded.len - obj_offset) {
         emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Object stream target offset is out of range"));
         return Object{ .null = {} };
     }
 
-    var obj_parser = parser.Parser.initAt(allocator, decoded, obj_offset + @as(usize, @intCast(rel_offset)));
+    var obj_parser = parser.Parser.initAt(allocator, decoded, obj_offset + rel_offset_usize);
     const result = obj_parser.parseObject() catch {
         emit(allocator, options, objectStreamDiagnostic(objstm_num, objstm_entry.offset, "Failed to parse compressed object"));
         return Object{ .null = {} };
@@ -338,6 +352,7 @@ pub fn buildPageTreeWithOptions(
         &visited,
         &pages,
         pages_ref,
+        0,
         default_mediabox,
         null, // crop_box
         0, // rotation
@@ -356,11 +371,14 @@ fn walkPageTree(
     visited: *std.AutoHashMap(u32, void),
     pages: *std.ArrayList(Page),
     node_ref: ObjRef,
+    depth: usize,
     inherited_mediabox: [4]f64,
     inherited_cropbox: ?[4]f64,
     inherited_rotation: i32,
     inherited_resources: ?Object.Dict,
 ) PageTreeError!void {
+    if (!pageTreeDepthAllowed(depth)) return PageTreeError.InvalidPageTree;
+
     // Cycle detection
     if (visited.contains(node_ref.num)) {
         emit(allocator, options, .{
@@ -413,7 +431,8 @@ fn walkPageTree(
         break :blk inherited_mediabox;
     };
     const cropbox = extractBox(dict, "CropBox") orelse inherited_cropbox;
-    const rotation = @as(i32, @intCast(dict.getInt("Rotate") orelse inherited_rotation));
+    const rotation_value = dict.getInt("Rotate") orelse inherited_rotation;
+    const rotation = std.math.cast(i32, rotation_value) orelse inherited_rotation;
 
     var resources = inherited_resources;
     if (dict.get("Resources")) |res_obj| {
@@ -488,6 +507,7 @@ fn walkPageTree(
                 visited,
                 pages,
                 kid_ref,
+                depth + 1,
                 mediabox,
                 cropbox,
                 rotation,
@@ -520,6 +540,10 @@ fn walkPageTree(
 
 fn emit(allocator: std.mem.Allocator, options: BuildOptions, diagnostic: structural.Diagnostic) void {
     structural.appendDiagnostic(options.diagnostic_allocator orelse allocator, options.diagnostics, diagnostic);
+}
+
+fn pageTreeDepthAllowed(depth: usize) bool {
+    return depth < MAX_PAGE_TREE_DEPTH;
 }
 
 fn objectStreamDiagnostic(objstm_num: u32, offset: ?u64, message: []const u8) structural.Diagnostic {
@@ -619,6 +643,11 @@ fn getStreamData(
 // ============================================================================
 // TESTS
 // ============================================================================
+
+test "page tree traversal has a fixed recursion limit" {
+    try std.testing.expect(pageTreeDepthAllowed(MAX_PAGE_TREE_DEPTH - 1));
+    try std.testing.expect(!pageTreeDepthAllowed(MAX_PAGE_TREE_DEPTH));
+}
 
 test "extractBox" {
     const allocator = std.testing.allocator;

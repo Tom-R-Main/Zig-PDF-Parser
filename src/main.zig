@@ -904,7 +904,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             i += 1;
             if (i < args.len) ocr_config.dpi = std.fmt.parseInt(u32, args[i], 10) catch {
                 std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
-                return;
+                return error.InvalidArguments;
             };
         } else if (std.mem.eql(u8, arg, "--ocr-color")) {
             ocr_config.rasterize_grayscale = false;
@@ -926,7 +926,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             if (i < args.len) {
                 adapter_format = zpdf.adapter.formatFromName(args[i]) orelse {
                     std.debug.print("Unknown extract-adaptive format: {s}. Use json, artifact-jsonl, stream-jsonl, or trace-json.\n", .{args[i]});
-                    return;
+                    return error.InvalidArguments;
                 };
             }
         } else if (std.mem.eql(u8, arg, "--trace")) {
@@ -937,13 +937,13 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             error_mode = zpdf.ErrorConfig.permissive();
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("extract-adaptive requires --input; unexpected positional argument: {s}\n", .{arg});
-            return;
+            return error.InvalidArguments;
         }
     }
 
     const path = input_file orelse {
         std.debug.print("Error: extract-adaptive requires --input <file.pdf>\n", .{});
-        return;
+        return error.InvalidArguments;
     };
 
     var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
@@ -966,13 +966,13 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
 
     const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
         std.debug.print("Error parsing page range: {}\n", .{err});
-        return;
+        return err;
     };
     defer allocator.free(pages);
 
     const window = contiguousPageWindow(pages) catch |err| {
         std.debug.print("Error: extract-adaptive currently requires a contiguous page range: {}\n", .{err});
-        return;
+        return err;
     };
 
     var fallback_document_text: ?[]u8 = null;
@@ -987,7 +987,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     const output_handle = if (output_file) |out_path|
         runtime.createFileCwd(out_path) catch |err| {
             std.debug.print("Error creating {s}: {}\n", .{ out_path, err });
-            return;
+            return err;
         }
     else
         null;
@@ -997,7 +997,6 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     if (output_handle) |h| {
         var file_writer = runtime.fileWriter(h, &write_buf);
         const writer = &file_writer.interface;
-        defer writer.flush() catch {};
         _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
@@ -1013,12 +1012,15 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             },
         }) catch |err| {
             std.debug.print("Error during extract-adaptive: {}\n", .{err});
-            return;
+            return err;
+        };
+        writer.flush() catch |err| {
+            std.debug.print("Error flushing extract-adaptive output: {}\n", .{err});
+            return err;
         };
     } else {
         var stdout_writer = runtime.stdoutWriter(&write_buf);
         const writer = &stdout_writer.interface;
-        defer writer.flush() catch {};
         _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
@@ -1034,7 +1036,11 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             },
         }) catch |err| {
             std.debug.print("Error during extract-adaptive: {}\n", .{err});
-            return;
+            return err;
+        };
+        writer.flush() catch |err| {
+            std.debug.print("Error flushing extract-adaptive output: {}\n", .{err});
+            return err;
         };
     }
 }
@@ -1549,6 +1555,45 @@ test "extract-adaptive CLI emits neutral source id artifacts" {
             try std.testing.expect(std.mem.indexOf(u8, output, needle) != null);
         }
     }
+}
+
+test "extract-adaptive CLI propagates argument and adapter failures" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    try std.testing.expectError(
+        error.InvalidArguments,
+        runExtractAdaptive(allocator, &.{ "--format", "not-a-format" }),
+    );
+
+    const pdf_data = try testpdf.generateCleanNativePdf(allocator);
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-cli-error-{x}.pdf", .{std.testing.random_seed});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var missing_buf: [128]u8 = undefined;
+    const missing_path = try std.fmt.bufPrint(&missing_buf, "pdf-parser-missing-{x}/requests.jsonl", .{std.testing.random_seed});
+    try std.testing.expectError(
+        error.FileNotFound,
+        runExtractAdaptive(allocator, &.{
+            "--input",
+            input_path,
+            "--format",
+            "artifact-jsonl",
+            "--emit-specialist-requests",
+            missing_path,
+        }),
+    );
 }
 
 test "adaptive CLI emits specialist request JSONL sidecars" {

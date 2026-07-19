@@ -373,6 +373,10 @@ fn parseXrefTable(
         const first_obj = parseUint(data, &pos) orelse break;
         while (pos < data.len and isWhitespace(data[pos])) pos += 1;
         const count = parseUint(data, &pos) orelse return XRefParseError.InvalidXrefTable;
+        const max_object_number = std.math.maxInt(u32);
+        if (first_obj > max_object_number or count > @as(u64, max_object_number) - first_obj + 1) {
+            return XRefParseError.InvalidXrefTable;
+        }
 
         // Skip to first entry
         while (pos < data.len and (data[pos] == ' ' or data[pos] == '\t')) pos += 1;
@@ -487,19 +491,12 @@ fn parseXrefStream(
     const w_array = dict.getArray("W") orelse return XRefParseError.InvalidXrefStream;
     if (w_array.len != 3) return XRefParseError.InvalidXrefStream;
 
-    const w0: usize = switch (w_array[0]) {
-        .integer => |i| if (i >= 0) @intCast(i) else return XRefParseError.InvalidXrefStream,
-        else => 1,
-    };
-    const w1: usize = switch (w_array[1]) {
-        .integer => |i| if (i >= 0) @intCast(i) else return XRefParseError.InvalidXrefStream,
-        else => 0,
-    };
-    const w2: usize = switch (w_array[2]) {
-        .integer => |i| if (i >= 0) @intCast(i) else return XRefParseError.InvalidXrefStream,
-        else => 0,
-    };
+    const w0 = try xrefFieldWidth(w_array[0], 1);
+    const w1 = try xrefFieldWidth(w_array[1], 0);
+    const w2 = try xrefFieldWidth(w_array[2], 0);
 
+    // Each field is decoded into u64, so wider fields are unsupported and
+    // must be rejected before computing offsets or slicing decoded bytes.
     const entry_size = w0 + w1 + w2;
     if (entry_size == 0) return XRefParseError.InvalidXrefStream;
 
@@ -541,6 +538,19 @@ fn parseXrefStream(
     var data_pos: usize = 0;
 
     for (ranges.items) |range| {
+        const max_object_number = std.math.maxInt(u32);
+        if (range.start > max_object_number or range.count > @as(u64, max_object_number) - range.start + 1) {
+            emit(allocator, options, .{
+                .code = .malformed_xref_stream_row,
+                .severity = .warning,
+                .stage = .xref,
+                .offset = offset,
+                .action = .skipped,
+                .message = "XRef stream /Index range exceeds supported object numbers",
+            });
+            continue;
+        }
+
         var obj_num = range.start;
         var count = range.count;
 
@@ -548,7 +558,7 @@ fn parseXrefStream(
             count -= 1;
             obj_num += 1;
         }) {
-            if (data_pos + entry_size > decoded.len) {
+            if (data_pos > decoded.len or entry_size > decoded.len - data_pos) {
                 emit(allocator, options, .{
                     .code = .malformed_xref_stream_row,
                     .severity = .warning,
@@ -579,21 +589,32 @@ fn parseXrefStream(
                 0;
 
             data_pos += entry_size;
+            const field3_u32 = std.math.cast(u32, field3) orelse {
+                emit(allocator, options, .{
+                    .code = .malformed_xref_stream_row,
+                    .severity = .warning,
+                    .stage = .xref,
+                    .offset = offset,
+                    .action = .skipped,
+                    .message = "XRef stream generation or object-stream index exceeds u32",
+                });
+                continue;
+            };
 
             const entry: XRefEntry = switch (entry_type_val) {
                 0 => .{
                     .offset = field2, // Next free object
-                    .gen_or_index = @intCast(field3), // Gen if reused
+                    .gen_or_index = field3_u32, // Gen if reused
                     .entry_type = .free,
                 },
                 1 => .{
                     .offset = field2, // Byte offset
-                    .gen_or_index = @intCast(field3), // Generation
+                    .gen_or_index = field3_u32, // Generation
                     .entry_type = .in_use,
                 },
                 2 => .{
                     .offset = field2, // Object stream number
-                    .gen_or_index = @intCast(field3), // Index within stream
+                    .gen_or_index = field3_u32, // Index within stream
                     .entry_type = .compressed,
                 },
                 else => {
@@ -679,6 +700,16 @@ fn readUintBE(data: []const u8) u64 {
     return value;
 }
 
+fn xrefFieldWidth(value: Object, default: usize) XRefParseError!usize {
+    return switch (value) {
+        .integer => |width| if (width >= 0 and width <= @sizeOf(u64))
+            @intCast(width)
+        else
+            XRefParseError.InvalidXrefStream,
+        else => default,
+    };
+}
+
 fn isWhitespace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0C or c == 0x00;
 }
@@ -686,6 +717,48 @@ fn isWhitespace(c: u8) bool {
 // ============================================================================
 // TESTS
 // ============================================================================
+
+test "xref stream field widths reject values wider than u64" {
+    try std.testing.expectEqual(@as(usize, 8), try xrefFieldWidth(.{ .integer = 8 }, 0));
+    try std.testing.expectError(XRefParseError.InvalidXrefStream, xrefFieldWidth(.{ .integer = 9 }, 0));
+    try std.testing.expectError(XRefParseError.InvalidXrefStream, xrefFieldWidth(.{ .integer = -1 }, 0));
+}
+
+test "xref stream rejects oversized W fields before slicing" {
+    const data =
+        "1 0 obj\n" ++
+        "<< /Type /XRef /Size 1 /Index [0 1] /W [9223372036854775807 9223372036854775807 12] /Length 1 >>\n" ++
+        "stream\n\x00\nendstream\nendobj\n";
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var xref = XRefTable.init(std.testing.allocator);
+    defer xref.deinit();
+    try std.testing.expectError(
+        XRefParseError.InvalidXrefStream,
+        parseXrefStream(arena.allocator(), data, 0, &xref, false, .{}),
+    );
+}
+
+test "xref stream skips field values that exceed public integer widths" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    var writer = @import("runtime.zig").arrayListWriter(&data, std.testing.allocator);
+    try writer.writeAll(
+        "1 0 obj\n" ++
+            "<< /Type /XRef /Size 1 /Index [0 1] /W [1 1 8] /Length 10 >>\n" ++
+            "stream\n",
+    );
+    try writer.writeAll(&.{ 1, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff });
+    try writer.writeAll("\nendstream\nendobj\n");
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var xref = XRefTable.init(std.testing.allocator);
+    defer xref.deinit();
+    _ = try parseXrefStream(arena.allocator(), data.items, 0, &xref, false, .{});
+    try std.testing.expectEqual(@as(usize, 0), xref.entries.count());
+}
 
 test "parse simple xref table" {
     const pdf_data =

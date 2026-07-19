@@ -1820,9 +1820,10 @@ test "eval runner adaptive mode emits OCR text metrics and counters" {
 
     const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
     defer allocator.free(pdf_data);
+    const test_nonce = runtime.nanoTimestamp();
 
     var pdf_buf: [96]u8 = undefined;
-    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-eval-ocr-{x}.pdf", .{std.testing.random_seed});
+    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-eval-ocr-{x}-{d}.pdf", .{ std.testing.random_seed, test_nonce });
     runtime.deleteFileCwd(pdf_path);
     defer runtime.deleteFileCwd(pdf_path);
     const pdf_file = try runtime.createFileCwd(pdf_path);
@@ -1830,7 +1831,7 @@ test "eval runner adaptive mode emits OCR text metrics and counters" {
     runtime.closeFile(pdf_file);
 
     var truth_buf: [96]u8 = undefined;
-    const truth_path = try std.fmt.bufPrint(&truth_buf, "pdf-parser-eval-ocr-truth-{x}.txt", .{std.testing.random_seed});
+    const truth_path = try std.fmt.bufPrint(&truth_buf, "pdf-parser-eval-ocr-truth-{x}-{d}.txt", .{ std.testing.random_seed, test_nonce });
     runtime.deleteFileCwd(truth_path);
     defer runtime.deleteFileCwd(truth_path);
     const truth_file = try runtime.createFileCwd(truth_path);
@@ -1845,7 +1846,7 @@ test "eval runner adaptive mode emits OCR text metrics and counters" {
         \\
     ;
     var raster_buf: [96]u8 = undefined;
-    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-eval-fake-raster-{x}.sh", .{std.testing.random_seed});
+    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-eval-fake-raster-{x}-{d}.sh", .{ std.testing.random_seed, test_nonce });
     runtime.deleteFileCwd(raster_path);
     defer runtime.deleteFileCwd(raster_path);
     const raster_file = try runtime.createFileCwd(raster_path);
@@ -1863,7 +1864,7 @@ test "eval runner adaptive mode emits OCR text metrics and counters" {
         "printf '%s\\n' '5\t1\t1\t1\t1\t2\t300\t200\t260\t40\t92\ttypewritten'\n" ++
         "printf '%s\\n' '5\t1\t1\t1\t1\t3\t600\t200\t120\t40\t93\ttext'\n";
     var tess_buf: [96]u8 = undefined;
-    const tess_path = try std.fmt.bufPrint(&tess_buf, "pdf-parser-eval-fake-tesseract-{x}.sh", .{std.testing.random_seed});
+    const tess_path = try std.fmt.bufPrint(&tess_buf, "pdf-parser-eval-fake-tesseract-{x}-{d}.sh", .{ std.testing.random_seed, test_nonce });
     runtime.deleteFileCwd(tess_path);
     defer runtime.deleteFileCwd(tess_path);
     const tess_file = try runtime.createFileCwd(tess_path);

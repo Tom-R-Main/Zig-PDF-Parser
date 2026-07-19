@@ -2,11 +2,39 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
+  native:
+    name: Native parser gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Check formatting
+        run: zig fmt --check $(git ls-files '*.zig')
+
+      - name: Run tests
+        run: zig build test --summary all
+
+      - name: Run tiny corpus scorecard
+        run: zig build benchmark-eval --summary all
+
+      - name: Build native artifacts
+        run: zig build --summary all
+
+      - name: Build shared library
+        run: zig build shared --summary all
+
   wasm:
     name: Build WASM
     runs-on: ubuntu-latest

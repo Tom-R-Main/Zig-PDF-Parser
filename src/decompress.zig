@@ -154,26 +154,15 @@ fn decodeFlateDecode(
     // Apply predictor if specified
     if (params) |p| {
         if (p == .dict) {
-            const predictor = if (p.dict.get("Predictor")) |pred|
-                if (pred == .integer) @as(i32, @intCast(pred.integer)) else 1
-            else
-                1;
+            const predictor_value = p.dict.getInt("Predictor") orelse 1;
+            const predictor = std.math.cast(i32, predictor_value) orelse
+                return DecompressError.InvalidFilterParams;
+            if (predictor < 1) return DecompressError.InvalidPredictor;
 
             if (predictor > 1) {
-                const columns = if (p.dict.get("Columns")) |c|
-                    if (c == .integer) @as(u32, @intCast(c.integer)) else 1
-                else
-                    1;
-
-                const colors = if (p.dict.get("Colors")) |c|
-                    if (c == .integer) @as(u32, @intCast(c.integer)) else 1
-                else
-                    1;
-
-                const bits = if (p.dict.get("BitsPerComponent")) |b|
-                    if (b == .integer) @as(u32, @intCast(b.integer)) else 8
-                else
-                    8;
+                const columns = try positivePredictorParam(p.dict, "Columns", 1);
+                const colors = try positivePredictorParam(p.dict, "Colors", 1);
+                const bits = try positivePredictorParam(p.dict, "BitsPerComponent", 8);
 
                 const unpredicted = try applyPredictor(
                     allocator,
@@ -225,9 +214,12 @@ fn applyTiffPredictor(
     colors: u32,
     bits: u32,
 ) ![]u8 {
-    _ = bits; // TODO: handle non-8-bit
+    if (columns == 0 or colors == 0 or bits != 8) return DecompressError.InvalidFilterParams;
 
-    const bytes_per_row = columns * colors;
+    const bytes_per_row_u32 = std.math.mul(u32, columns, colors) catch
+        return DecompressError.InvalidFilterParams;
+    const bytes_per_row: usize = bytes_per_row_u32;
+    if (data.len % bytes_per_row != 0) return DecompressError.InvalidPredictor;
     const num_rows = data.len / bytes_per_row;
 
     var output = try allocator.alloc(u8, data.len);
@@ -261,12 +253,31 @@ fn applyPngPredictor(
     colors: u32,
     bits: u32,
 ) ![]u8 {
-    const bytes_per_pixel = (colors * bits + 7) / 8;
-    const row_bytes = (columns * colors * bits + 7) / 8;
-    const src_row_bytes = row_bytes + 1; // +1 for filter type byte
+    if (columns == 0 or colors == 0 or !validPredictorBits(bits)) {
+        return DecompressError.InvalidFilterParams;
+    }
+
+    const colors_usize: usize = colors;
+    const bits_usize: usize = bits;
+    const columns_usize: usize = columns;
+    const color_bits = std.math.mul(usize, colors_usize, bits_usize) catch
+        return DecompressError.InvalidFilterParams;
+    const bytes_per_pixel_rounded = std.math.add(usize, color_bits, 7) catch
+        return DecompressError.InvalidFilterParams;
+    const bytes_per_pixel = bytes_per_pixel_rounded / 8;
+    const row_bits = std.math.mul(usize, columns_usize, color_bits) catch
+        return DecompressError.InvalidFilterParams;
+    const row_bytes_rounded = std.math.add(usize, row_bits, 7) catch
+        return DecompressError.InvalidFilterParams;
+    const row_bytes = row_bytes_rounded / 8;
+    const src_row_bytes = std.math.add(usize, row_bytes, 1) catch
+        return DecompressError.InvalidFilterParams;
+
+    if (data.len % src_row_bytes != 0) return DecompressError.InvalidPredictor;
 
     const num_rows = data.len / src_row_bytes;
-    const out_len = num_rows * row_bytes;
+    const out_len = std.math.mul(usize, num_rows, row_bytes) catch
+        return DecompressError.InvalidFilterParams;
 
     var output = try allocator.alloc(u8, out_len);
     errdefer allocator.free(output);
@@ -323,8 +334,7 @@ fn applyPngPredictor(
                 }
             },
             else => {
-                // Unknown filter - copy as-is
-                @memcpy(out_row, src_row);
+                return DecompressError.InvalidPredictor;
             },
         }
 
@@ -332,6 +342,17 @@ fn applyPngPredictor(
     }
 
     return output;
+}
+
+fn positivePredictorParam(dict: Object.Dict, key: []const u8, default: u32) DecompressError!u32 {
+    const value = dict.getInt(key) orelse return default;
+    const converted = std.math.cast(u32, value) orelse return DecompressError.InvalidFilterParams;
+    if (converted == 0) return DecompressError.InvalidFilterParams;
+    return converted;
+}
+
+fn validPredictorBits(bits: u32) bool {
+    return bits == 1 or bits == 2 or bits == 4 or bits == 8 or bits == 16;
 }
 
 fn paeth(a: i16, b: i16, c: i16) u8 {
@@ -654,4 +675,46 @@ test "decodeRunLength" {
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("ABCXXX", result);
+}
+
+test "TIFF predictor reconstructs a row and rejects unsafe dimensions" {
+    const allocator = std.testing.allocator;
+    const encoded = [_]u8{ 10, 1, 2 };
+    const decoded = try applyTiffPredictor(allocator, &encoded, 3, 1, 8);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualSlices(u8, &.{ 10, 11, 13 }, decoded);
+    try std.testing.expectError(
+        DecompressError.InvalidFilterParams,
+        applyTiffPredictor(allocator, &encoded, 0, 1, 8),
+    );
+    try std.testing.expectError(
+        DecompressError.InvalidFilterParams,
+        applyTiffPredictor(allocator, &encoded, std.math.maxInt(u32), 2, 8),
+    );
+    try std.testing.expectError(
+        DecompressError.InvalidFilterParams,
+        applyTiffPredictor(allocator, &encoded, 3, 1, 16),
+    );
+}
+
+test "PNG predictor reconstructs a row and rejects unsafe parameters" {
+    const allocator = std.testing.allocator;
+    const encoded = [_]u8{ 1, 10, 1, 2 };
+    const decoded = try applyPngPredictor(allocator, &encoded, 3, 1, 8);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualSlices(u8, &.{ 10, 11, 13 }, decoded);
+    try std.testing.expectError(
+        DecompressError.InvalidFilterParams,
+        applyPngPredictor(allocator, &encoded, 0, 1, 8),
+    );
+    try std.testing.expectError(
+        DecompressError.InvalidFilterParams,
+        applyPngPredictor(allocator, &encoded, 3, 1, 3),
+    );
+    try std.testing.expectError(
+        DecompressError.InvalidPredictor,
+        applyPngPredictor(allocator, encoded[0..3], 3, 1, 8),
+    );
 }
