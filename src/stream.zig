@@ -21,6 +21,7 @@ pub const StreamingEventType = enum {
     rag_chunk,
     route_trace,
     specialist_request,
+    specialist_attempt,
     specialist_response,
     specialist_result,
     page_finished,
@@ -39,6 +40,7 @@ pub const StreamingSummary = struct {
     event_count: u64 = 0,
     artifact_counts: schema.StreamCounts = .{},
     route_counts: schema.RouteTotals = .{},
+    specialist_failure_count: usize = 0,
     elapsed_ms: u64 = 0,
 };
 
@@ -80,6 +82,7 @@ pub fn extractAdaptiveStreaming(
 
         var page_result = try adaptive.extractDocument(allocator, document, page_options);
         defer page_result.deinit();
+        if (page_result.hasSpecialistFailures()) summary.specialist_failure_count += 1;
 
         const page_counts = try writePageArtifacts(
             allocator,
@@ -99,6 +102,7 @@ pub fn extractAdaptiveStreaming(
         summary.artifact_counts.tables += page_counts.tables;
         summary.artifact_counts.route_traces += page_counts.route_traces;
         summary.artifact_counts.specialist_requests += page_counts.specialist_requests;
+        summary.artifact_counts.specialist_attempts += page_counts.specialist_attempts;
         summary.artifact_counts.specialist_responses += page_counts.specialist_responses;
         summary.artifact_counts.specialist_results += page_counts.specialist_results;
         summary.artifact_counts.rag_chunks += page_counts.rag_chunks;
@@ -176,6 +180,7 @@ fn writePageArtifacts(
         .input_sha256 = input_sha256,
     };
     counts.specialist_requests = try specialist_protocol.writePageRequestsJsonl(writer, result, specialist_context, page_index, event_index);
+    counts.specialist_attempts = try specialist_protocol.writePageAttemptsJsonl(writer, result, specialist_context, page_index, event_index);
     counts.specialist_responses = try specialist_protocol.writePageResponsesJsonl(writer, result, specialist_context, page_index, event_index);
     counts.specialist_results = try specialist_protocol.writePageResultsJsonl(writer, result, specialist_context, page_index, event_index);
 

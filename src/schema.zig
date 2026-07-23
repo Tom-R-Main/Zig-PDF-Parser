@@ -65,6 +65,7 @@ pub const StreamCounts = struct {
     tables: usize = 0,
     route_traces: usize = 0,
     specialist_requests: usize = 0,
+    specialist_attempts: usize = 0,
     specialist_responses: usize = 0,
     specialist_results: usize = 0,
     rag_chunks: usize = 0,
@@ -265,6 +266,8 @@ pub fn renderArtifactJson(allocator: std.mem.Allocator, result: anytype, options
     try writeRouteTraceRecords(writer, options.document_id, options.source_id, options.input_sha256, result, false, .{}, null);
     try writer.writeAll("],\"specialist_requests\":[");
     try specialist_protocol.writeRequestsArray(writer, result, specialistContext(options));
+    try writer.writeAll("],\"specialist_attempts\":[");
+    try specialist_protocol.writeAttemptsArray(writer, result, specialistContext(options));
     try writer.writeAll("],\"specialist_responses\":[");
     try specialist_protocol.writeResponsesArray(writer, result, specialistContext(options));
     try writer.writeAll("],\"specialist_results\":[");
@@ -434,6 +437,8 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
     try writeRouteCounts(writer, result);
     try writer.writeAll(",\"artifact_counts\":");
     try writeArtifactCounts(writer, result, options);
+    try writer.writeAll(",\"has_specialist_failures\":");
+    try writer.print("{}", .{hasSpecialistFailures(result)});
     try writer.writeAll(",\"extraction_counts\":");
     try writeExtractionCounts(writer, result);
     try writer.writeAll(",\"output_artifacts\":");
@@ -453,6 +458,16 @@ fn writeDocumentManifestOpen(writer: anytype, result: anytype, options: RenderOp
         .source_kind = "lifecycle",
         .confidence = 1.0,
     });
+}
+
+fn hasSpecialistFailures(result: anytype) bool {
+    for (result.ocr_attempts) |attempt| {
+        switch (attempt.status) {
+            .unavailable, .failed, .timeout, .invalid_output => return true,
+            else => {},
+        }
+    }
+    return false;
 }
 
 fn writeRouteCounts(writer: anytype, result: anytype) !void {
@@ -529,7 +544,7 @@ fn writePermissions(writer: anytype, permissions: encryption.Permissions) !void 
 fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions) !void {
     const specialist_counts = specialist_protocol.counts(result);
     try writer.print(
-        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"form_fields\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
+        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"form_fields\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_attempts\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
         .{
             result.reconciled.spans.len,
             result.reconciled.blocks.len,
@@ -537,6 +552,7 @@ fn writeArtifactCounts(writer: anytype, result: anytype, options: RenderOptions)
             result.form_fields.len,
             routeTraceCount(result),
             specialist_counts.requests,
+            specialist_counts.attempts,
             specialist_counts.responses,
             specialist_counts.results,
             result.reconciled.chunks.len,
@@ -614,6 +630,7 @@ const ArtifactHashKind = enum {
     form_fields,
     route_traces,
     specialist_requests,
+    specialist_attempts,
     specialist_responses,
     specialist_results,
     rag_chunks,
@@ -633,6 +650,7 @@ const output_artifact_specs = [_]OutputArtifactSpec{
     .{ .name = "form_fields", .record_type = "form_field", .kind = .form_fields },
     .{ .name = "route_traces", .record_type = "route_trace", .kind = .route_traces },
     .{ .name = "specialist_requests", .record_type = "specialist_request", .kind = .specialist_requests },
+    .{ .name = "specialist_attempts", .record_type = "specialist_attempt", .kind = .specialist_attempts },
     .{ .name = "specialist_responses", .record_type = "specialist_response", .kind = .specialist_responses },
     .{ .name = "specialist_results", .record_type = "specialist_result", .kind = .specialist_results },
     .{ .name = "rag_chunks", .record_type = "rag_chunk", .kind = .rag_chunks },
@@ -685,6 +703,7 @@ fn outputArtifactCount(result: anytype, kind: ArtifactHashKind, options: RenderO
         .form_fields => result.form_fields.len,
         .route_traces => routeTraceCount(result),
         .specialist_requests => specialist_protocol.countRequests(result),
+        .specialist_attempts => specialist_protocol.countAttempts(result),
         .specialist_responses => specialist_protocol.countResponses(result),
         .specialist_results => specialist_protocol.countResults(result),
         .rag_chunks => result.reconciled.chunks.len,
@@ -700,6 +719,7 @@ fn streamOutputArtifactCount(counts: StreamCounts, kind: ArtifactHashKind) usize
         .form_fields => 0,
         .route_traces => counts.route_traces,
         .specialist_requests => counts.specialist_requests,
+        .specialist_attempts => counts.specialist_attempts,
         .specialist_responses => counts.specialist_responses,
         .specialist_results => counts.specialist_results,
         .rag_chunks => counts.rag_chunks,
@@ -718,6 +738,7 @@ fn artifactDigest(result: anytype, kind: ArtifactHashKind, options: RenderOption
         .form_fields => hashFormFields(&hasher, result),
         .route_traces => hashRouteTraces(&hasher, result),
         .specialist_requests => hashSpecialistProtocol(&hasher, result, .requests),
+        .specialist_attempts => hashOcrAttempts(&hasher, result),
         .specialist_responses => hashSpecialistProtocol(&hasher, result, .responses),
         .specialist_results => hashSpecialistProtocol(&hasher, result, .results),
         .rag_chunks => hashRagChunks(&hasher, result),
@@ -825,6 +846,25 @@ fn hashSpecialistProtocol(hasher: anytype, result: anytype, kind: SpecialistHash
                 }
             }
         },
+    }
+}
+
+fn hashOcrAttempts(hasher: anytype, result: anytype) void {
+    for (result.ocr_attempts) |attempt| {
+        hashPrint(hasher, "{d}|{d}|{s}|{s}|{d}|{d}|{d}|{d}|{d:.3}|{d:.6}|{};", .{
+            attempt.page_index,
+            attempt.attempt_index,
+            @tagName(attempt.status),
+            @tagName(attempt.backend),
+            attempt.dpi,
+            attempt.psm.tesseractNumber(),
+            attempt.span_count,
+            attempt.character_count,
+            attempt.mean_confidence,
+            attempt.text_coverage,
+            attempt.selected,
+        });
+        if (attempt.diagnostic_code) |code| hashText(hasher, @tagName(code));
     }
 }
 
@@ -2103,13 +2143,14 @@ fn nextRouteStreamMeta(stream_event_index: ?*u64, page_index: u32) ?StreamRecord
 
 fn writeStreamCounts(writer: anytype, counts: StreamCounts) !void {
     try writer.print(
-        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
+        "{{\"spans\":{},\"blocks\":{},\"tables\":{},\"route_traces\":{},\"specialist_requests\":{},\"specialist_attempts\":{},\"specialist_responses\":{},\"specialist_results\":{},\"rag_chunks\":{},\"debug_assets\":{}}}",
         .{
             counts.spans,
             counts.blocks,
             counts.tables,
             counts.route_traces,
             counts.specialist_requests,
+            counts.specialist_attempts,
             counts.specialist_responses,
             counts.specialist_results,
             counts.rag_chunks,

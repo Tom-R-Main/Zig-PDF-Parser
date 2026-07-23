@@ -270,6 +270,10 @@ test "adaptive OCR route invokes rasterizer and Tesseract adapter into fresh OCR
 
     try std.testing.expect(result.reconciled.spans.len >= 3);
     try std.testing.expect(result.reconciled.spans[0].chosen_source == .fresh_ocr);
+    try std.testing.expectEqual(@as(usize, 1), result.ocr_attempts.len);
+    try std.testing.expectEqual(zpdf.ocr.AttemptStatus.completed, result.ocr_attempts[0].status);
+    try std.testing.expect(result.ocr_attempts[0].selected);
+    try std.testing.expectEqual(@as(u32, 300), result.ocr_attempts[0].dpi);
 
     const text = try result.render(allocator, .text);
     defer allocator.free(text);
@@ -282,6 +286,182 @@ test "adaptive OCR route invokes rasterizer and Tesseract adapter into fresh OCR
         }
     }
     try std.testing.expect(saw_ocr_recognize);
+
+    const artifact_json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "observable-ocr" });
+    defer allocator.free(artifact_json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, artifact_json, .{});
+    defer parsed.deinit();
+    const attempts = parsed.value.object.get("specialist_attempts").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), attempts.len);
+    try std.testing.expectEqualStrings("completed", attempts[0].object.get("attempt_status").?.string);
+    try std.testing.expectEqual(@as(i64, 300), attempts[0].object.get("config").?.object.get("dpi").?.integer);
+    try std.testing.expectEqualStrings("completed", parsed.value.object.get("specialist_responses").?.array.items[0].object.get("status").?.string);
+}
+
+test "adaptive OCR records explicit not invoked outcome when disabled" {
+    const allocator = std.testing.allocator;
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{ .enable_ocr = false });
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.ocr_attempts.len);
+    try std.testing.expectEqual(zpdf.ocr.AttemptStatus.not_invoked, result.ocr_attempts[0].status);
+    try std.testing.expectEqual(zpdf.ocr.DiagnosticCode.ocr_disabled, result.ocr_attempts[0].diagnostic_code.?);
+    try std.testing.expect(!result.hasSpecialistFailures());
+
+    const artifact_json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "ocr-disabled" });
+    defer allocator.free(artifact_json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, artifact_json, .{});
+    defer parsed.deinit();
+    const response = parsed.value.object.get("specialist_responses").?.array.items[0];
+    try std.testing.expectEqualStrings("not_invoked", response.object.get("status").?.string);
+    try std.testing.expectEqual(@as(usize, 1), response.object.get("warnings").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 0), response.object.get("errors").?.array.items.len);
+}
+
+test "adaptive OCR records unavailable rasterizer instead of empty" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+    var pdf_buf: [112]u8 = undefined;
+    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-ocr-unavailable-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(pdf_path);
+    defer runtime.deleteFileCwd(pdf_path);
+    const pdf_file = try runtime.createFileCwd(pdf_path);
+    try runtime.writeAllFile(pdf_file, pdf_data);
+    runtime.closeFile(pdf_file);
+
+    const doc = try zpdf.Document.openWithConfig(allocator, pdf_path, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var result = try doc.extractAdaptive(allocator, .{
+        .ocr_config = .{ .rasterizer_executable = "./pdf-parser-rasterizer-does-not-exist" },
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.ocr_attempts.len);
+    try std.testing.expectEqual(zpdf.ocr.AttemptStatus.unavailable, result.ocr_attempts[0].status);
+    try std.testing.expectEqual(zpdf.ocr.AttemptStage.rasterize, result.ocr_attempts[0].failure_stage.?);
+    try std.testing.expectEqual(zpdf.ocr.DiagnosticCode.rasterizer_unavailable, result.ocr_attempts[0].diagnostic_code.?);
+    try std.testing.expect(result.hasSpecialistFailures());
+
+    const artifact_json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "ocr-unavailable" });
+    defer allocator.free(artifact_json);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, artifact_json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(true, parsed.value.object.get("has_specialist_failures").?.bool);
+    const response = parsed.value.object.get("specialist_responses").?.array.items[0];
+    try std.testing.expectEqualStrings("unavailable", response.object.get("status").?.string);
+    try std.testing.expect(response.object.get("selected_attempt_id").? == .null);
+    try std.testing.expectEqual(@as(usize, 1), response.object.get("errors").?.array.items.len);
+    try std.testing.expectEqualStrings("rasterizer_unavailable", response.object.get("errors").?.array.items[0].object.get("code").?.string);
+}
+
+test "bounded OCR fallback records both attempts and selects higher quality result" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+    var pdf_buf: [112]u8 = undefined;
+    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-ocr-fallback-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(pdf_path);
+    defer runtime.deleteFileCwd(pdf_path);
+    const pdf_file = try runtime.createFileCwd(pdf_path);
+    try runtime.writeAllFile(pdf_file, pdf_data);
+    runtime.closeFile(pdf_file);
+
+    const fake_rasterizer =
+        \\#!/bin/sh
+        \\last=""
+        \\for arg do last="$arg"; done
+        \\printf '\211PNG\r\n\032\n\000\000\000\rIHDR\000\000\003\350\000\000\007\320' > "$last.png"
+        \\
+    ;
+    var raster_buf: [112]u8 = undefined;
+    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-raster-fallback-{x}.sh", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(raster_path);
+    defer runtime.deleteFileCwd(raster_path);
+    const raster_file = try runtime.createFileCwd(raster_path);
+    try runtime.writeAllFile(raster_file, fake_rasterizer);
+    runtime.closeFile(raster_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", raster_path }));
+    var raster_exec_buf: [128]u8 = undefined;
+    const raster_exec = try std.fmt.bufPrint(&raster_exec_buf, "./{s}", .{raster_path});
+
+    const fake_tesseract =
+        \\#!/bin/sh
+        \\dpi=""
+        \\while [ "$#" -gt 0 ]; do
+        \\  if [ "$1" = "--dpi" ]; then shift; dpi="$1"; fi
+        \\  shift
+        \\done
+        \\printf 'level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n'
+        \\printf '1\t1\t0\t0\t0\t0\t0\t0\t1000\t2000\t-1\t\n'
+        \\if [ "$dpi" = "200" ]; then
+        \\  printf '5\t1\t1\t1\t1\t1\t100\t200\t80\t40\t20\tbad\n'
+        \\else
+        \\  printf '5\t1\t1\t1\t1\t1\t100\t200\t180\t40\t96\tSelected\n'
+        \\  printf '5\t1\t1\t1\t1\t2\t400\t200\t180\t40\t95\tfallback\n'
+        \\  printf '5\t1\t1\t1\t1\t3\t700\t200\t120\t40\t96\tTotal\n'
+        \\  printf '5\t1\t1\t1\t2\t1\t100\t400\t180\t40\t96\tVendorA\n'
+        \\  printf '5\t1\t1\t1\t2\t2\t400\t400\t180\t40\t95\tInvoice1\n'
+        \\  printf '5\t1\t1\t1\t2\t3\t700\t400\t120\t40\t96\t100.00\n'
+        \\  printf '5\t1\t1\t1\t3\t1\t100\t600\t180\t40\t96\tVendorB\n'
+        \\  printf '5\t1\t1\t1\t3\t2\t400\t600\t180\t40\t95\tInvoice2\n'
+        \\  printf '5\t1\t1\t1\t3\t3\t700\t600\t120\t40\t96\t200.00\n'
+        \\fi
+        \\
+    ;
+    var tess_buf: [112]u8 = undefined;
+    const tess_path = try std.fmt.bufPrint(&tess_buf, "pdf-parser-tesseract-fallback-{x}.sh", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(tess_path);
+    defer runtime.deleteFileCwd(tess_path);
+    const tess_file = try runtime.createFileCwd(tess_path);
+    try runtime.writeAllFile(tess_file, fake_tesseract);
+    runtime.closeFile(tess_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", tess_path }));
+    var tess_exec_buf: [128]u8 = undefined;
+    const tess_exec = try std.fmt.bufPrint(&tess_exec_buf, "./{s}", .{tess_path});
+
+    const doc = try zpdf.Document.openWithConfig(allocator, pdf_path, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+    var result = try doc.extractAdaptive(allocator, .{
+        .ocr_config = .{
+            .executable = tess_exec,
+            .rasterizer_executable = raster_exec,
+        },
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.ocr_attempts.len);
+    try std.testing.expectEqual(@as(u32, 200), result.ocr_attempts[0].dpi);
+    try std.testing.expect(!result.ocr_attempts[0].selected);
+    try std.testing.expectEqual(@as(u32, 300), result.ocr_attempts[1].dpi);
+    try std.testing.expectEqual(zpdf.OcrPageSegMode.sparse_text, result.ocr_attempts[1].psm);
+    try std.testing.expect(result.ocr_attempts[1].selected);
+    try std.testing.expect(result.ocr_attempts[1].mean_confidence > result.ocr_attempts[0].mean_confidence);
+
+    const text = try result.render(allocator, .text);
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Selected fallback") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "bad") == null);
+    try std.testing.expect(result.tables.len > 0);
 }
 
 test "adaptive extraction preserves layout reading order for two columns" {
@@ -388,7 +568,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.10.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.11.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);
@@ -433,7 +613,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
-    try std.testing.expectEqualStrings("0.10.0", debug_assets[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.11.0", debug_assets[0].object.get("schema_version").?.string);
     try std.testing.expect(debug_assets[0].object.get("asset_kind") != null);
     try std.testing.expect(debug_assets[0].object.get("path") != null);
     try std.testing.expectEqual(.null, debug_assets[0].object.get("path").?);
@@ -444,7 +624,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.10.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.11.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -568,7 +748,7 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.10.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.11.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
@@ -598,7 +778,7 @@ test "specialist protocol emits batch request records for routed table formula r
     const requests = parsed.value.object.get("specialist_requests").?.array.items;
     try std.testing.expect(requests.len > 0);
     try expectProvenanceObject(requests[0]);
-    try std.testing.expectEqualStrings("0.10.0", requests[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.11.0", requests[0].object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("specialist_request", requests[0].object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-specialist", requests[0].object.get("source_id").?.string);
     try std.testing.expect(requests[0].object.get("requested_kind") != null);
@@ -651,9 +831,13 @@ test "artifact jsonl and streaming jsonl expose specialist request ordering" {
     });
 
     try std.testing.expect(summary.artifact_counts.specialist_requests > 0);
+    try std.testing.expect(summary.artifact_counts.specialist_attempts > 0);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event_type\":\"specialist_request\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"event_type\":\"specialist_attempt\"") != null);
     try expectIndexBefore(output.items, "\"event_type\":\"route_trace\"", "\"event_type\":\"specialist_request\"");
-    try expectIndexBefore(output.items, "\"event_type\":\"specialist_request\"", "\"event_type\":\"span\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"specialist_request\"", "\"event_type\":\"specialist_attempt\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"specialist_attempt\"", "\"event_type\":\"specialist_response\"");
+    try expectIndexBefore(output.items, "\"event_type\":\"specialist_response\"", "\"event_type\":\"span\"");
     try expectJsonlLinesParse(allocator, output.items);
 }
 
@@ -848,7 +1032,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
-    try std.testing.expectEqualStrings("0.10.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.11.0", tables[0].object.get("schema_version").?.string);
     try std.testing.expect(tables[0].object.get("logical_table_id") != null);
     try std.testing.expect(tables[0].object.get("table_part_index") != null);
     try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
@@ -858,7 +1042,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
     try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.10.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.11.0", cells[0].object.get("schema_version").?.string);
     try std.testing.expect(cells[0].object.get("cell_id") != null);
     try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
     try std.testing.expect(cells[0].object.get("raw_text") != null);

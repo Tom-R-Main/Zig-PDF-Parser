@@ -100,6 +100,7 @@ pub const DocumentResult = eval.DocumentResult;
 pub const OcrConfig = ocr.OcrConfig;
 pub const OcrInput = ocr.OcrInput;
 pub const OcrBackend = ocr.Backend;
+pub const OcrPolicy = ocr.Policy;
 pub const OcrPageSegMode = ocr.PageSegMode;
 pub const StructTree = structtree.StructTree;
 pub const StructElement = structtree.StructElement;
@@ -2274,8 +2275,29 @@ pub const Document = struct {
     /// Returns null for memory-opened documents because subprocess rasterizers
     /// need a filesystem PDF path. Caller owns `image_path` and should delete it.
     pub fn rasterizePageForOcr(self: *Document, allocator: std.mem.Allocator, page_idx: usize, config: ocr.OcrConfig) !?ocr.OcrInput {
+        var outcome = try self.rasterizePageForOcrDetailed(allocator, page_idx, config);
+        defer outcome.deinit(allocator);
+        return switch (outcome.status) {
+            .completed => {
+                const input = outcome.input;
+                outcome.input = null;
+                return input;
+            },
+            .not_invoked => null,
+            .unavailable => error.OcrRasterizerUnavailable,
+            .timeout => error.OcrRasterizerTimeout,
+            .invalid_output => error.InvalidRasterImage,
+            .failed => error.OcrRasterizerFailed,
+            .empty => error.InvalidRasterImage,
+        };
+    }
+
+    pub fn rasterizePageForOcrDetailed(self: *Document, allocator: std.mem.Allocator, page_idx: usize, config: ocr.OcrConfig) !ocr.RasterizeOutcome {
         if (page_idx >= self.pages.items.len) return error.PageNotFound;
-        const source_path = self.source_path orelse return null;
+        const source_path = self.source_path orelse return .{
+            .status = .unavailable,
+            .diagnostic_code = .rasterizer_requires_file,
+        };
 
         const page_number = try std.fmt.allocPrint(allocator, "{}", .{page_idx + 1});
         defer allocator.free(page_number);
@@ -2290,8 +2312,11 @@ pub const Document = struct {
         defer allocator.free(prefix);
 
         const image_path = try std.fmt.allocPrint(allocator, "{s}.png", .{prefix});
-        errdefer allocator.free(image_path);
-        errdefer runtime.deleteFileCwd(image_path);
+        var keep_image_path = false;
+        defer if (!keep_image_path) {
+            runtime.deleteFileCwd(image_path);
+            allocator.free(image_path);
+        };
 
         const grayscale_argv = [_][]const u8{
             config.rasterizer_executable,
@@ -2324,36 +2349,83 @@ pub const Document = struct {
         };
         const argv = if (config.rasterize_grayscale) &grayscale_argv else &color_argv;
 
+        const started_ns = runtime.nanoTimestamp();
         const result = runtime.runCapture(allocator, argv, .{
             .stdout_limit = 64 * 1024,
-            .stderr_limit = 1024 * 1024,
+            .stderr_limit = config.stderr_limit,
             .timeout_ms = config.timeout_ms,
         }) catch |err| switch (err) {
-            error.FileNotFound => return error.OcrRasterizerUnavailable,
+            error.FileNotFound => return .{
+                .status = .unavailable,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = .rasterizer_unavailable,
+            },
+            error.Timeout => return .{
+                .status = .timeout,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = .rasterizer_timeout,
+            },
+            error.StreamTooLong => return .{
+                .status = .invalid_output,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = .rasterizer_output_limit,
+            },
             else => return err,
         };
         defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
+        errdefer allocator.free(result.stderr);
 
         switch (result.term) {
-            .exited => |code| if (code != 0) return error.OcrRasterizerFailed,
-            else => return error.OcrRasterizerFailed,
+            .exited => |code| if (code != 0) {
+                return .{
+                    .status = .failed,
+                    .exit_code = code,
+                    .stderr = result.stderr,
+                    .duration_ms = elapsedMilliseconds(started_ns),
+                    .diagnostic_code = .rasterizer_failed,
+                };
+            },
+            else => return .{
+                .status = .failed,
+                .stderr = result.stderr,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = .rasterizer_failed,
+            },
         }
 
-        const dimensions = try readPngDimensions(allocator, image_path);
-        const page = self.pages.items[page_idx];
-        return .{
-            .page_index = @intCast(page_idx),
-            .pdf_bbox = .{
-                .x0 = page.media_box[0],
-                .y0 = page.media_box[1],
-                .x1 = page.media_box[2],
-                .y1 = page.media_box[3],
+        const dimensions = readPngDimensions(allocator, image_path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return .{
+                .status = .invalid_output,
+                .stderr = result.stderr,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = .invalid_raster_image,
             },
-            .image_path = image_path,
-            .pixel_width = dimensions.width,
-            .pixel_height = dimensions.height,
         };
+        const page = self.pages.items[page_idx];
+        keep_image_path = true;
+        return .{
+            .status = .completed,
+            .input = .{
+                .page_index = @intCast(page_idx),
+                .pdf_bbox = .{
+                    .x0 = page.media_box[0],
+                    .y0 = page.media_box[1],
+                    .x1 = page.media_box[2],
+                    .y1 = page.media_box[3],
+                },
+                .image_path = image_path,
+                .pixel_width = dimensions.width,
+                .pixel_height = dimensions.height,
+            },
+            .stderr = result.stderr,
+            .duration_ms = elapsedMilliseconds(started_ns),
+        };
+    }
+
+    fn elapsedMilliseconds(started_ns: i128) u64 {
+        const elapsed_ns = runtime.nanoTimestamp() - started_ns;
+        return if (elapsed_ns > 0) @intCast(@divTrunc(elapsed_ns, 1_000_000)) else 0;
     }
 
     fn readPngDimensions(allocator: std.mem.Allocator, image_path: []const u8) !struct { width: u32, height: u32 } {

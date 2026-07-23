@@ -32,6 +32,7 @@ pub const AdaptiveAdapterSummary = struct {
     format: AdaptiveAdapterFormat,
     streamed: bool = false,
     stream_summary: ?stream.StreamingSummary = null,
+    has_specialist_failures: bool = false,
 };
 
 pub fn extractAdaptive(
@@ -87,7 +88,12 @@ pub fn extractAdaptive(
             .schema_options = render_options,
             .include_debug_asset_refs = options.include_debug_asset_refs,
         });
-        return .{ .format = options.format, .streamed = true, .stream_summary = summary };
+        return .{
+            .format = options.format,
+            .streamed = true,
+            .stream_summary = summary,
+            .has_specialist_failures = summary.specialist_failure_count > 0,
+        };
     }
 
     var result = try adaptive.extractDocument(allocator, document, options.adaptive_options);
@@ -99,7 +105,7 @@ pub fn extractAdaptive(
 
     if (options.format == .artifact_jsonl) {
         try schema.writeArtifactJsonl(allocator, writer, &result, render_options);
-        return .{ .format = options.format };
+        return .{ .format = options.format, .has_specialist_failures = result.hasSpecialistFailures() };
     }
 
     const rendered = switch (options.format) {
@@ -111,7 +117,7 @@ pub fn extractAdaptive(
     defer allocator.free(rendered);
 
     try writer.writeAll(rendered);
-    return .{ .format = options.format };
+    return .{ .format = options.format, .has_specialist_failures = result.hasSpecialistFailures() };
 }
 
 fn writeSpecialistRequestsFile(allocator: std.mem.Allocator, path: []const u8, result: anytype, options: schema.RenderOptions) !void {

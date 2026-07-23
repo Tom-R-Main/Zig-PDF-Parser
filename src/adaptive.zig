@@ -86,6 +86,31 @@ pub const TraceRecord = struct {
     block_count: usize = 0,
 };
 
+pub const OcrAttempt = struct {
+    attempt_index: u16,
+    page_index: u32,
+    status: ocr.AttemptStatus,
+    page_bbox: BBox = .{},
+    failure_stage: ?ocr.AttemptStage = null,
+    backend: ocr.Backend,
+    dpi: u32,
+    psm: ocr.PageSegMode,
+    lang: []u8,
+    grayscale: bool,
+    timeout_ms: u32,
+    duration_ms: u64 = 0,
+    pixel_width: u32 = 0,
+    pixel_height: u32 = 0,
+    span_count: usize = 0,
+    character_count: usize = 0,
+    mean_confidence: f32 = 0,
+    text_coverage: f32 = 0,
+    exit_code: ?u8 = null,
+    diagnostic_code: ?ocr.DiagnosticCode = null,
+    stderr_excerpt: []u8,
+    selected: bool = false,
+};
+
 pub const PageRoute = struct {
     page_index: u32,
     bbox: BBox,
@@ -208,6 +233,7 @@ pub const Result = struct {
     page_routes: []PageRoute,
     region_routes: []RegionRoute,
     trace_records: []TraceRecord,
+    ocr_attempts: []OcrAttempt,
     form_fields: []FormField,
     tables: []layout.TableGrid,
 
@@ -217,6 +243,7 @@ pub const Result = struct {
         self.allocator.free(self.page_routes);
         self.allocator.free(self.region_routes);
         self.allocator.free(self.trace_records);
+        freeOcrAttempts(self.allocator, self.ocr_attempts);
         freeFormFields(self.allocator, self.form_fields);
         freeOwnedTables(self.allocator, self.tables);
     }
@@ -228,6 +255,16 @@ pub const Result = struct {
             .artifact_jsonl => schema.renderArtifactJsonl(allocator, self, .{}),
             else => renderOutput(allocator, &self.reconciled, format),
         };
+    }
+
+    pub fn hasSpecialistFailures(self: *const Result) bool {
+        for (self.ocr_attempts) |attempt| {
+            switch (attempt.status) {
+                .unavailable, .failed, .timeout, .invalid_output => return true,
+                else => {},
+            }
+        }
+        return false;
     }
 };
 
@@ -272,6 +309,10 @@ pub fn extractDocument(
 
     var trace_records: std.ArrayList(TraceRecord) = .empty;
     defer trace_records.deinit(allocator);
+
+    var ocr_attempts: std.ArrayList(OcrAttempt) = .empty;
+    defer ocr_attempts.deinit(allocator);
+    errdefer freeOcrAttempts(allocator, ocr_attempts.items);
 
     var tables: std.ArrayList(layout.TableGrid) = .empty;
     defer tables.deinit(allocator);
@@ -385,61 +426,141 @@ pub fn extractDocument(
         );
 
         var page_ocr_spans: ?[]layout.TextSpan = null;
-        if (options.enable_ocr and page_route.route.needs_ocr) {
-            const maybe_ocr_input = document.rasterizePageForOcr(allocator, page_idx, options.ocr_config) catch |err| switch (err) {
-                error.OcrRasterizerUnavailable,
-                error.OcrRasterizerFailed,
-                error.InvalidRasterImage,
-                => null,
-                else => return err,
-            };
-            if (maybe_ocr_input) |ocr_input| {
-                defer {
-                    runtime.deleteFileCwd(ocr_input.image_path);
-                    allocator.free(@constCast(ocr_input.image_path));
-                }
-
-                const raw_ocr_spans = ocr.recognizeRegion(allocator, ocr_input, options.ocr_config) catch |err| switch (err) {
-                    error.TesseractUnavailable,
-                    error.TesseractFailed,
-                    error.TesseractCBackendDisabled,
-                    => try allocator.alloc(layout.TextSpan, 0),
-                    else => return err,
-                };
-                const ocr_spans = try filterOcrSpansForPage(allocator, raw_ocr_spans, spans, image_boxes);
-                try ocr_pages.append(allocator, ocr_spans);
-                page_ocr_spans = ocr_spans;
-                try trace_records.append(allocator, .{
+        if (page_route.route.needs_ocr) {
+            if (!options.enable_ocr) {
+                _ = try appendOcrAttempt(allocator, &ocr_attempts, options.ocr_config, .{
+                    .attempt_index = 0,
                     .page_index = page_index,
-                    .stage = .ocr_recognize,
-                    .route = page_route.route,
-                    .reason_mask = page_route.reason_mask,
-                    .span_count = ocr_spans.len,
+                    .status = .not_invoked,
+                    .page_bbox = page_bbox,
+                    .diagnostic_code = .ocr_disabled,
                 });
             } else {
-                try trace_records.append(allocator, .{
-                    .page_index = page_index,
-                    .stage = .ocr_recognize,
-                    .route = page_route.route,
-                    .reason_mask = page_route.reason_mask,
-                    .span_count = 0,
-                });
+                var best_spans: ?[]layout.TextSpan = null;
+                errdefer if (best_spans) |owned| ocr.freeSpans(allocator, owned);
+                var best_attempt_index: ?usize = null;
+                const configured_attempts: usize = if (options.ocr_config.policy == .bounded)
+                    @max(1, @min(@as(usize, options.ocr_config.max_attempts), 2))
+                else
+                    1;
+
+                for (0..configured_attempts) |attempt_index| {
+                    var attempt_config = options.ocr_config;
+                    if (attempt_index > 0) {
+                        attempt_config.dpi = options.ocr_config.fallback_dpi;
+                        attempt_config.psm = options.ocr_config.fallback_psm;
+                    }
+
+                    var raster_outcome = try document.rasterizePageForOcrDetailed(allocator, page_idx, attempt_config);
+                    defer raster_outcome.deinit(allocator);
+                    if (raster_outcome.status != .completed or raster_outcome.input == null) {
+                        _ = try appendOcrAttempt(allocator, &ocr_attempts, attempt_config, .{
+                            .attempt_index = @intCast(attempt_index),
+                            .page_index = page_index,
+                            .status = raster_outcome.status,
+                            .page_bbox = page_bbox,
+                            .failure_stage = .rasterize,
+                            .duration_ms = raster_outcome.duration_ms,
+                            .exit_code = raster_outcome.exit_code,
+                            .diagnostic_code = raster_outcome.diagnostic_code,
+                            .stderr = raster_outcome.stderr,
+                        });
+                        break;
+                    }
+
+                    const ocr_input = raster_outcome.input.?;
+                    defer {
+                        runtime.deleteFileCwd(ocr_input.image_path);
+                        allocator.free(@constCast(ocr_input.image_path));
+                    }
+
+                    var recognition = try ocr.recognizeRegionDetailed(allocator, ocr_input, attempt_config);
+                    defer recognition.deinit(allocator);
+                    if (recognition.status != .completed and recognition.status != .empty) {
+                        _ = try appendOcrAttempt(allocator, &ocr_attempts, attempt_config, .{
+                            .attempt_index = @intCast(attempt_index),
+                            .page_index = page_index,
+                            .status = recognition.status,
+                            .page_bbox = page_bbox,
+                            .failure_stage = .recognize,
+                            .duration_ms = raster_outcome.duration_ms + recognition.duration_ms,
+                            .pixel_width = ocr_input.pixel_width,
+                            .pixel_height = ocr_input.pixel_height,
+                            .exit_code = recognition.exit_code,
+                            .diagnostic_code = recognition.diagnostic_code,
+                            .stderr = recognition.stderr,
+                        });
+                        break;
+                    }
+
+                    const raw_ocr_spans = recognition.spans;
+                    recognition.spans = &.{};
+                    const candidate_spans = try filterOcrSpansForPage(allocator, raw_ocr_spans, spans, image_boxes);
+                    const recorded_index = try appendOcrAttempt(allocator, &ocr_attempts, attempt_config, .{
+                        .attempt_index = @intCast(attempt_index),
+                        .page_index = page_index,
+                        .status = if (candidate_spans.len > 0) .completed else .empty,
+                        .page_bbox = page_bbox,
+                        .duration_ms = raster_outcome.duration_ms + recognition.duration_ms,
+                        .pixel_width = ocr_input.pixel_width,
+                        .pixel_height = ocr_input.pixel_height,
+                        .spans = candidate_spans,
+                        .exit_code = recognition.exit_code,
+                        .stderr = if (recognition.stderr.len > 0) recognition.stderr else raster_outcome.stderr,
+                    });
+
+                    if (best_attempt_index == null or betterOcrAttempt(ocr_attempts.items[recorded_index], ocr_attempts.items[best_attempt_index.?])) {
+                        if (best_spans) |owned| ocr.freeSpans(allocator, owned);
+                        best_spans = candidate_spans;
+                        best_attempt_index = recorded_index;
+                    } else {
+                        ocr.freeSpans(allocator, candidate_spans);
+                    }
+
+                    if (attempt_index + 1 >= configured_attempts or !shouldRetryOcrAttempt(ocr_attempts.items[recorded_index], options.ocr_config)) break;
+                }
+
+                if (best_attempt_index) |selected_index| {
+                    ocr_attempts.items[selected_index].selected = true;
+                    const selected_spans = best_spans.?;
+                    try ocr_pages.append(allocator, selected_spans);
+                    best_spans = null;
+                    page_ocr_spans = selected_spans;
+                }
             }
+            try trace_records.append(allocator, .{
+                .page_index = page_index,
+                .stage = .ocr_recognize,
+                .route = page_route.route,
+                .reason_mask = page_route.reason_mask,
+                .span_count = if (page_ocr_spans) |ocr_spans| ocr_spans.len else 0,
+            });
         }
 
         const ruling_lines = try document.getPageRulingLinesFromContent(page_idx, allocator, content_scratch_allocator, page_content);
         defer allocator.free(ruling_lines);
 
+        const layout_input_spans = try buildPageSpanView(allocator, spans, page_ocr_spans);
+        defer allocator.free(layout_input_spans);
+        const page_view_quality_pass = native_result.quality.quality_pass or selectedOcrPageQualityPass(ocr_attempts.items, page_index);
+        const structure_input = complexity.PageInput{
+            .page_index = page_index,
+            .bbox = page_bbox,
+            .spans = layout_input_spans,
+            .images = image_boxes,
+            .has_structure_tree = has_structure_tree,
+        };
+
         const page_width = page.media_box[2] - page.media_box[0];
-        var page_layout = try layout.analyzeLayoutWithRulings(allocator, spans, page_width, ruling_lines);
+        var page_layout = try layout.analyzeLayoutWithRulings(allocator, layout_input_spans, page_width, ruling_lines);
         defer page_layout.deinit();
-        reorderSpansToLayoutOrder(spans, page_layout.spans);
+        if (page_ocr_spans == null) reorderSpansToLayoutOrder(spans, page_layout.spans);
 
         for (page_layout.tables) |table| {
             try tables.append(allocator, try copyTableGrid(allocator, table));
         }
 
-        if (page_layout.tables.len > 0 and native_result.quality.quality_pass) {
+        if (page_layout.tables.len > 0 and page_view_quality_pass) {
             const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
             if (layout_spans.len > 0) {
                 try layout_pages.append(allocator, layout_spans);
@@ -475,16 +596,16 @@ pub fn extractDocument(
         try trace_records.append(allocator, .{
             .page_index = page_index,
             .stage = .layout_blocks,
-            .span_count = spans.len,
+            .span_count = layout_input_spans.len,
             .block_count = page_layout.blocks.len,
         });
 
         if (page_layout.blocks.len == 0) {
-            const score = complexity.scoreRegion(page_input, page_bbox);
+            const score = complexity.scoreRegion(structure_input, page_bbox);
             const specialist = specialists.analyzeRegion(.{
                 .page_index = page_index,
                 .bbox = page_bbox,
-                .spans = spans,
+                .spans = layout_input_spans,
                 .ruling_lines = ruling_lines,
             });
             var route = RegionRoute.fromScore(.{
@@ -492,7 +613,7 @@ pub fn extractDocument(
                 .score = score,
                 .specialist = specialist,
             });
-            if (!native_result.quality.quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
+            if (!page_view_quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
             try region_routes.append(allocator, route);
             try appendRouteTraces(
                 allocator,
@@ -512,11 +633,11 @@ pub fn extractDocument(
             const block_index_u32: u32 = @intCast(block_index);
             try layout_blocks.append(allocator, layoutBlockSummary(page_index, block_index_u32, block));
 
-            const score = complexity.scoreRegion(page_input, block.bounds.bbox);
+            const score = complexity.scoreRegion(structure_input, block.bounds.bbox);
             const specialist = specialists.analyzeRegion(.{
                 .page_index = page_index,
                 .bbox = block.bounds.bbox,
-                .spans = spans,
+                .spans = layout_input_spans,
                 .ruling_lines = ruling_lines,
             });
             var route = RegionRoute.fromScore(.{
@@ -526,7 +647,7 @@ pub fn extractDocument(
                 .score = score,
                 .specialist = specialist,
             });
-            if (!native_result.quality.quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
+            if (!page_view_quality_pass) suppressLayoutSpecialists(&route.route, &route.reason_mask);
             try region_routes.append(allocator, route);
             try appendRouteTraces(
                 allocator,
@@ -577,6 +698,8 @@ pub fn extractDocument(
     errdefer allocator.free(owned_region_routes);
     const owned_trace_records = try trace_records.toOwnedSlice(allocator);
     errdefer allocator.free(owned_trace_records);
+    const owned_ocr_attempts = try ocr_attempts.toOwnedSlice(allocator);
+    errdefer freeOcrAttempts(allocator, owned_ocr_attempts);
     linkLogicalTables(tables.items);
     const owned_tables = try tables.toOwnedSlice(allocator);
     errdefer freeOwnedTables(allocator, owned_tables);
@@ -588,6 +711,7 @@ pub fn extractDocument(
         .page_routes = owned_page_routes,
         .region_routes = owned_region_routes,
         .trace_records = owned_trace_records,
+        .ocr_attempts = owned_ocr_attempts,
         .form_fields = form_fields,
         .tables = owned_tables,
     };
@@ -835,6 +959,27 @@ fn filterOcrSpansForPage(
     }
     allocator.free(ocr_spans);
     return kept.toOwnedSlice(allocator);
+}
+
+fn buildPageSpanView(
+    allocator: std.mem.Allocator,
+    native_spans: []const layout.TextSpan,
+    maybe_ocr_spans: ?[]layout.TextSpan,
+) ![]layout.TextSpan {
+    const ocr_spans: []const layout.TextSpan = if (maybe_ocr_spans) |spans| spans else &.{};
+    const merged = try allocator.alloc(layout.TextSpan, native_spans.len + ocr_spans.len);
+    @memcpy(merged[0..native_spans.len], native_spans);
+    @memcpy(merged[native_spans.len..], ocr_spans);
+    return merged;
+}
+
+fn selectedOcrPageQualityPass(attempts: []const OcrAttempt, page_index: u32) bool {
+    for (attempts) |attempt| {
+        if (attempt.page_index == page_index and attempt.selected) {
+            return attempt.status == .completed and attempt.span_count > 0 and attempt.character_count > 0;
+        }
+    }
+    return false;
 }
 
 fn spanOverlapsAnyImage(span: layout.TextSpan, images: []const complexity.ImageBox) bool {
@@ -1454,6 +1599,115 @@ fn freeTextSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
     allocator.free(spans);
 }
 
+const AppendOcrAttemptOptions = struct {
+    attempt_index: u16,
+    page_index: u32,
+    status: ocr.AttemptStatus,
+    page_bbox: BBox = .{},
+    failure_stage: ?ocr.AttemptStage = null,
+    duration_ms: u64 = 0,
+    pixel_width: u32 = 0,
+    pixel_height: u32 = 0,
+    spans: []const layout.TextSpan = &.{},
+    exit_code: ?u8 = null,
+    diagnostic_code: ?ocr.DiagnosticCode = null,
+    stderr: []const u8 = "",
+    selected: bool = false,
+};
+
+fn appendOcrAttempt(
+    allocator: std.mem.Allocator,
+    attempts: *std.ArrayList(OcrAttempt),
+    config: ocr.OcrConfig,
+    options: AppendOcrAttemptOptions,
+) !usize {
+    const lang = try allocator.dupe(u8, config.lang);
+    errdefer allocator.free(lang);
+    const stderr_excerpt = try sanitizeDiagnosticExcerpt(allocator, options.stderr, 4096);
+    errdefer allocator.free(stderr_excerpt);
+
+    var character_count: usize = 0;
+    var confidence_total: f64 = 0;
+    var covered_area: f64 = 0;
+    for (options.spans) |span| {
+        character_count += span.text.len;
+        confidence_total += span.confidence;
+        covered_area += width(span.bbox) * height(span.bbox);
+    }
+    const page_area = width(options.page_bbox) * height(options.page_bbox);
+
+    const index = attempts.items.len;
+    try attempts.append(allocator, .{
+        .attempt_index = options.attempt_index,
+        .page_index = options.page_index,
+        .status = options.status,
+        .page_bbox = options.page_bbox,
+        .failure_stage = options.failure_stage,
+        .backend = config.backend,
+        .dpi = config.dpi,
+        .psm = config.psm,
+        .lang = lang,
+        .grayscale = config.rasterize_grayscale,
+        .timeout_ms = config.timeout_ms,
+        .duration_ms = options.duration_ms,
+        .pixel_width = options.pixel_width,
+        .pixel_height = options.pixel_height,
+        .span_count = options.spans.len,
+        .character_count = character_count,
+        .mean_confidence = if (options.spans.len > 0) @floatCast(confidence_total / @as(f64, @floatFromInt(options.spans.len))) else 0,
+        .text_coverage = if (page_area > 0) @floatCast(@min(1.0, covered_area / page_area)) else 0,
+        .exit_code = options.exit_code,
+        .diagnostic_code = options.diagnostic_code,
+        .stderr_excerpt = stderr_excerpt,
+        .selected = options.selected,
+    });
+    return index;
+}
+
+fn shouldRetryOcrAttempt(attempt: OcrAttempt, config: ocr.OcrConfig) bool {
+    if (attempt.status == .empty) return true;
+    if (attempt.status != .completed) return false;
+    return attempt.character_count < config.retry_min_character_count or
+        attempt.mean_confidence < config.retry_min_mean_confidence or
+        attempt.text_coverage < config.retry_min_text_coverage;
+}
+
+fn betterOcrAttempt(candidate: OcrAttempt, current: OcrAttempt) bool {
+    const candidate_rank = ocrAttemptRank(candidate.status);
+    const current_rank = ocrAttemptRank(current.status);
+    if (candidate_rank != current_rank) return candidate_rank > current_rank;
+    if (candidate.mean_confidence != current.mean_confidence) return candidate.mean_confidence > current.mean_confidence;
+    if (candidate.text_coverage != current.text_coverage) return candidate.text_coverage > current.text_coverage;
+    if (candidate.character_count != current.character_count) return candidate.character_count > current.character_count;
+    if (candidate.dpi != current.dpi) return candidate.dpi < current.dpi;
+    return candidate.attempt_index < current.attempt_index;
+}
+
+fn ocrAttemptRank(status: ocr.AttemptStatus) u8 {
+    return switch (status) {
+        .completed => 2,
+        .empty => 1,
+        else => 0,
+    };
+}
+
+fn sanitizeDiagnosticExcerpt(allocator: std.mem.Allocator, source: []const u8, limit: usize) ![]u8 {
+    const bounded = source[0..@min(source.len, limit)];
+    const output = try allocator.alloc(u8, bounded.len);
+    for (bounded, output) |byte, *slot| {
+        slot.* = if (byte == '\n' or byte == '\r' or byte == '\t' or byte >= 0x20) byte else ' ';
+    }
+    return output;
+}
+
+fn freeOcrAttempts(allocator: std.mem.Allocator, attempts: []OcrAttempt) void {
+    for (attempts) |attempt| {
+        allocator.free(attempt.lang);
+        allocator.free(attempt.stderr_excerpt);
+    }
+    allocator.free(attempts);
+}
+
 fn cloneTextSpans(allocator: std.mem.Allocator, source: []const layout.TextSpan) ![]layout.TextSpan {
     const cloned = try allocator.alloc(layout.TextSpan, source.len);
     errdefer allocator.free(cloned);
@@ -1586,6 +1840,7 @@ test "debug svg marks low-confidence review regions" {
         .page_routes = &page_routes,
         .region_routes = &region_routes,
         .trace_records = &trace_records,
+        .ocr_attempts = &.{},
         .form_fields = &.{},
         .tables = &.{},
     };

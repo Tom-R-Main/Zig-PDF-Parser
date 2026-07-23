@@ -2113,11 +2113,64 @@ pub fn generateImagePdf(allocator: std.mem.Allocator) ![]u8 {
 
 /// Generate a PDF whose only page content is one page-dominant XObject image.
 pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
+    const image = try generateOcrFixtureImage(allocator);
+    defer allocator.free(image.pixels);
+    return generateRasterOnlyPdf(allocator, image, false);
+}
+
+/// Generate a raster-only expenditure form with aligned dates, vendors,
+/// currency values, and a document total. The image contains no PDF text layer.
+pub fn generateScannedFinancialFormPdf(allocator: std.mem.Allocator) ![]u8 {
+    const width: u32 = 1800;
+    const height: u32 = 2400;
+    const pixels = try allocator.alloc(u8, width * height);
+    defer allocator.free(pixels);
+    @memset(pixels, 0xFF);
+
+    drawBitmapText(pixels, width, height, "EXPENDITURE REPORT", 80, 140, 10);
+    drawBitmapText(pixels, width, height, "DATE", 80, 420, 8);
+    drawBitmapText(pixels, width, height, "VENDOR", 650, 420, 8);
+    drawBitmapText(pixels, width, height, "AMOUNT", 1350, 420, 8);
+
+    const rows = [_]struct {
+        date: []const u8,
+        vendor: []const u8,
+        amount: []const u8,
+        y: u32,
+    }{
+        .{ .date = "03/21/2026", .vendor = "ALPHA SUPPLY", .amount = "1250.00", .y = 620 },
+        .{ .date = "03/22/2026", .vendor = "BETA MEDIA", .amount = "675.50", .y = 800 },
+        .{ .date = "03/23/2026", .vendor = "CITY PRINT", .amount = "2400.25", .y = 980 },
+        .{ .date = "03/24/2026", .vendor = "DELTA TRAVEL", .amount = "120.00", .y = 1160 },
+    };
+    for (rows) |row| {
+        drawBitmapText(pixels, width, height, row.date, 80, row.y, 8);
+        drawBitmapText(pixels, width, height, row.vendor, 650, row.y, 8);
+        drawBitmapText(pixels, width, height, row.amount, 1350, row.y, 8);
+    }
+    drawBitmapText(pixels, width, height, "TOTAL", 1040, 1420, 9);
+    drawBitmapText(pixels, width, height, "4445.75", 1350, 1420, 9);
+
+    fillRect(pixels, width, height, 60, 540, 1640, 5, 0x00);
+    fillRect(pixels, width, height, 60, 1340, 1640, 5, 0x00);
+    fillRect(pixels, width, height, 60, 1540, 1640, 5, 0x00);
+
+    return generateRasterOnlyPdf(allocator, .{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+    }, true);
+}
+
+fn generateRasterOnlyPdf(allocator: std.mem.Allocator, image: RasterImage, compress_image: bool) ![]u8 {
     var pdf: std.ArrayList(u8) = .empty;
     errdefer pdf.deinit(allocator);
     var writer = runtime.arrayListWriter(&pdf, allocator);
-    const image = try generateOcrFixtureImage(allocator);
-    defer allocator.free(image.pixels);
+    const image_bytes = if (compress_image)
+        try compressZlib(allocator, image.pixels)
+    else
+        image.pixels;
+    defer if (compress_image) allocator.free(image_bytes);
 
     try writer.writeAll("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
 
@@ -2137,9 +2190,11 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
 
     const obj5_offset = pdf.items.len;
     try writer.print("5 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} ", .{ image.width, image.height });
-    try writer.print("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >>\n", .{image.pixels.len});
+    try writer.print("/ColorSpace /DeviceGray /BitsPerComponent 8 /Length {}", .{image_bytes.len});
+    if (compress_image) try writer.writeAll(" /Filter /FlateDecode");
+    try writer.writeAll(" >>\n");
     try writer.writeAll("stream\n");
-    try writer.writeAll(image.pixels);
+    try writer.writeAll(image_bytes);
     try writer.writeAll("\nendstream\nendobj\n");
 
     const xref_offset = pdf.items.len;
@@ -2155,6 +2210,22 @@ pub fn generateImageOnlyPdf(allocator: std.mem.Allocator) ![]u8 {
     try writer.print("startxref\n{}\n%%EOF\n", .{xref_offset});
 
     return pdf.toOwnedSlice(allocator);
+}
+
+fn compressZlib(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
+    defer output.deinit();
+    const history = try allocator.alloc(u8, std.compress.flate.max_window_len);
+    defer allocator.free(history);
+    var compressor = try std.compress.flate.Compress.init(
+        &output.writer,
+        history,
+        .zlib,
+        .default,
+    );
+    try compressor.writer.writeAll(input);
+    try compressor.finish();
+    return output.toOwnedSlice();
 }
 
 /// Generate a mixed page with native text plus a dominant scanned image region.
@@ -2324,6 +2395,21 @@ fn glyph5x7(byte: u8) [7]u5 {
         'X' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001 },
         'Y' => .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100 },
         'Z' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111 },
+        '0' => .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 },
+        '1' => .{ 0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 },
+        '2' => .{ 0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111 },
+        '3' => .{ 0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110 },
+        '4' => .{ 0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010 },
+        '5' => .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110 },
+        '6' => .{ 0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110 },
+        '7' => .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000 },
+        '8' => .{ 0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110 },
+        '9' => .{ 0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110 },
+        '/' => .{ 0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000 },
+        '.' => .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110 },
+        ',' => .{ 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110, 0b00100 },
+        '-' => .{ 0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000 },
+        '$' => .{ 0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100 },
         else => .{ 0b11111, 0b10001, 0b00110, 0b00100, 0b00110, 0b10001, 0b11111 },
     };
 }

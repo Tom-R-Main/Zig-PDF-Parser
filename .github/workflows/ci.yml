@@ -48,3 +48,23 @@ jobs:
 
       - name: Build WASM
         run: zig build wasm
+
+  adaptive-ocr:
+    name: Adaptive OCR quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OCR and rasterization tools
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils tesseract-ocr
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build parser
+        run: zig build --summary all
+
+      - name: Enforce scanned-form text and numeric floors
+        run: python3 benchmark/eval/ocr_form_quality.py --output /tmp/ocr-form-quality.json

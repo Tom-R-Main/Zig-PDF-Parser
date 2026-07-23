@@ -1,0 +1,12 @@
+[
+  {
+    "rows": [
+      [{"text":"DATE"},{"text":"VENDOR"},{"text":"AMOUNT"}],
+      [{"text":"03/21/2026"},{"text":"ALPHA SUPPLY"},{"text":"1250.00","numeric":{"is_numeric":true,"value":1250.00}}],
+      [{"text":"03/22/2026"},{"text":"BETA MEDIA"},{"text":"675.50","numeric":{"is_numeric":true,"value":675.50}}],
+      [{"text":"03/23/2026"},{"text":"CITY PRINT"},{"text":"2400.25","numeric":{"is_numeric":true,"value":2400.25}}],
+      [{"text":"03/24/2026"},{"text":"DELTA TRAVEL"},{"text":"120.00","numeric":{"is_numeric":true,"value":120.00}}],
+      [{"text":"TOTAL"},{"text":""},{"text":"4445.75","numeric":{"is_numeric":true,"value":4445.75}}]
+    ]
+  }
+]

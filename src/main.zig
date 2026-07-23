@@ -92,9 +92,17 @@ fn printUsage() !void {
         \\  --ocr-rasterizer FILE
         \\                  pdftoppm-compatible rasterizer for adaptive OCR routes
         \\  --ocr-dpi N     Rasterization DPI for adaptive OCR routes (default: 200)
+        \\  --ocr-psm MODE  Tesseract PSM name or number (default: single-block/6)
+        \\  --ocr-policy MODE
+        \\                  OCR attempt policy: single or bounded (default: bounded)
+        \\  --ocr-fallback-dpi N
+        \\                  Bounded retry DPI (default: 300)
+        \\  --ocr-fallback-psm MODE
+        \\                  Bounded retry PSM (default: sparse-text/11)
         \\  --ocr-color     Rasterize OCR pages as RGB instead of default grayscale
         \\  --ocr-grayscale Rasterize OCR pages as grayscale (default)
         \\  --no-ocr        Disable adaptive OCR subprocess routing
+        \\  --allow-partial  Exit successfully when an invoked specialist fails
         \\  --debug-assets-dir DIR
         \\                  Write visual review sidecar assets for adaptive outputs
         \\  --emit-specialist-requests FILE
@@ -203,6 +211,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var specialist_config_file: ?[]const u8 = null;
     var ocr_config = zpdf.OcrConfig{};
     var enable_ocr = true;
+    var allow_partial = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -234,6 +243,8 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (i < args.len) specialist_config_file = args[i];
         } else if (std.mem.eql(u8, arg, "--no-ocr")) {
             enable_ocr = false;
+        } else if (std.mem.eql(u8, arg, "--allow-partial")) {
+            allow_partial = true;
         } else if (std.mem.eql(u8, arg, "--ocr-executable")) {
             i += 1;
             if (i < args.len) ocr_config.executable = args[i];
@@ -247,7 +258,31 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
             if (i < args.len) ocr_config.dpi = std.fmt.parseInt(u32, args[i], 10) catch {
                 std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
-                return;
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-psm")) {
+            i += 1;
+            if (i < args.len) ocr_config.psm = parseOcrPsm(args[i]) orelse {
+                std.debug.print("Invalid --ocr-psm value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-policy")) {
+            i += 1;
+            if (i < args.len) ocr_config.policy = parseOcrPolicy(args[i]) orelse {
+                std.debug.print("Invalid --ocr-policy value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-fallback-dpi")) {
+            i += 1;
+            if (i < args.len) ocr_config.fallback_dpi = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Invalid --ocr-fallback-dpi value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-fallback-psm")) {
+            i += 1;
+            if (i < args.len) ocr_config.fallback_psm = parseOcrPsm(args[i]) orelse {
+                std.debug.print("Invalid --ocr-fallback-psm value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
             };
         } else if (std.mem.eql(u8, arg, "--ocr-color")) {
             ocr_config.rasterize_grayscale = false;
@@ -266,7 +301,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             if (i < args.len) {
                 output_format = parseOutputFormat(args[i]) orelse {
                     std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
-                    return;
+                    return error.InvalidArguments;
                 };
             }
         } else if (std.mem.eql(u8, arg, "--adaptive")) {
@@ -286,17 +321,17 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     const path = input_file orelse {
         std.debug.print("Error: No input file specified\n", .{});
-        return;
+        return error.InvalidArguments;
     };
 
     if (!adaptive and !isLegacyOutputFormat(output_format)) {
         std.debug.print("Format {s} requires --adaptive.\n", .{outputFormatName(output_format)});
-        return;
+        return error.InvalidArguments;
     }
 
     if (trace and !adaptive) {
         std.debug.print("--trace requires --adaptive.\n", .{});
-        return;
+        return error.InvalidArguments;
     }
 
     var password_input = loadPasswordInput(allocator, password, password_file) catch |err| {
@@ -327,7 +362,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     const output_handle = if (output_file) |out_path|
         runtime.createFileCwd(out_path) catch |err| {
             std.debug.print("Error creating {s}: {}\n", .{ out_path, err });
-            return;
+            return err;
         }
     else
         null;
@@ -336,7 +371,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Parse page range
     const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
         std.debug.print("Error parsing page range: {}\n", .{err});
-        return;
+        return err;
     };
     defer allocator.free(pages);
 
@@ -351,7 +386,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     if (adaptive) {
-        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, enable_ocr, ocr_config, fallback_document_text, allocator, output_handle);
+        try doAdaptiveExtract(doc, pages, output_format, trace, source_id, debug_assets_dir, specialist_requests_file, specialist_config_file, enable_ocr, allow_partial, ocr_config, fallback_document_text, allocator, output_handle);
         return;
     }
 
@@ -365,19 +400,19 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (output_format == .markdown and page_range == null) {
         const result = doc.extractAllMarkdown(allocator) catch |err| {
             std.debug.print("Error during markdown extraction: {}\n", .{err});
-            return;
+            return err;
         };
         defer allocator.free(result);
 
         if (output_handle) |h| {
             runtime.writeAllFile(h, result) catch |err| {
                 std.debug.print("Error writing output: {}\n", .{err});
-                return;
+                return err;
             };
         } else {
             runtime.writeAllStdout(result) catch |err| {
                 std.debug.print("Error writing output: {}\n", .{err});
-                return;
+                return err;
             };
         }
     } else if (use_parallel) {
@@ -387,19 +422,19 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         else
             doc.extractAllTextStructured(allocator) catch |err| {
                 std.debug.print("Error during structured extraction: {}\n", .{err});
-                return;
+                return err;
             };
         defer allocator.free(result);
 
         if (output_handle) |h| {
             runtime.writeAllFile(h, result) catch |err| {
                 std.debug.print("Error writing output: {}\n", .{err});
-                return;
+                return err;
             };
         } else {
             runtime.writeAllStdout(result) catch |err| {
                 std.debug.print("Error writing output: {}\n", .{err});
-                return;
+                return err;
             };
         }
     } else if (output_handle) |h| {
@@ -664,6 +699,7 @@ fn doAdaptiveExtract(
     specialist_requests_file: ?[]const u8,
     specialist_config_file: ?[]const u8,
     enable_ocr: bool,
+    allow_partial: bool,
     ocr_config: zpdf.OcrConfig,
     fallback_document_text: ?[]const u8,
     allocator: std.mem.Allocator,
@@ -671,12 +707,12 @@ fn doAdaptiveExtract(
 ) !void {
     const window = contiguousPageWindow(pages) catch |err| {
         std.debug.print("Error: --adaptive currently requires a contiguous page range: {}\n", .{err});
-        return;
+        return err;
     };
 
     const input_sha256 = zpdf.schema.sha256Hex(allocator, doc.data) catch |err| {
         std.debug.print("Error hashing input: {}\n", .{err});
-        return;
+        return err;
     };
     defer allocator.free(input_sha256);
 
@@ -722,12 +758,12 @@ fn doAdaptiveExtract(
                 .fallback_document_text = fallback_document_text,
             }) catch |err| {
                 std.debug.print("Error generating specialist requests: {}\n", .{err});
-                return;
+                return err;
             };
             defer request_result.deinit();
             writeSpecialistRequestsFile(allocator, requests_path, &request_result, schema_options) catch |err| {
                 std.debug.print("Error writing specialist requests: {}\n", .{err});
-                return;
+                return err;
             };
         }
         var write_buf: [runtime.large_output_buffer_size]u8 = undefined;
@@ -735,7 +771,7 @@ fn doAdaptiveExtract(
             var file_writer = runtime.fileWriter(h, &write_buf);
             const writer = &file_writer.interface;
             defer writer.flush() catch {};
-            _ = doc.extractAdaptiveStreaming(allocator, writer, .{
+            const summary = doc.extractAdaptiveStreaming(allocator, writer, .{
                 .adaptive_options = .{
                     .page_start = window.start,
                     .page_end = window.end,
@@ -746,13 +782,14 @@ fn doAdaptiveExtract(
                 .schema_options = schema_options,
             }) catch |err| {
                 std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
-                return;
+                return err;
             };
+            if (summary.specialist_failure_count > 0 and !allow_partial) return error.SpecialistFailed;
         } else {
             var stdout_writer = runtime.stdoutWriter(&write_buf);
             const writer = &stdout_writer.interface;
             defer writer.flush() catch {};
-            _ = doc.extractAdaptiveStreaming(allocator, writer, .{
+            const summary = doc.extractAdaptiveStreaming(allocator, writer, .{
                 .adaptive_options = .{
                     .page_start = window.start,
                     .page_end = window.end,
@@ -763,8 +800,9 @@ fn doAdaptiveExtract(
                 .schema_options = schema_options,
             }) catch |err| {
                 std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
-                return;
+                return err;
             };
+            if (summary.specialist_failure_count > 0 and !allow_partial) return error.SpecialistFailed;
         }
         return;
     }
@@ -777,14 +815,14 @@ fn doAdaptiveExtract(
         .fallback_document_text = fallback_document_text,
     }) catch |err| {
         std.debug.print("Error during adaptive extraction: {}\n", .{err});
-        return;
+        return err;
     };
     defer result.deinit();
 
     if (specialist_requests_file) |requests_path| {
         writeSpecialistRequestsFile(allocator, requests_path, &result, schema_options) catch |err| {
             std.debug.print("Error writing specialist requests: {}\n", .{err});
-            return;
+            return err;
         };
     }
 
@@ -796,7 +834,7 @@ fn doAdaptiveExtract(
             defer writer.flush() catch {};
             zpdf.schema.writeArtifactJsonl(allocator, writer, &result, schema_options) catch |err| {
                 std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
-                return;
+                return err;
             };
         } else {
             var stdout_writer = runtime.stdoutWriter(&write_buf);
@@ -804,42 +842,44 @@ fn doAdaptiveExtract(
             defer writer.flush() catch {};
             zpdf.schema.writeArtifactJsonl(allocator, writer, &result, schema_options) catch |err| {
                 std.debug.print("Error rendering adaptive output as artifact-jsonl: {}\n", .{err});
-                return;
+                return err;
             };
         }
+        if (result.hasSpecialistFailures() and !allow_partial) return error.SpecialistFailed;
         return;
     }
 
     const rendered = if (trace)
         zpdf.schema.renderTraceJsonWithOptions(allocator, &result, schema_options) catch |err| {
             std.debug.print("Error rendering adaptive trace: {}\n", .{err});
-            return;
+            return err;
         }
     else if (output_format == .json)
         zpdf.schema.renderArtifactJson(allocator, &result, schema_options) catch |err| {
             std.debug.print("Error rendering adaptive output as json: {}\n", .{err});
-            return;
+            return err;
         }
     else if (output_format == .artifact_jsonl)
         unreachable
     else
         result.render(allocator, toAdaptiveOutputFormat(output_format)) catch |err| {
             std.debug.print("Error rendering adaptive output as {s}: {}\n", .{ outputFormatName(output_format), err });
-            return;
+            return err;
         };
     defer allocator.free(rendered);
 
     if (output_handle) |h| {
         runtime.writeAllFile(h, rendered) catch |err| {
             std.debug.print("Error writing output: {}\n", .{err});
-            return;
+            return err;
         };
     } else {
         runtime.writeAllStdout(rendered) catch |err| {
             std.debug.print("Error writing output: {}\n", .{err});
-            return;
+            return err;
         };
     }
+    if (result.hasSpecialistFailures() and !allow_partial) return error.SpecialistFailed;
 }
 
 fn writeSpecialistRequestsFile(allocator: std.mem.Allocator, path: []const u8, result: anytype, options: zpdf.schema.RenderOptions) !void {
@@ -869,6 +909,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var adapter_format: zpdf.AdaptiveAdapterFormat = .artifact_jsonl;
     var ocr_config = zpdf.OcrConfig{};
     var enable_ocr = true;
+    var allow_partial = false;
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -906,12 +947,38 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
                 std.debug.print("Invalid --ocr-dpi value: {s}\n", .{args[i]});
                 return error.InvalidArguments;
             };
+        } else if (std.mem.eql(u8, arg, "--ocr-psm")) {
+            i += 1;
+            if (i < args.len) ocr_config.psm = parseOcrPsm(args[i]) orelse {
+                std.debug.print("Invalid --ocr-psm value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-policy")) {
+            i += 1;
+            if (i < args.len) ocr_config.policy = parseOcrPolicy(args[i]) orelse {
+                std.debug.print("Invalid --ocr-policy value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-fallback-dpi")) {
+            i += 1;
+            if (i < args.len) ocr_config.fallback_dpi = std.fmt.parseInt(u32, args[i], 10) catch {
+                std.debug.print("Invalid --ocr-fallback-dpi value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
+        } else if (std.mem.eql(u8, arg, "--ocr-fallback-psm")) {
+            i += 1;
+            if (i < args.len) ocr_config.fallback_psm = parseOcrPsm(args[i]) orelse {
+                std.debug.print("Invalid --ocr-fallback-psm value: {s}\n", .{args[i]});
+                return error.InvalidArguments;
+            };
         } else if (std.mem.eql(u8, arg, "--ocr-color")) {
             ocr_config.rasterize_grayscale = false;
         } else if (std.mem.eql(u8, arg, "--ocr-grayscale")) {
             ocr_config.rasterize_grayscale = true;
         } else if (std.mem.eql(u8, arg, "--no-ocr")) {
             enable_ocr = false;
+        } else if (std.mem.eql(u8, arg, "--allow-partial")) {
+            allow_partial = true;
         } else if (std.mem.eql(u8, arg, "--debug-assets-dir")) {
             i += 1;
             if (i < args.len) debug_assets_dir = args[i];
@@ -997,7 +1064,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     if (output_handle) |h| {
         var file_writer = runtime.fileWriter(h, &write_buf);
         const writer = &file_writer.interface;
-        _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
+        const summary = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
             .debug_assets_dir = debug_assets_dir,
@@ -1018,10 +1085,11 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             std.debug.print("Error flushing extract-adaptive output: {}\n", .{err});
             return err;
         };
+        if (summary.has_specialist_failures and !allow_partial) return error.SpecialistFailed;
     } else {
         var stdout_writer = runtime.stdoutWriter(&write_buf);
         const writer = &stdout_writer.interface;
-        _ = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
+        const summary = zpdf.adapter.extractAdaptive(allocator, doc, writer, .{
             .source_id = source_id,
             .format = adapter_format,
             .debug_assets_dir = debug_assets_dir,
@@ -1042,6 +1110,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
             std.debug.print("Error flushing extract-adaptive output: {}\n", .{err});
             return err;
         };
+        if (summary.has_specialist_failures and !allow_partial) return error.SpecialistFailed;
     }
 }
 
@@ -1357,6 +1426,35 @@ fn parseOutputFormat(fmt: []const u8) ?OutputFormat {
     return null;
 }
 
+fn parseOcrPolicy(value: []const u8) ?zpdf.OcrPolicy {
+    if (std.mem.eql(u8, value, "single")) return .single;
+    if (std.mem.eql(u8, value, "bounded")) return .bounded;
+    return null;
+}
+
+fn parseOcrPsm(value: []const u8) ?zpdf.OcrPageSegMode {
+    if (std.fmt.parseInt(u8, value, 10)) |number| {
+        return std.enums.fromInt(zpdf.OcrPageSegMode, number);
+    } else |_| {}
+
+    inline for (@typeInfo(zpdf.OcrPageSegMode).@"enum".fields) |field| {
+        if (std.mem.eql(u8, value, field.name) or equalHyphenatedName(value, field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+    if (std.mem.eql(u8, value, "single-block")) return .single_block;
+    if (std.mem.eql(u8, value, "sparse-text")) return .sparse_text;
+    return null;
+}
+
+fn equalHyphenatedName(value: []const u8, enum_name: []const u8) bool {
+    if (value.len != enum_name.len) return false;
+    for (value, enum_name) |actual, expected| {
+        if (actual != (if (expected == '_') '-' else expected)) return false;
+    }
+    return true;
+}
+
 fn outputFormatName(output_format: OutputFormat) []const u8 {
     return switch (output_format) {
         .text => "text",
@@ -1431,6 +1529,66 @@ test "parse adaptive output formats" {
     try std.testing.expectEqual(OutputFormat.debug_svg, parseOutputFormat("debug-svg").?);
     try std.testing.expectEqual(OutputFormat.debug_svg, parseOutputFormat("debug_svg").?);
     try std.testing.expect(parseOutputFormat("xml") == null);
+}
+
+test "OCR CLI parsers accept named and numeric PSM values" {
+    try std.testing.expectEqual(zpdf.OcrPageSegMode.single_block, parseOcrPsm("6").?);
+    try std.testing.expectEqual(zpdf.OcrPageSegMode.single_block, parseOcrPsm("single-block").?);
+    try std.testing.expectEqual(zpdf.OcrPageSegMode.sparse_text, parseOcrPsm("sparse_text").?);
+    try std.testing.expect(parseOcrPsm("99") == null);
+    try std.testing.expectEqual(zpdf.OcrPolicy.bounded, parseOcrPolicy("bounded").?);
+    try std.testing.expect(parseOcrPolicy("unbounded") == null);
+}
+
+test "legacy extract returns typed argument errors" {
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{ "--adaptive", "--ocr-dpi", "nope" }));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{ "--adaptive", "--ocr-psm", "99" }));
+}
+
+test "extract-adaptive fails invoked OCR by default and permits explicit partial output" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateImageOnlyPdf(allocator);
+    defer allocator.free(pdf_data);
+    var input_buf: [112]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-cli-ocr-failure-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var output_buf: [112]u8 = undefined;
+    const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-cli-ocr-failure-{x}.jsonl", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(output_path);
+    defer runtime.deleteFileCwd(output_path);
+
+    const base_args = [_][]const u8{
+        "--input",
+        input_path,
+        "--output",
+        output_path,
+        "--ocr-rasterizer",
+        "./pdf-parser-rasterizer-does-not-exist",
+    };
+    try std.testing.expectError(error.SpecialistFailed, runExtractAdaptive(allocator, &base_args));
+
+    const failed_output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+    defer allocator.free(failed_output);
+    try std.testing.expect(std.mem.indexOf(u8, failed_output, "\"attempt_status\":\"unavailable\"") != null);
+
+    var partial_args: std.ArrayList([]const u8) = .empty;
+    defer partial_args.deinit(allocator);
+    try partial_args.appendSlice(allocator, &base_args);
+    try partial_args.append(allocator, "--allow-partial");
+    try runExtractAdaptive(allocator, partial_args.items);
 }
 
 test "extract adaptive CLI supports reconciler formats" {
@@ -1669,7 +1827,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
         const requests = try runtime.readFileAllocAlignedCwd(allocator, requests_path, .fromByteUnits(1));
         defer allocator.free(requests);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"record_type\":\"specialist_request\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.10.0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.11.0\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"source_id\":\"external-specialist-cli\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_kind\":\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_outputs\"") != null);
@@ -1871,7 +2029,7 @@ test "extract adaptive trace reports OCR queue for image-only page" {
     runtime.deleteFileCwd(output_path);
     defer runtime.deleteFileCwd(output_path);
 
-    try runExtract(allocator, &.{ input_path, "--adaptive", "--trace", "-o", output_path });
+    try runExtract(allocator, &.{ input_path, "--adaptive", "--trace", "--allow-partial", "-o", output_path });
 
     const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
     defer allocator.free(output);
@@ -2128,7 +2286,7 @@ fn renderFixtureDebugSvg(allocator: std.mem.Allocator, pdf_data: []const u8, nam
     runtime.deleteFileCwd(output_path);
     defer runtime.deleteFileCwd(output_path);
 
-    try runExtract(allocator, &.{ "--adaptive", "--format", "debug-svg", "-o", output_path, input_path });
+    try runExtract(allocator, &.{ "--adaptive", "--allow-partial", "--format", "debug-svg", "-o", output_path, input_path });
     return runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
 }
 

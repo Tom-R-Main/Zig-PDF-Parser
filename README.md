@@ -199,10 +199,12 @@ download/derive local performance fixtures and `benchmark/eval/profile_lanes.py`
 to measure native text, adaptive artifact JSONL, streaming JSONL, and OCR-routed
 lanes before doing parser optimization. The profiler keeps OCR isolated by
 default: adaptive JSONL lanes pass `--no-ocr`, while `ocr-routed` invokes
-Tesseract and can be bounded with `--ocr-pages`. OCR routes default to 200 DPI
-for the local Tesseract path and grayscale rasterization; pass `--ocr-dpi 300`
-when validating high-resolution scan tradeoffs, or `--ocr-color` when comparing
-against the older RGB raster path. Add `--hash-output` during optimization
+Tesseract and can be bounded with `--ocr-pages`. OCR routes first use 200 DPI
+with PSM 6 and grayscale rasterization. Empty or low-quality results may retry
+once at 300 DPI with PSM 11, after which the parser selects deterministically
+from the recorded attempts. Use the OCR CLI controls to compare policies or
+`--ocr-color` when comparing against the older RGB raster path. Add
+`--hash-output` during optimization
 validation runs when byte-for-byte output stability matters; hashes are computed
 after the timed subprocess exits, and the analyzer summarizes hash stability
 when hashes are present. `benchmark/eval/analyze_baseline.py`
@@ -313,14 +315,16 @@ typed `span`, `block`, `table`, `form_field`, `route_trace`,
 `specialist_request`, `specialist_response`, `specialist_result`, `rag_chunk`,
 and `debug_asset` records. `artifact-jsonl` emits the same contract as a
 manifest-first batch JSONL stream for host applications and ingestion
-pipelines. `stream-jsonl` emits page-by-page lifecycle events and artifacts as
+pipelines. Schema `0.11.0` adds one `specialist_attempt` record per OCR
+invocation, including configuration, bounded diagnostics, quality signals, and
+the selected attempt. `stream-jsonl` emits page-by-page lifecycle events and artifacts as
 soon as each page is processed: `document_manifest`, `page_started`, route
 traces, specialist requests/results, page artifacts, `page_finished`, optional
 debug assets, then `document_finished`. `jsonl` remains a compatibility span
 stream, and `rag-jsonl` remains chunk-only. The schema is documented in
 [docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets are formal `debug_asset` records in schema `0.10.0`. By
+Visual review assets remain formal `debug_asset` records in schema `0.11.0`. By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
 `page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`,
@@ -459,7 +463,7 @@ processing records: `document_manifest` as a manifest artifact,
 `page_started`/`page_finished`/`document_finished` as status artifacts,
 `span`/`block`/`table` as extracted text artifacts, `route_trace` and
 `specialist_request` as metadata or OCR/specialist diagnostics,
-`specialist_result` as returned specialist evidence, and `rag_chunk` as
+`specialist_attempt`/`specialist_result` as returned specialist evidence, and `rag_chunk` as
 chunk-index artifacts that can be queued for embeddings before the full
 document finishes.
 
@@ -566,7 +570,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.10.0`. Every emitted record carries a `provenance` envelope with document and
+`0.11.0`. Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

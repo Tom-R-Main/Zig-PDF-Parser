@@ -10,7 +10,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.10.0";
+pub const schema_version = "0.11.0";
 
 pub const SpecialistKind = enum {
     ocr,
@@ -57,6 +57,7 @@ pub const StreamMeta = struct {
 
 pub const Counts = struct {
     requests: usize = 0,
+    attempts: usize = 0,
     responses: usize = 0,
     results: usize = 0,
 };
@@ -202,10 +203,18 @@ pub fn countResponses(result: anytype) usize {
     return count;
 }
 
+pub fn countAttempts(result: anytype) usize {
+    return result.ocr_attempts.len;
+}
+
 pub fn countResults(result: anytype) usize {
     var count: usize = 0;
     for (result.page_routes) |route| {
-        if (route.route.needs_ocr and countFreshOcrSpans(result, route.page_index, route.bbox, null) > 0) count += 1;
+        if (!route.route.needs_ocr) continue;
+        if (selectedAttemptIndex(result, route.page_index)) |attempt_index| {
+            const attempt = result.ocr_attempts[attempt_index];
+            if (attempt.status == .completed and countFreshOcrSpans(result, route.page_index, route.bbox, null) > 0) count += 1;
+        }
     }
     return count;
 }
@@ -213,6 +222,7 @@ pub fn countResults(result: anytype) usize {
 pub fn counts(result: anytype) Counts {
     return .{
         .requests = countRequests(result),
+        .attempts = countAttempts(result),
         .responses = countResponses(result),
         .results = countResults(result),
     };
@@ -228,6 +238,11 @@ pub fn writeResponsesArray(writer: anytype, result: anytype, context: RenderCont
     try writeOcrResponses(writer, result, context, null, false, null, &wrote, null);
 }
 
+pub fn writeAttemptsArray(writer: anytype, result: anytype, context: RenderContext) !void {
+    var wrote = false;
+    try writeOcrAttempts(writer, result, context, null, false, null, &wrote);
+}
+
 pub fn writeResultsArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
     try writeOcrResults(writer, result, context, null, false, null, &wrote, null);
@@ -240,6 +255,7 @@ pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result:
     defer block_lookup.deinit();
     var wrote = false;
     try writeRequests(writer, result, context, null, true, null, &wrote, &span_lookup, &block_lookup);
+    try writeOcrAttempts(writer, result, context, null, true, null, &wrote);
     try writeOcrResponses(writer, result, context, null, true, null, &wrote, &span_lookup);
     try writeOcrResults(writer, result, context, null, true, null, &wrote, &span_lookup);
     if (wrote) try writer.writeByte('\n');
@@ -284,6 +300,20 @@ pub fn writePageResponsesJsonl(
     const before = event_index.*;
     var wrote = false;
     try writeOcrResponses(writer, result, context, page_index, true, event_index, &wrote, null);
+    if (wrote) try writer.writeByte('\n');
+    return @intCast(event_index.* - before);
+}
+
+pub fn writePageAttemptsJsonl(
+    writer: anytype,
+    result: anytype,
+    context: RenderContext,
+    page_index: u32,
+    event_index: *u64,
+) !usize {
+    const before = event_index.*;
+    var wrote = false;
+    try writeOcrAttempts(writer, result, context, page_index, true, event_index, &wrote);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -386,6 +416,22 @@ fn writeRequests(
     }
 }
 
+fn writeOcrAttempts(
+    writer: anytype,
+    result: anytype,
+    context: RenderContext,
+    page_filter: ?u32,
+    jsonl: bool,
+    event_index: ?*u64,
+    wrote: *bool,
+) !void {
+    for (result.ocr_attempts) |attempt| {
+        if (!matchesPage(page_filter, attempt.page_index)) continue;
+        try writeRecordSeparator(writer, jsonl, wrote);
+        try writeOcrAttemptRecord(writer, context, attempt, event_index);
+    }
+}
+
 fn writeOcrResponses(
     writer: anytype,
     result: anytype,
@@ -415,6 +461,9 @@ fn writeOcrResults(
 ) !void {
     for (result.page_routes, 0..) |route, index| {
         if (!matchesPage(page_filter, route.page_index) or !route.route.needs_ocr) continue;
+        const attempt_index = selectedAttemptIndex(result, route.page_index) orelse continue;
+        const attempt = result.ocr_attempts[attempt_index];
+        if (attempt.status != .completed) continue;
         if (countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup) == 0) continue;
         try writeRecordSeparator(writer, jsonl, wrote);
         try writeOcrResultRecord(writer, result, context, @intCast(index), route, event_index, span_lookup);
@@ -473,10 +522,76 @@ fn writeRequestRecord(
     try writer.writeByte('}');
 }
 
+fn writeOcrAttemptRecord(writer: anytype, context: RenderContext, attempt: anytype, event_index: ?*u64) !void {
+    try writeRecordHeader(writer, "specialist_attempt");
+    if (event_index) |index| {
+        try writeStreamFields(writer, "specialist_attempt", index.*, attempt.page_index);
+        index.* += 1;
+    }
+    try writeDocumentFields(writer, context);
+    try writer.print(",\"page_index\":{},\"attempt_id\":\"specialist-attempt-ocr-page-{d}-{d}\",\"request_id\":", .{
+        attempt.page_index,
+        attempt.page_index,
+        attempt.attempt_index,
+    });
+    try writeRequestId(writer, .ocr, attempt.page_index, null);
+    try writer.writeAll(",\"specialist_id\":\"");
+    try writer.writeAll(@tagName(attempt.backend));
+    try writer.writeAll("\",\"specialist_kind\":\"ocr\",\"attempt_index\":");
+    try writer.print("{}", .{attempt.attempt_index});
+    try writer.writeAll(",\"attempt_status\":\"");
+    try writer.writeAll(@tagName(attempt.status));
+    try writer.writeAll("\",\"failure_stage\":");
+    if (attempt.failure_stage) |stage| {
+        try writer.writeByte('"');
+        try writer.writeAll(@tagName(stage));
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"selected\":");
+    try writer.print("{}", .{attempt.selected});
+    try writer.writeAll(",\"config\":{\"dpi\":");
+    try writer.print("{}", .{attempt.dpi});
+    try writer.writeAll(",\"psm\":");
+    try writer.print("{}", .{attempt.psm.tesseractNumber()});
+    try writer.writeAll(",\"language\":\"");
+    try writeJsonEscaped(writer, attempt.lang);
+    try writer.writeAll("\",\"grayscale\":");
+    try writer.print("{}", .{attempt.grayscale});
+    try writer.writeAll(",\"timeout_ms\":");
+    try writer.print("{}", .{attempt.timeout_ms});
+    try writer.writeAll("},\"execution\":{\"duration_ms\":");
+    try writer.print("{}", .{attempt.duration_ms});
+    try writer.writeAll(",\"exit_code\":");
+    if (attempt.exit_code) |code| try writer.print("{}", .{code}) else try writer.writeAll("null");
+    try writer.writeAll(",\"pixel_width\":");
+    try writer.print("{}", .{attempt.pixel_width});
+    try writer.writeAll(",\"pixel_height\":");
+    try writer.print("{}", .{attempt.pixel_height});
+    try writer.writeAll("},\"quality\":{\"span_count\":");
+    try writer.print("{}", .{attempt.span_count});
+    try writer.writeAll(",\"character_count\":");
+    try writer.print("{}", .{attempt.character_count});
+    try writer.print(",\"mean_confidence\":{d:.3},\"text_coverage\":{d:.6}", .{ attempt.mean_confidence, attempt.text_coverage });
+    try writer.writeAll("},\"warnings\":[");
+    if (attempt.diagnostic_code) |code| {
+        if (diagnosticIsWarning(code)) try writeDiagnosticRecord(writer, code, attempt.stderr_excerpt);
+    }
+    try writer.writeAll("],\"errors\":[");
+    if (attempt.diagnostic_code) |code| {
+        if (!diagnosticIsWarning(code)) try writeDiagnosticRecord(writer, code, attempt.stderr_excerpt);
+    }
+    try writer.writeByte(']');
+    try writeProvenance(writer, context, "specialist-attempt-ocr", attempt.page_index, attempt.page_bbox, "lifecycle", attempt.mean_confidence);
+    try writer.writeByte('}');
+}
+
 fn writeOcrResponseRecord(writer: anytype, result: anytype, context: RenderContext, response_index: u32, route: anytype, event_index: ?*u64, span_lookup: ?*const SpanPageLookup) !void {
-    const fresh_count = countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup);
-    const status = if (fresh_count > 0) "completed" else "empty";
-    const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox, span_lookup);
+    const response_attempt_index = lastAttemptIndex(result, route.page_index);
+    const selected_index = selectedAttemptIndex(result, route.page_index);
+    const confidence = if (response_attempt_index) |index| result.ocr_attempts[index].mean_confidence else averageFreshOcrConfidence(result, route.page_index, route.bbox, span_lookup);
+    const status = if (response_attempt_index) |index| responseStatusName(result.ocr_attempts[index].status) else "not_invoked";
     try writeRecordHeader(writer, "specialist_response");
     if (event_index) |index| {
         try writeStreamFields(writer, "specialist_response", index.*, route.page_index);
@@ -487,17 +602,42 @@ fn writeOcrResponseRecord(writer: anytype, result: anytype, context: RenderConte
     try writer.writeAll(",\"response_id\":\"specialist-response-ocr-");
     try writer.print("{d}\",\"request_id\":", .{response_index});
     try writeRequestId(writer, .ocr, route.page_index, null);
-    try writer.writeAll(",\"specialist_id\":\"tesseract\",\"specialist_kind\":\"ocr\",\"status\":\"");
+    try writer.writeAll(",\"specialist_id\":\"");
+    if (response_attempt_index) |index| try writer.writeAll(@tagName(result.ocr_attempts[index].backend)) else try writer.writeAll("none");
+    try writer.writeAll("\",\"specialist_kind\":\"ocr\",\"status\":\"");
     try writer.writeAll(status);
-    try writer.print("\",\"confidence\":{d:.3},\"spans\":", .{confidence});
+    try writer.print("\",\"confidence\":{d:.3},\"attempt_count\":{},\"selected_attempt_id\":", .{ confidence, attemptCountForPage(result, route.page_index) });
+    if (selected_index) |index| {
+        const attempt = result.ocr_attempts[index];
+        try writer.print("\"specialist-attempt-ocr-page-{d}-{d}\"", .{ attempt.page_index, attempt.attempt_index });
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"spans\":");
     try writeSpanContextArray(writer, result, route.page_index, route.bbox, .fresh_ocr, span_lookup);
-    try writer.writeAll(",\"tables\":[],\"blocks\":[],\"formulas\":[],\"entities\":[],\"debug_assets\":[],\"warnings\":[],\"errors\":[]");
+    try writer.writeAll(",\"tables\":[],\"blocks\":[],\"formulas\":[],\"entities\":[],\"debug_assets\":[],\"warnings\":[");
+    if (response_attempt_index) |index| {
+        const attempt = result.ocr_attempts[index];
+        if (attempt.diagnostic_code) |code| {
+            if (diagnosticIsWarning(code)) try writeDiagnosticRecord(writer, code, "");
+        }
+    }
+    try writer.writeAll("],\"errors\":[");
+    if (response_attempt_index) |index| {
+        const attempt = result.ocr_attempts[index];
+        if (attempt.diagnostic_code) |code| {
+            if (!diagnosticIsWarning(code)) try writeDiagnosticRecord(writer, code, "");
+        }
+    }
+    try writer.writeByte(']');
     try writeProvenance(writer, context, "specialist-response-ocr", route.page_index, route.bbox, "fresh_ocr", confidence);
     try writer.writeByte('}');
 }
 
 fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext, result_index: u32, route: anytype, event_index: ?*u64, span_lookup: ?*const SpanPageLookup) !void {
     const confidence = averageFreshOcrConfidence(result, route.page_index, route.bbox, span_lookup);
+    const selected_index = selectedAttemptIndex(result, route.page_index) orelse return;
+    const attempt = result.ocr_attempts[selected_index];
     try writeRecordHeader(writer, "specialist_result");
     if (event_index) |index| {
         try writeStreamFields(writer, "specialist_result", index.*, route.page_index);
@@ -506,13 +646,82 @@ fn writeOcrResultRecord(writer: anytype, result: anytype, context: RenderContext
     try writeDocumentFields(writer, context);
     try writer.print(",\"page_index\":{},\"specialist_result_id\":\"specialist-result-ocr-{d}\",\"request_id\":", .{ route.page_index, result_index });
     try writeRequestId(writer, .ocr, route.page_index, null);
-    try writer.writeAll(",\"specialist_id\":\"tesseract\",\"specialist_kind\":\"ocr\",\"status\":\"completed\",\"source_kind\":\"fresh_ocr\"");
+    try writer.writeAll(",\"specialist_id\":\"");
+    try writer.writeAll(@tagName(attempt.backend));
+    try writer.writeAll("\",\"specialist_kind\":\"ocr\",\"status\":\"completed\",\"source_kind\":\"fresh_ocr\",\"selected_attempt_id\":\"");
+    try writer.print("specialist-attempt-ocr-page-{d}-{d}\"", .{ attempt.page_index, attempt.attempt_index });
     try writer.print(",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":{},\"tables\":0,\"blocks\":0,\"formulas\":0,\"entities\":0}}", .{ confidence, countFreshOcrSpans(result, route.page_index, route.bbox, span_lookup) });
     try writer.writeAll(",\"span_ids\":");
     try writeSpanIdArray(writer, result, route.page_index, route.bbox, .fresh_ocr, span_lookup);
     try writer.writeAll(",\"table_ids\":[],\"block_ids\":[],\"formula_ids\":[],\"entity_ids\":[]");
     try writeProvenance(writer, context, "specialist-result-ocr", route.page_index, route.bbox, "fresh_ocr", confidence);
     try writer.writeByte('}');
+}
+
+fn selectedAttemptIndex(result: anytype, page_index: u32) ?usize {
+    for (result.ocr_attempts, 0..) |attempt, index| {
+        if (attempt.page_index != page_index) continue;
+        if (attempt.selected) return index;
+    }
+    return null;
+}
+
+fn lastAttemptIndex(result: anytype, page_index: u32) ?usize {
+    var last_index: ?usize = null;
+    for (result.ocr_attempts, 0..) |attempt, index| {
+        if (attempt.page_index == page_index) last_index = index;
+    }
+    return last_index;
+}
+
+fn attemptCountForPage(result: anytype, page_index: u32) usize {
+    var count: usize = 0;
+    for (result.ocr_attempts) |attempt| {
+        if (attempt.page_index == page_index) count += 1;
+    }
+    return count;
+}
+
+fn responseStatusName(status: anytype) []const u8 {
+    return switch (status) {
+        .completed => "completed",
+        .empty => "empty",
+        .not_invoked => "not_invoked",
+        .unavailable => "unavailable",
+        .failed, .timeout, .invalid_output => "failed",
+    };
+}
+
+fn diagnosticMessage(code: anytype) []const u8 {
+    return switch (code) {
+        .ocr_disabled => "OCR was explicitly disabled",
+        .rasterizer_requires_file => "OCR rasterization requires a file-backed PDF",
+        .rasterizer_unavailable => "OCR rasterizer executable is unavailable",
+        .rasterizer_failed => "OCR rasterizer exited unsuccessfully",
+        .rasterizer_timeout => "OCR rasterizer timed out",
+        .rasterizer_output_limit => "OCR rasterizer exceeded its output limit",
+        .invalid_raster_image => "OCR rasterizer produced an invalid image",
+        .tesseract_unavailable => "Tesseract executable is unavailable",
+        .tesseract_failed => "Tesseract exited unsuccessfully",
+        .tesseract_timeout => "Tesseract timed out",
+        .tesseract_output_limit => "Tesseract exceeded its output limit",
+        .invalid_tesseract_output => "Tesseract produced invalid TSV output",
+        .tesseract_c_backend_disabled => "Tesseract C backend is not enabled",
+    };
+}
+
+fn diagnosticIsWarning(code: anytype) bool {
+    return code == .ocr_disabled;
+}
+
+fn writeDiagnosticRecord(writer: anytype, code: anytype, stderr_excerpt: []const u8) !void {
+    try writer.writeAll("{\"code\":\"");
+    try writer.writeAll(@tagName(code));
+    try writer.writeAll("\",\"message\":\"");
+    try writeJsonEscaped(writer, diagnosticMessage(code));
+    try writer.writeAll("\",\"stderr_excerpt\":\"");
+    try writeJsonEscaped(writer, stderr_excerpt);
+    try writer.writeAll("\"}");
 }
 
 fn requestKindCount(route: complexity.RouteDecision, reason_mask: u32) usize {

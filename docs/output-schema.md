@@ -6,7 +6,7 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.10.0`
+Current schema version: `0.11.0`
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -30,7 +30,11 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.10.0` adds `poppler_text` as a span source and `external_text` as its
+Schema `0.11.0` adds `specialist_attempt` records, manifest-level
+`has_specialist_failures`, and attempt-linked OCR responses/results. OCR
+outcomes now preserve `not_invoked`, `unavailable`, `failed`, `timeout`,
+`invalid_output`, `empty`, and `completed` instead of collapsing failures into
+empty output. Schema `0.10.0` added `poppler_text` as a span source and `external_text` as its
 provenance source kind. This source appears only when native readable layout
 fails its quality gate and a single document-level `pdftotext` fallback
 succeeds. Schema `0.9.0` added the `glyph_trace_jsonl` debug asset kind for page-scoped
@@ -72,7 +76,8 @@ Document/run summary with `document_id`, optional caller-owned `source_id`,
 parser version, optional input SHA256, source path, page count, encryption and
 corrupt flags, extraction options, route counts, OCR/table/form/formula
 extraction counts, artifact counts, output artifact hashes, capability
-coverage, warnings, errors, and available output formats.
+coverage, `has_specialist_failures`, warnings, errors, and available output
+formats.
 
 The manifest includes an `encryption` object for encrypted and unencrypted
 documents:
@@ -170,6 +175,22 @@ native `blocks`, `ruling_lines`, optional `crop_image_path`,
 
 `requested_kind` is one of `ocr`, `table`, `formula`, `layout`, or `entity`.
 
+### `specialist_attempt`
+
+One record per specialist invocation, including unsuccessful invocations.
+Stable fields include `attempt_id`, `request_id`, `specialist_id`,
+`specialist_kind`, `attempt_index`, `attempt_status`, optional `failure_stage`,
+`selected`, `config`, `execution`, `quality`, bounded warnings/errors, and
+provenance. OCR config records DPI, PSM, language, grayscale mode, and timeout;
+execution records duration, exit code, and raster dimensions; quality records
+span/character counts, mean confidence, and text coverage.
+
+`attempt_status` is `not_invoked`, `completed`, `empty`, `unavailable`,
+`failed`, `timeout`, or `invalid_output`. A bounded OCR policy may emit a
+200-DPI/PSM-6 attempt followed by a 300-DPI/PSM-11 attempt. Exactly one
+successful candidate is selected deterministically by outcome, confidence,
+coverage, character count, then lower DPI and attempt index.
+
 ### `specialist_response`
 
 Response record from a specialist boundary. Existing Tesseract OCR output is
@@ -179,6 +200,7 @@ one response JSON object per request through JSONL-over-stdin/stdout.
 Stable fields include `request_id`, `response_id`, `specialist_id`,
 `specialist_kind`, `status`, `confidence`, returned `spans`, `tables`, `blocks`,
 `formulas`, `entities`, `debug_assets`, `warnings`, `errors`, and provenance.
+OCR responses also carry `attempt_count` and `selected_attempt_id`.
 
 ### `specialist_result`
 
@@ -246,6 +268,7 @@ document_manifest
 page_started
 route_trace*
 specialist_request*
+specialist_attempt*
 specialist_response*
 specialist_result*
 span*
@@ -279,7 +302,8 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 - `span`, `block`, `table` -> `extracted_text_ref`
 - `route_trace` -> `metadata` or `ocr_ref`
 - `specialist_request` -> `metadata`, `specialist_queue_ref`, or review prompt
-- `specialist_response`, `specialist_result` -> specialist evidence artifacts
+- `specialist_attempt`, `specialist_response`, `specialist_result` ->
+  specialist evidence artifacts
 - `rag_chunk` -> `chunk_index_ref`
 - `debug_asset` -> `external_ref`
 
@@ -288,6 +312,9 @@ pipelines, including Siftable-style `processing_runs` and `stage_artifacts`:
 ```bash
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 --format stream-jsonl
+pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl \
+  --ocr-policy bounded --ocr-psm 6 --ocr-fallback-dpi 300 --ocr-fallback-psm 11
+pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --allow-partial
 pdf-parser extract-adaptive --input encrypted.pdf --password-file .pdf-password --format artifact-jsonl
 pdf-parser extract-adaptive --input doc.pdf --format artifact-jsonl --debug-assets-dir review-assets
 pdf-parser extract-adaptive --input doc.pdf --source-id external-123 \
@@ -299,6 +326,11 @@ pdf-parser extract --adaptive -f artifact-jsonl doc.pdf
 pdf-parser extract --adaptive -f stream-jsonl doc.pdf
 pdf-parser serve --host 0.0.0.0 --port 8080
 ```
+
+Adaptive CLI commands are strict by default: an unavailable, failed, timed-out,
+or invalid specialist causes a non-zero exit after diagnostics are emitted.
+`--allow-partial` is an explicit batch-policy opt-out for callers that persist
+partial artifacts and inspect `has_specialist_failures` themselves.
 
 `inspect extraction` emits the separate `extraction_diagnostics` schema
 (`0.3.0`). Its counters distinguish page discovery, decoded page-content

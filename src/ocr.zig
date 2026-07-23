@@ -14,8 +14,14 @@ pub const tesseract_tsv = @import("ocr/tesseract_tsv.zig");
 
 pub const Backend = types.Backend;
 pub const PageSegMode = types.PageSegMode;
+pub const Policy = types.Policy;
 pub const OcrConfig = types.OcrConfig;
 pub const OcrInput = types.OcrInput;
+pub const AttemptStatus = types.AttemptStatus;
+pub const AttemptStage = types.AttemptStage;
+pub const DiagnosticCode = types.DiagnosticCode;
+pub const RasterizeOutcome = types.RasterizeOutcome;
+pub const RecognitionOutcome = types.RecognitionOutcome;
 
 pub const OcrError = error{
     EmptyImage,
@@ -26,6 +32,8 @@ pub const OcrError = error{
     ImageReadFailed,
     TesseractUnavailable,
     TesseractFailed,
+    TesseractTimeout,
+    InvalidOcrOutput,
     TesseractCBackendDisabled,
 };
 
@@ -37,6 +45,32 @@ pub fn recognizeRegion(
     return switch (config.backend) {
         .tesseract_cli => tesseract_cli.recognizeRegion(allocator, input, config),
         .tesseract_c => tesseract_c.recognizeRegion(allocator, input, config),
+    };
+}
+
+pub fn recognizeRegionDetailed(
+    allocator: std.mem.Allocator,
+    input: OcrInput,
+    config: OcrConfig,
+) !RecognitionOutcome {
+    return switch (config.backend) {
+        .tesseract_cli => tesseract_cli.recognizeRegionDetailed(allocator, input, config),
+        .tesseract_c => blk: {
+            const started_ns = @import("runtime.zig").nanoTimestamp();
+            const spans = tesseract_c.recognizeRegion(allocator, input, config) catch |err| {
+                if (err == error.TesseractCBackendDisabled) break :blk .{
+                    .status = .unavailable,
+                    .duration_ms = elapsedMs(started_ns),
+                    .diagnostic_code = .tesseract_c_backend_disabled,
+                };
+                return err;
+            };
+            break :blk .{
+                .status = if (spans.len > 0) .completed else .empty,
+                .spans = spans,
+                .duration_ms = elapsedMs(started_ns),
+            };
+        },
     };
 }
 
@@ -54,6 +88,12 @@ pub fn freeSpans(allocator: std.mem.Allocator, spans: []layout.TextSpan) void {
     if (spans.len == 0) return;
     for (spans) |span| allocator.free(@constCast(span.text));
     allocator.free(spans);
+}
+
+fn elapsedMs(started_ns: i128) u64 {
+    const runtime = @import("runtime.zig");
+    const elapsed_ns = runtime.nanoTimestamp() - started_ns;
+    return if (elapsed_ns > 0) @intCast(@divTrunc(elapsed_ns, 1_000_000)) else 0;
 }
 
 test {

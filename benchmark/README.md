@@ -36,9 +36,17 @@ pdf-parser benchmark \
   --repeat 3 \
   --hash-output \
   --output benchmark/eval/outputs/profile/large.jsonl
+
+python3 benchmark/eval/ocr_form_quality.py \
+  --parser zig-out/bin/pdf-parser \
+  --output /tmp/pdf-parser-ocr-form-quality.json
 ```
 
 `benchmark/eval/corpus` is the small checked-in correctness corpus.
+The raster-only expenditure form has exact row, date, vendor, amount, and total
+truth. `ocr_form_quality.py` applies absolute token-recall and numeric
+exact-match floors and fails when OCR tools are unavailable; CI installs
+Poppler and Tesseract specifically for this lane.
 `benchmark/eval/large` describes ignored local performance fixtures for
 100-page, 1k-page, image-heavy, object-stream-heavy, encrypted, and table-heavy
 PDFs.

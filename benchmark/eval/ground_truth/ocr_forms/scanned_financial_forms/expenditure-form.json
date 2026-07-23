@@ -1,0 +1,20 @@
+{
+  "doc_id": "expenditure-form",
+  "text": "EXPENDITURE REPORT DATE VENDOR AMOUNT 03/21/2026 ALPHA SUPPLY 1250.00 03/22/2026 BETA MEDIA 675.50 03/23/2026 CITY PRINT 2400.25 03/24/2026 DELTA TRAVEL 120.00 TOTAL 4445.75",
+  "rows": [
+    { "date": "03/21/2026", "vendor": "ALPHA SUPPLY", "amount": "1250.00" },
+    { "date": "03/22/2026", "vendor": "BETA MEDIA", "amount": "675.50" },
+    { "date": "03/23/2026", "vendor": "CITY PRINT", "amount": "2400.25" },
+    { "date": "03/24/2026", "vendor": "DELTA TRAVEL", "amount": "120.00" }
+  ],
+  "total": "4445.75",
+  "floors": {
+    "token_recall": 0.75,
+    "row_count_exact": 1.0,
+    "date_exact_recall": 0.5,
+    "vendor_exact_recall": 1.0,
+    "amount_exact_recall": 1.0,
+    "total_exact_match": 1.0,
+    "numeric_exact_match": 1.0
+  }
+}

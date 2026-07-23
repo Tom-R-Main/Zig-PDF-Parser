@@ -34,9 +34,71 @@ structural_compare = load_module("structural_compare", EVAL_DIR / "structural_co
 font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
 render_oracle = load_module("render_oracle", EVAL_DIR / "render_oracle.py")
 table_compare = load_module("table_compare", EVAL_DIR / "table_compare.py")
+ocr_form_quality = load_module("ocr_form_quality", EVAL_DIR / "ocr_form_quality.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
+    def test_ocr_form_quality_enforces_absolute_numeric_and_row_floors(self) -> None:
+        artifacts = [
+            {
+                "record_type": "document_manifest",
+                "has_specialist_failures": False,
+            },
+            {
+                "record_type": "specialist_attempt",
+                "attempt_id": "attempt-0",
+                "status": "completed",
+                "selected": True,
+                "config": {"dpi": 200, "psm": 6},
+                "quality": {"mean_confidence": 0.9},
+            },
+            {
+                "record_type": "span",
+                "text": "REPORT DATE VENDOR AMOUNT 03/01/2026 ALPHA SUPPLY 10.00 TOTAL 10.00",
+            },
+            {
+                "record_type": "table",
+                "rows": [
+                    {
+                        "cells": [
+                            {"normalized_text": "DATE"},
+                            {"normalized_text": "VENDOR"},
+                            {"normalized_text": "AMOUNT"},
+                        ]
+                    },
+                    {
+                        "cells": [
+                            {"normalized_text": "03/01/2026"},
+                            {"normalized_text": "ALPHA SUPPLY"},
+                            {"normalized_text": "10.00"},
+                        ]
+                    },
+                ],
+            },
+        ]
+        truth = {
+            "doc_id": "form",
+            "text": "REPORT DATE VENDOR AMOUNT 03/01/2026 ALPHA SUPPLY 10.00 TOTAL 10.00",
+            "rows": [{"date": "03/01/2026", "vendor": "ALPHA SUPPLY", "amount": "10.00"}],
+            "total": "10.00",
+            "floors": {
+                "token_recall": 1.0,
+                "row_count_exact": 1.0,
+                "date_exact_recall": 1.0,
+                "vendor_exact_recall": 1.0,
+                "amount_exact_recall": 1.0,
+                "total_exact_match": 1.0,
+                "numeric_exact_match": 1.0,
+            },
+        }
+
+        passing = ocr_form_quality.evaluate(artifacts, truth)
+        self.assertEqual("pass", passing["status"])
+        artifacts[3]["rows"][1]["cells"][2]["normalized_text"] = "18.00"
+        failing = ocr_form_quality.evaluate(artifacts, truth)
+        self.assertEqual("fail", failing["status"])
+        self.assertIn("numeric_exact_match", [item["metric"] for item in failing["failures"]])
+
     def test_compare_ensure_releasefast_rebuilds_even_when_binary_exists(self) -> None:
         calls: list[list[str]] = []
 

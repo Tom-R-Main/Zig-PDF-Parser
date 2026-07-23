@@ -27,6 +27,7 @@ const Fixture = struct {
     render_truth: ?[]const u8 = null,
     visual_case_tags: []const []const u8 = &.{},
     table_case_tags: []const []const u8 = &.{},
+    table_metadata_suffix: []const u8 = "",
     generate: *const fn (std.mem.Allocator) anyerror![]u8,
 };
 
@@ -114,6 +115,40 @@ const fixtures = [_]Fixture{
         \\
         ,
         .generate = testpdf.generateImageOnlyPdf,
+    },
+    .{
+        .category = "scanned_financial_forms",
+        .doc_id = "expenditure-form",
+        .pdf_name = "expenditure-form.pdf",
+        .source_note = "derived redacted-style raster fixture modeling scan-heavy expenditure filings; all names and values are synthetic",
+        .expected_ocr_pages = 1,
+        .expected_table_regions = 5,
+        .truth =
+        \\EXPENDITURE REPORT
+        \\DATE VENDOR AMOUNT
+        \\03/21/2026 ALPHA SUPPLY 1250.00
+        \\03/22/2026 BETA MEDIA 675.50
+        \\03/23/2026 CITY PRINT 2400.25
+        \\03/24/2026 DELTA TRAVEL 120.00
+        \\TOTAL 4445.75
+        \\
+        ,
+        .table_truth =
+        \\[
+        \\  {
+        \\    "rows": [
+        \\      [{"text":"DATE"},{"text":"VENDOR"},{"text":"AMOUNT"}],
+        \\      [{"text":"03/21/2026"},{"text":"ALPHA SUPPLY"},{"text":"1250.00","numeric":{"is_numeric":true,"value":1250.00}}],
+        \\      [{"text":"03/22/2026"},{"text":"BETA MEDIA"},{"text":"675.50","numeric":{"is_numeric":true,"value":675.50}}],
+        \\      [{"text":"03/23/2026"},{"text":"CITY PRINT"},{"text":"2400.25","numeric":{"is_numeric":true,"value":2400.25}}],
+        \\      [{"text":"03/24/2026"},{"text":"DELTA TRAVEL"},{"text":"120.00","numeric":{"is_numeric":true,"value":120.00}}],
+        \\      [{"text":"TOTAL"},{"text":""},{"text":"4445.75","numeric":{"is_numeric":true,"value":4445.75}}]
+        \\    ]
+        \\  }
+        \\]
+        \\
+        ,
+        .generate = testpdf.generateScannedFinancialFormPdf,
     },
     .{
         .category = "financial_tables",
@@ -871,6 +906,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "sec_statement", "continuation", "nested_header", "footnotes", "accounting_notation" },
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"bbox_iou\":0.9,\"cell_text_accuracy\":0.4,\"continuation_accuracy\":1.0,\"numeric_accuracy\":0.5,\"role_accuracy\":0.45}}",
         .generate = testpdf.generateSecStatementStressPdf,
     },
     .{
@@ -926,6 +962,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "bank_statement", "borderless", "accounting_notation", "multi_span_cell" },
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.95,\"numeric_accuracy\":0.95,\"role_accuracy\":0.95}}",
         .generate = testpdf.generateBankStatementStressPdf,
     },
     .{
@@ -988,6 +1025,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "invoice", "multi_span_cell", "footnotes", "accounting_notation" },
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.5,\"numeric_accuracy\":0.65,\"role_accuracy\":0.7}}",
         .generate = testpdf.generateInvoiceStressPdf,
     },
     .{
@@ -1034,6 +1072,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "procurement", "nested_header", "sparse_ruled", "accounting_notation" },
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.19,\"numeric_accuracy\":0.0,\"role_accuracy\":0.7}}",
         .generate = testpdf.generateProcurementStressPdf,
     },
     .{
@@ -1085,6 +1124,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "legal_schedule", "borderless", "multi_span_cell", "accounting_notation" },
+        .table_metadata_suffix = ",\"table_known_unsupported_tools\":[\"pdf-parser\"]",
         .generate = testpdf.generateLegalScheduleStressPdf,
     },
 };
@@ -1318,7 +1358,9 @@ fn writeFixtureMetadata(
         try writeJsonEscaped(writer, tag);
         try writer.writeByte('"');
     }
-    try writer.writeAll("]}\n");
+    try writer.writeByte(']');
+    try writer.writeAll(fixture.table_metadata_suffix);
+    try writer.writeAll("}\n");
 }
 
 fn writeHexLower(out: *[64]u8, bytes: *const [32]u8) void {
