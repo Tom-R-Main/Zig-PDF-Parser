@@ -648,11 +648,25 @@ fn renderReadable(
         }
         try appendNormalizedGlyph(allocator, &output, glyphs[glyph_index].text);
     }
-    trimTrailingWhitespace(&output);
     if (mutable_lines.len > 0) {
         mutable_lines[line_index].text_len = @intCast(output.items.len - mutable_lines[line_index].text_start);
     }
+    trimTrailingWhitespace(&output);
+    synchronizeLineTextRanges(mutable_lines, output.items.len);
     return output.toOwnedSlice(allocator);
+}
+
+fn synchronizeLineTextRanges(lines: []Line, text_len: usize) void {
+    // Final trimming can remove separators assigned to preceding lines and all
+    // bytes from whitespace-only trailing lines. Keep every recorded range
+    // inside the finalized output rather than retaining offsets to trimmed data.
+    for (lines) |*line| {
+        const original_start: usize = @intCast(line.text_start);
+        const synchronized_start = @min(original_start, text_len);
+        const available_len = text_len - synchronized_start;
+        line.text_start = @intCast(synchronized_start);
+        line.text_len = @intCast(@min(@as(usize, @intCast(line.text_len)), available_len));
+    }
 }
 
 fn appendNormalizedGlyph(allocator: std.mem.Allocator, output: *std.ArrayList(u8), text: []const u8) !void {
@@ -991,6 +1005,31 @@ test "explicit and generated whitespace retain provenance" {
     defer result.deinit();
     try std.testing.expectEqualStrings("Hello world", result.text);
     try std.testing.expectEqual(BoundaryProvenance.tj_adjustment, result.boundaries[1].provenance);
+}
+
+test "trailing whitespace-only lines keep text ranges within rendered output" {
+    const glyphs = [_]GlyphSpan{
+        testGlyph("Visible", 72, 700, 36),
+        testGlyph(" ", 72, 682, 4),
+        testGlyph("\t", 72, 664, 4),
+    };
+    var result = try analyze(std.testing.allocator, &glyphs, .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 }, "Visible \t");
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings("Visible", result.text);
+    try std.testing.expectEqual(@as(usize, 3), result.lines.len);
+    try std.testing.expectEqual(@as(u32, 0), result.lines[0].text_start);
+    try std.testing.expectEqual(@as(u32, 7), result.lines[0].text_len);
+    try std.testing.expectEqual(@as(u32, 7), result.lines[1].text_start);
+    try std.testing.expectEqual(@as(u32, 0), result.lines[1].text_len);
+    try std.testing.expectEqual(@as(u32, 7), result.lines[2].text_start);
+    try std.testing.expectEqual(@as(u32, 0), result.lines[2].text_len);
+    for (result.lines) |line| {
+        const text_start: usize = @intCast(line.text_start);
+        const text_len: usize = @intCast(line.text_len);
+        try std.testing.expect(text_start <= result.text.len);
+        try std.testing.expect(text_len <= result.text.len - text_start);
+    }
 }
 
 test "quality comparison reports boundary line token and recall metrics" {
