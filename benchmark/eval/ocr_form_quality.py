@@ -156,6 +156,7 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
         "failures": failures,
         "expected_row_count": len(expected_rows),
         "actual_row_count": len(actual_rows),
+        "actual_rows": actual_rows,
         "attempts": attempts,
     }
 
