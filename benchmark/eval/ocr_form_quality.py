@@ -171,8 +171,7 @@ def main() -> int:
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         Path(args.output).write_text(rendered, encoding="utf-8")
-    else:
-        print(rendered, end="")
+    print(rendered, end="")
     return 0 if report["status"] == "pass" else 1
 
 
