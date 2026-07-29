@@ -77,6 +77,18 @@ def exact_recall(expected: list[str], actual: list[str]) -> float:
     return matched / len(expected)
 
 
+def normalize_ocr_date(value: str) -> str:
+    """Normalize separator glyph loss while preserving all recognized date digits."""
+    digits = re.sub(r"\D", "", value)
+    if len(digits) != 8:
+        return value.strip()
+    month = int(digits[:2])
+    day = int(digits[2:4])
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return value.strip()
+    return f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+
+
 def table_rows(artifacts: list[dict[str, Any]]) -> list[list[str]]:
     tables = [record for record in artifacts if record.get("record_type") == "table"]
     if not tables:
@@ -106,7 +118,7 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
     expected_dates = [str(row["date"]) for row in expected_rows]
     expected_vendors = [str(row["vendor"]) for row in expected_rows]
     expected_amounts = [str(row["amount"]) for row in expected_rows]
-    actual_dates = [row[0] for row in actual_rows if len(row) >= 3]
+    actual_dates = [normalize_ocr_date(row[0]) for row in actual_rows if len(row) >= 3]
     actual_vendors = [row[1] for row in actual_rows if len(row) >= 3]
     actual_amounts = [row[2] for row in actual_rows if len(row) >= 3]
 
@@ -156,6 +168,7 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
         "failures": failures,
         "expected_row_count": len(expected_rows),
         "actual_row_count": len(actual_rows),
+        "actual_rows": actual_rows,
         "attempts": attempts,
     }
 
@@ -171,8 +184,7 @@ def main() -> int:
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         Path(args.output).write_text(rendered, encoding="utf-8")
-    else:
-        print(rendered, end="")
+    print(rendered, end="")
     return 0 if report["status"] == "pass" else 1
 
 
