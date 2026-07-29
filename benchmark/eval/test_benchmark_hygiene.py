@@ -99,6 +99,11 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual("fail", failing["status"])
         self.assertIn("numeric_exact_match", [item["metric"] for item in failing["failures"]])
 
+    def test_ocr_form_quality_normalizes_separator_glyph_loss_in_dates(self) -> None:
+        self.assertEqual("03/21/2026", ocr_form_quality.normalize_ocr_date("0321/2026"))
+        self.assertEqual("03/22/2026", ocr_form_quality.normalize_ocr_date("03°22/2026"))
+        self.assertEqual("not-a-date", ocr_form_quality.normalize_ocr_date("not-a-date"))
+
     def test_compare_ensure_releasefast_rebuilds_even_when_binary_exists(self) -> None:
         calls: list[list[str]] = []
 
