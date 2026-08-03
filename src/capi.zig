@@ -377,6 +377,41 @@ pub const CTextSpan = extern struct {
     mcid: i32,
 };
 
+fn buildCTextSpans(allocator: std.mem.Allocator, spans: []const zpdf.TextSpan) ![]CTextSpan {
+    const c_spans = try allocator.alloc(CTextSpan, spans.len);
+    var copied: usize = 0;
+    errdefer {
+        for (c_spans[0..copied]) |span| {
+            if (span.text_len > 0) {
+                const ptr: [*]u8 = @ptrCast(@constCast(span.text));
+                allocator.free(ptr[0..span.text_len]);
+            }
+        }
+        allocator.free(c_spans);
+    }
+
+    for (spans, c_spans) |span, *c_span| {
+        const text_copy = try allocator.dupe(u8, span.text);
+        c_span.* = .{
+            .x0 = span.x0,
+            .y0 = span.y0,
+            .x1 = span.x1,
+            .y1 = span.y1,
+            .text = text_copy.ptr,
+            .text_len = text_copy.len,
+            .font_size = span.font_size,
+            .page_index = span.page_index,
+            .source_kind = @intFromEnum(span.source),
+            .confidence = span.confidence,
+            .block_id = optionalU32ToC(span.block_id),
+            .line_id = optionalU32ToC(span.line_id),
+            .mcid = span.mcid orelse -1,
+        };
+        copied += 1;
+    }
+    return c_spans;
+}
+
 export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count: *usize) ?[*]CTextSpan {
     if (handle) |h| {
         const doc: *zpdf.Document = @ptrCast(@alignCast(h));
@@ -389,37 +424,7 @@ export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count
             return null;
         }
 
-        const c_spans = c_allocator.alloc(CTextSpan, spans.len) catch return null;
-        var copied: usize = 0;
-        errdefer {
-            for (0..copied) |i| {
-                const span = c_spans[i];
-                if (span.text_len > 0) {
-                    const ptr: [*]u8 = @ptrCast(@constCast(span.text));
-                    c_allocator.free(ptr[0..span.text_len]);
-                }
-            }
-            c_allocator.free(c_spans);
-        }
-        for (spans, 0..) |span, i| {
-            const text_copy = c_allocator.dupe(u8, span.text) catch return null;
-            c_spans[i] = .{
-                .x0 = span.x0,
-                .y0 = span.y0,
-                .x1 = span.x1,
-                .y1 = span.y1,
-                .text = text_copy.ptr,
-                .text_len = text_copy.len,
-                .font_size = span.font_size,
-                .page_index = span.page_index,
-                .source_kind = @intFromEnum(span.source),
-                .confidence = span.confidence,
-                .block_id = optionalU32ToC(span.block_id),
-                .line_id = optionalU32ToC(span.line_id),
-                .mcid = span.mcid orelse -1,
-            };
-            copied = i + 1;
-        }
+        const c_spans = buildCTextSpans(c_allocator, spans) catch return null;
 
         out_count.* = spans.len;
         return c_spans.ptr;
@@ -981,4 +986,20 @@ test "adaptive C ABI reports invalid memory input" {
     try std.testing.expectEqual(@as(c_int, @intFromEnum(PdfParserStatus.invalid_argument)), status);
     try std.testing.expect(result.error_message != null);
     try std.testing.expect(std.mem.indexOf(u8, result.error_message.?[0..result.error_len], "missing data") != null);
+}
+
+fn cTextSpanAllocationProbe(allocator: std.mem.Allocator) !void {
+    const spans = [_]zpdf.TextSpan{
+        zpdf.TextSpan.init(.{ .bbox = .{}, .text = "first" }),
+        zpdf.TextSpan.init(.{ .bbox = .{}, .text = "second" }),
+    };
+    const c_spans = try buildCTextSpans(allocator, &spans);
+    defer {
+        for (c_spans) |span| allocator.free(@constCast(span.text)[0..span.text_len]);
+        allocator.free(c_spans);
+    }
+}
+
+test "C bounds builder releases partial output on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, cTextSpanAllocationProbe, .{});
 }

@@ -272,8 +272,9 @@ fn runBenchmark(allocator: std.mem.Allocator, options: Options) !BenchmarkResult
     while (line_it.next()) |raw_line| {
         const entry = try eval_runner.parseManifestLine(raw_line) orelse continue;
         for (lanes.items) |lane| {
+            try results.ensureUnusedCapacity(allocator, 1);
             const result = try evaluateLane(allocator, lane, entry, expected_counts, options);
-            try results.append(allocator, result);
+            results.appendAssumeCapacity(result);
         }
     }
 
@@ -588,10 +589,16 @@ fn evaluateCommandLane(
         .prediction = run.stdout,
         .ground_truth = truth,
     });
+    const doc_id = try allocator.dupe(u8, entry.doc_id);
+    errdefer allocator.free(doc_id);
+    const category = try allocator.dupe(u8, @tagName(entry.category));
+    errdefer allocator.free(category);
+    const tool_id = try allocator.dupe(u8, lane.id);
+    errdefer allocator.free(tool_id);
     return .{
-        .doc_id = try allocator.dupe(u8, entry.doc_id),
-        .category = try allocator.dupe(u8, @tagName(entry.category)),
-        .tool_id = try allocator.dupe(u8, lane.id),
+        .doc_id = doc_id,
+        .category = category,
+        .tool_id = tool_id,
         .status = "ok",
         .metrics = .{
             .cer = text_metrics.cer,
@@ -614,14 +621,18 @@ fn buildCommandArgv(allocator: std.mem.Allocator, template: []const u8, pdf_path
     var saw_pdf = false;
     var tokens = std.mem.tokenizeAny(u8, template, " \t\r\n");
     while (tokens.next()) |token| {
+        try argv.ensureUnusedCapacity(allocator, 1);
         if (std.mem.eql(u8, token, "{pdf}")) {
-            try argv.append(allocator, try allocator.dupe(u8, pdf_path));
+            argv.appendAssumeCapacity(try allocator.dupe(u8, pdf_path));
             saw_pdf = true;
         } else {
-            try argv.append(allocator, try allocator.dupe(u8, token));
+            argv.appendAssumeCapacity(try allocator.dupe(u8, token));
         }
     }
-    if (!saw_pdf) try argv.append(allocator, try allocator.dupe(u8, pdf_path));
+    if (!saw_pdf) {
+        try argv.ensureUnusedCapacity(allocator, 1);
+        argv.appendAssumeCapacity(try allocator.dupe(u8, pdf_path));
+    }
     return argv.toOwnedSlice(allocator);
 }
 
@@ -632,10 +643,17 @@ fn skippedResult(
     reason: []u8,
     elapsed_ns: i128,
 ) !DocumentResult {
+    errdefer allocator.free(reason);
+    const doc_id = try allocator.dupe(u8, entry.doc_id);
+    errdefer allocator.free(doc_id);
+    const category = try allocator.dupe(u8, @tagName(entry.category));
+    errdefer allocator.free(category);
+    const tool_id = try allocator.dupe(u8, lane_id);
+    errdefer allocator.free(tool_id);
     return .{
-        .doc_id = try allocator.dupe(u8, entry.doc_id),
-        .category = try allocator.dupe(u8, @tagName(entry.category)),
-        .tool_id = try allocator.dupe(u8, lane_id),
+        .doc_id = doc_id,
+        .category = category,
+        .tool_id = tool_id,
         .status = "skipped",
         .reason = reason,
         .duration_ms = nsToMs(elapsed_ns),
@@ -654,10 +672,16 @@ fn parseEvalJsonlResult(
     const object = parsed.value.object;
     const metrics_object = object.get("metrics").?.object;
     const pages = jsonU32(object.get("pages"));
+    const doc_id = try allocator.dupe(u8, object.get("doc_id").?.string);
+    errdefer allocator.free(doc_id);
+    const category = try allocator.dupe(u8, object.get("category").?.string);
+    errdefer allocator.free(category);
+    const tool_id = try allocator.dupe(u8, lane_id);
+    errdefer allocator.free(tool_id);
     return .{
-        .doc_id = try allocator.dupe(u8, object.get("doc_id").?.string),
-        .category = try allocator.dupe(u8, object.get("category").?.string),
-        .tool_id = try allocator.dupe(u8, lane_id),
+        .doc_id = doc_id,
+        .category = category,
+        .tool_id = tool_id,
         .status = "ok",
         .pages = pages,
         .metrics = .{
@@ -777,9 +801,13 @@ fn appendRegressions(
             const baseline_value = metricValue(baseline.metrics, spec.name);
             if (candidate_value == null or baseline_value == null) {
                 if (spec.required) {
-                    try regressions.append(allocator, .{
-                        .doc_id = try allocator.dupe(u8, candidate.doc_id),
-                        .category = try allocator.dupe(u8, candidate.category),
+                    try regressions.ensureUnusedCapacity(allocator, 1);
+                    const doc_id = try allocator.dupe(u8, candidate.doc_id);
+                    errdefer allocator.free(doc_id);
+                    const category = try allocator.dupe(u8, candidate.category);
+                    regressions.appendAssumeCapacity(.{
+                        .doc_id = doc_id,
+                        .category = category,
                         .metric = spec.name,
                         .baseline_value = baseline_value,
                         .candidate_value = candidate_value,
@@ -797,9 +825,13 @@ fn appendRegressions(
                 .higher => delta < -spec.max_regression,
             };
             if (!regressed) continue;
-            try regressions.append(allocator, .{
-                .doc_id = try allocator.dupe(u8, candidate.doc_id),
-                .category = try allocator.dupe(u8, candidate.category),
+            try regressions.ensureUnusedCapacity(allocator, 1);
+            const doc_id = try allocator.dupe(u8, candidate.doc_id);
+            errdefer allocator.free(doc_id);
+            const category = try allocator.dupe(u8, candidate.category);
+            regressions.appendAssumeCapacity(.{
+                .doc_id = doc_id,
+                .category = category,
                 .metric = spec.name,
                 .baseline_value = baseline_value,
                 .candidate_value = candidate_value,
@@ -1232,6 +1264,65 @@ fn freeStringList(allocator: std.mem.Allocator, values: []const []const u8) void
 
 fn nsToMs(ns: i128) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+}
+
+fn benchmarkBuilderAllocationProbe(allocator: std.mem.Allocator) !void {
+    const argv = try buildCommandArgv(allocator, "tool --input {pdf}", "fixture.pdf");
+    defer freeStringList(allocator, argv);
+
+    const entry = (try eval_runner.parseManifestLine(
+        "clean_born_digital\tdoc\tfixture.pdf\ttruth.txt",
+    )).?;
+    const reason = try allocator.dupe(u8, "not available");
+    var skipped = try skippedResult(allocator, entry, "tool", reason, 0);
+    defer skipped.deinit(allocator);
+
+    const jsonl =
+        \\{"doc_id":"doc","category":"clean_born_digital","pages":1,"metrics":{}}
+    ;
+    var parsed = try parseEvalJsonlResult(allocator, jsonl, "tool", 0);
+    defer parsed.deinit(allocator);
+}
+
+test "benchmark builders are safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        benchmarkBuilderAllocationProbe,
+        .{},
+    );
+}
+
+fn benchmarkRegressionAllocationProbe(allocator: std.mem.Allocator) !void {
+    const results = [_]DocumentResult{
+        .{
+            .doc_id = @constCast("doc"),
+            .category = @constCast("clean_born_digital"),
+            .tool_id = @constCast("baseline"),
+            .status = "ok",
+            .metrics = .{ .token_f1 = 0.99, .cer = 0.01 },
+        },
+        .{
+            .doc_id = @constCast("doc"),
+            .category = @constCast("clean_born_digital"),
+            .tool_id = @constCast("candidate"),
+            .status = "ok",
+            .metrics = .{ .token_f1 = 0.90, .cer = 0.08 },
+        },
+    };
+    var regressions: std.ArrayList(Regression) = .empty;
+    defer {
+        for (regressions.items) |*regression| regression.deinit(allocator);
+        regressions.deinit(allocator);
+    }
+    try appendRegressions(allocator, &regressions, &results, &default_specs);
+}
+
+test "benchmark regression ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        benchmarkRegressionAllocationProbe,
+        .{},
+    );
 }
 
 test "benchmark threshold regression directions" {

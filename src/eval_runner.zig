@@ -1332,7 +1332,8 @@ fn extractJsonStringValues(allocator: std.mem.Allocator, json: []const u8, needl
             }
         }
 
-        try cells.append(allocator, try text.toOwnedSlice(allocator));
+        try cells.ensureUnusedCapacity(allocator, 1);
+        cells.appendAssumeCapacity(try text.toOwnedSlice(allocator));
         cursor = pos;
     }
 

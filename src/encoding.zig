@@ -1520,7 +1520,7 @@ fn parseBfChar(
             // Multi-character mapping (ligatures like fi, fl, ffi, ffl)
             // Convert UTF-16BE to UTF-8 and store in cmap_multi
             const utf8_str = utf16beToUtf8(allocator, dst_buf[0..dst_result.byte_count]) catch continue;
-            try encoding.to_unicode.multi_map.put(allocator, src.value, utf8_str);
+            try putOwnedMultiMapping(allocator, &encoding.to_unicode.multi_map, src.value, utf8_str);
         } else {
             // Single character mapping
             var dst: u32 = 0;
@@ -1601,7 +1601,7 @@ fn parseBfRange(
                         src += 1;
                         continue;
                     };
-                    try encoding.to_unicode.multi_map.put(allocator, src, utf8_str);
+                    try putOwnedMultiMapping(allocator, &encoding.to_unicode.multi_map, src, utf8_str);
                 } else {
                     var dst: u32 = 0;
                     for (dst_buf[0..dst_result.byte_count]) |b| {
@@ -1618,6 +1618,39 @@ fn parseBfRange(
             skipToNextEntry(data, pos);
         }
     }
+}
+
+fn putOwnedMultiMapping(
+    allocator: std.mem.Allocator,
+    map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    source: u32,
+    value: []u8,
+) !void {
+    errdefer allocator.free(value);
+    if (try map.fetchPut(allocator, source, value)) |previous| {
+        allocator.free(previous.value);
+    }
+}
+
+fn multiMappingReplacementAllocationProbe(allocator: std.mem.Allocator) !void {
+    var map: std.AutoHashMapUnmanaged(u32, []const u8) = .{};
+    defer {
+        var iterator = map.iterator();
+        while (iterator.next()) |entry| allocator.free(entry.value_ptr.*);
+        map.deinit(allocator);
+    }
+
+    try putOwnedMultiMapping(allocator, &map, 0x66, try allocator.dupe(u8, "fi"));
+    try putOwnedMultiMapping(allocator, &map, 0x66, try allocator.dupe(u8, "fl"));
+    try std.testing.expectEqualStrings("fl", map.get(0x66).?);
+}
+
+test "multi-character CMap replacement is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        multiMappingReplacementAllocationProbe,
+        .{},
+    );
 }
 
 fn parseHexToken(data: []const u8, pos: *usize) ?u32 {

@@ -278,7 +278,10 @@ pub const Document = struct {
             @compileError("openFromMemoryOwned is not available on WASM. Use openFromMemory instead.");
         }
 
-        const doc = try allocator.create(Document);
+        const doc = allocator.create(Document) catch |err| {
+            if (comptime !is_windows) std.posix.munmap(data);
+            return err;
+        };
 
         doc.* = .{
             .data = data,
@@ -305,7 +308,10 @@ pub const Document = struct {
 
     /// Open from owned allocated memory (Windows - will be freed on close via allocator.free)
     fn openFromMemoryOwnedAlloc(allocator: std.mem.Allocator, data: []align(std.heap.page_size_min) u8, config: ErrorConfig) !*Document {
-        const doc = try allocator.create(Document);
+        const doc = allocator.create(Document) catch |err| {
+            allocator.free(data);
+            return err;
+        };
 
         doc.* = .{
             .data = data,
@@ -2366,9 +2372,10 @@ pub const Document = struct {
                     // Build context snippet (~50 chars before/after)
                     const ctx_start = if (abs_offset > 50) abs_offset - 50 else 0;
                     const ctx_end = @min(abs_offset + query.len + 50, page_text.len);
+                    try results.ensureUnusedCapacity(allocator, 1);
                     const context = try allocator.dupe(u8, page_text[ctx_start..ctx_end]);
 
-                    try results.append(allocator, .{
+                    results.appendAssumeCapacity(.{
                         .page = page_idx,
                         .offset = abs_offset,
                         .context = context,
@@ -5046,6 +5053,20 @@ test "allocated memory path cleanup" {
 
     // Verify document parsed correctly
     try std.testing.expectEqual(@as(usize, 1), doc.pageCount());
+}
+
+test "owned allocated input is consumed when document allocation fails" {
+    const data = try std.testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        std.heap.page_size_min,
+    );
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Document.openFromMemoryOwnedAlloc(failing.allocator(), data, ErrorConfig.default()),
+    );
 }
 
 fn searchReportOwnershipProbe(allocator: std.mem.Allocator) !void {

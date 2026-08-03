@@ -291,8 +291,9 @@ pub const MarkdownRenderer = struct {
             if (i > 0 and y_diff > elem_line_threshold) {
                 // Flush current line
                 if (current_line.items.len > 0) {
+                    try elements.ensureUnusedCapacity(self.allocator, 1);
                     const text = try self.allocator.dupe(u8, current_line.items);
-                    try elements.append(self.allocator, .{
+                    elements.appendAssumeCapacity(.{
                         .kind = current_kind,
                         .text = text,
                         .indent_level = self.indentLevel(current_indent),
@@ -364,8 +365,9 @@ pub const MarkdownRenderer = struct {
 
         // Flush final line
         if (current_line.items.len > 0) {
+            try elements.ensureUnusedCapacity(self.allocator, 1);
             const text = try self.allocator.dupe(u8, current_line.items);
-            try elements.append(self.allocator, .{
+            elements.appendAssumeCapacity(.{
                 .kind = current_kind,
                 .text = text,
                 .indent_level = self.indentLevel(current_indent),
@@ -759,4 +761,23 @@ test "bullet patterns" {
     try std.testing.expect(renderer.isBulletText("- Item"));
     try std.testing.expect(renderer.isBulletText("* Item"));
     try std.testing.expect(!renderer.isBulletText("1. Item"));
+}
+
+fn markdownElementAllocationProbe(allocator: std.mem.Allocator) !void {
+    const spans = [_]TextSpan{
+        .{ .x0 = 72, .y0 = 700, .x1 = 200, .y1 = 724, .text = "Title", .font_size = 24 },
+        .{ .x0 = 72, .y0 = 650, .x1 = 400, .y1 = 662, .text = "Body text here.", .font_size = 12 },
+    };
+    var renderer = MarkdownRenderer.init(allocator, .{});
+    renderer.analyzeFontSizes(&spans);
+    const elements = try renderer.spansToElements(&spans);
+    defer renderer.freeElements(elements);
+}
+
+test "markdown element ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        markdownElementAllocationProbe,
+        .{},
+    );
 }

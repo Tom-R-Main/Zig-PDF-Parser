@@ -202,6 +202,41 @@ pub const TextSpan = extern struct {
     mcid: i32,
 };
 
+fn buildTextSpans(allocator: std.mem.Allocator, spans: []const zpdf.TextSpan) ![]TextSpan {
+    const output = try allocator.alloc(TextSpan, spans.len);
+    var copied: usize = 0;
+    errdefer {
+        for (output[0..copied]) |span| {
+            if (span.text_len > 0) {
+                const text_ptr: [*]u8 = @ptrCast(@constCast(span.text_ptr));
+                allocator.free(text_ptr[0..span.text_len]);
+            }
+        }
+        allocator.free(output);
+    }
+
+    for (spans, output) |span, *target| {
+        const text_copy = try allocator.dupe(u8, span.text);
+        target.* = .{
+            .x0 = span.x0,
+            .y0 = span.y0,
+            .x1 = span.x1,
+            .y1 = span.y1,
+            .text_ptr = text_copy.ptr,
+            .text_len = text_copy.len,
+            .font_size = span.font_size,
+            .page_index = span.page_index,
+            .source_kind = @intFromEnum(span.source),
+            .confidence = span.confidence,
+            .block_id = optionalU32ToC(span.block_id),
+            .line_id = optionalU32ToC(span.line_id),
+            .mcid = span.mcid orelse -1,
+        };
+        copied += 1;
+    }
+    return output;
+}
+
 /// Extract text with bounding boxes from a page
 /// Returns pointer to TextSpan array, sets out_count to number of spans
 /// Caller must free with zpdf_free_bounds
@@ -218,37 +253,7 @@ export fn zpdf_extract_bounds(handle: i32, page_num: i32, out_count: *usize) ?[*
             return null;
         }
 
-        const c_spans = wasm_allocator.alloc(TextSpan, spans.len) catch return null;
-        var copied: usize = 0;
-        errdefer {
-            for (0..copied) |i| {
-                const span = c_spans[i];
-                if (span.text_len > 0) {
-                    const text_ptr: [*]u8 = @ptrCast(@constCast(span.text_ptr));
-                    wasm_allocator.free(text_ptr[0..span.text_len]);
-                }
-            }
-            wasm_allocator.free(c_spans);
-        }
-        for (spans, 0..) |span, i| {
-            const text_copy = wasm_allocator.dupe(u8, span.text) catch return null;
-            c_spans[i] = .{
-                .x0 = span.x0,
-                .y0 = span.y0,
-                .x1 = span.x1,
-                .y1 = span.y1,
-                .text_ptr = text_copy.ptr,
-                .text_len = text_copy.len,
-                .font_size = span.font_size,
-                .page_index = span.page_index,
-                .source_kind = @intFromEnum(span.source),
-                .confidence = span.confidence,
-                .block_id = optionalU32ToC(span.block_id),
-                .line_id = optionalU32ToC(span.line_id),
-                .mcid = span.mcid orelse -1,
-            };
-            copied = i + 1;
-        }
+        const c_spans = buildTextSpans(wasm_allocator, spans) catch return null;
 
         out_count.* = spans.len;
         return c_spans.ptr;

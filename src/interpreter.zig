@@ -567,9 +567,12 @@ pub const SpanCollector = struct {
         const advance = self.scaledAdvance(decoded);
         const bbox = self.currentGlyphBBox(advance, decoded);
         const text = try self.allocator.dupe(u8, decoded.utf8_text);
-        errdefer self.allocator.free(text);
+        var glyph_transferred = false;
+        errdefer if (!glyph_transferred) self.allocator.free(text);
         const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
-        errdefer if (font_name) |name| self.allocator.free(name);
+        errdefer if (!glyph_transferred) {
+            if (font_name) |name| self.allocator.free(name);
+        };
 
         var source_bytes: [4]u8 = .{ 0, 0, 0, 0 };
         const source_len = @min(decoded.source_bytes.len, source_bytes.len);
@@ -595,6 +598,7 @@ pub const SpanCollector = struct {
             .mcid = self.current_mcid,
             .writing_mode = decoded.writing_mode,
         });
+        glyph_transferred = true;
 
         try self.appendCharsForGlyph(glyph_index, bbox, decoded.source_code, decoded.utf8_text, mapping_source, unicode_map_error, false, has_actual_text, decoded.writing_mode);
         if (!has_actual_text) {
@@ -718,9 +722,12 @@ pub const SpanCollector = struct {
         else
             transformedBounds(self.current_text_matrix, .{ .x0 = 0, .y0 = 0, .x1 = advance, .y1 = self.current_font_size });
         const text = try self.allocator.dupe(u8, " ");
-        errdefer self.allocator.free(text);
+        var glyph_transferred = false;
+        errdefer if (!glyph_transferred) self.allocator.free(text);
         const font_name = if (self.current_font_name) |name| try self.allocator.dupe(u8, name) else null;
-        errdefer if (font_name) |name| self.allocator.free(name);
+        errdefer if (!glyph_transferred) {
+            if (font_name) |name| self.allocator.free(name);
+        };
         const glyph_index: u32 = @intCast(self.glyphs.items.len);
         try self.glyphs.append(self.allocator, .{
             .page_index = self.page_index,
@@ -735,6 +742,7 @@ pub const SpanCollector = struct {
             .mcid = self.current_mcid,
             .writing_mode = self.current_writing_mode,
         });
+        glyph_transferred = true;
         try self.appendCharsForGlyph(glyph_index, bbox, ' ', " ", .unresolved, false, true, self.current_actual_text != null, self.current_writing_mode);
     }
 
@@ -1519,4 +1527,29 @@ test "span collector records generated gaps and vertical glyph movement" {
         if (char.generated and std.mem.eql(u8, char.text, " ")) saw_generated = true;
     }
     try std.testing.expect(saw_generated);
+}
+
+fn spanCollectorAllocationProbe(allocator: std.mem.Allocator) !void {
+    var collector = SpanCollector.init(allocator, 0);
+    defer collector.deinit();
+
+    collector.setPosition(50, 300);
+    collector.setFont("F1", 12, true);
+    try collector.writeDecodedGlyph(.{
+        .source_code = 0x41,
+        .source_bytes = "A",
+        .bytes_consumed = 1,
+        .utf8_text = "AB",
+        .glyph_width = 1000,
+    });
+    try collector.advanceByTextAdjustment(6);
+    try collector.flush();
+}
+
+test "span collector ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        spanCollectorAllocationProbe,
+        .{},
+    );
 }

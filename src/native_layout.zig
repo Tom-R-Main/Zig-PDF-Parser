@@ -302,8 +302,9 @@ pub fn buildLineSpans(
             text.deinit(allocator);
             continue;
         }
+        try spans.ensureUnusedCapacity(allocator, 1);
         const owned_text = try text.toOwnedSlice(allocator);
-        try spans.append(allocator, layout.TextSpan.init(.{
+        spans.appendAssumeCapacity(layout.TextSpan.init(.{
             .page_index = page_index,
             .bbox = line.bbox,
             .text = owned_text,
@@ -1048,4 +1049,34 @@ test "quality gate reports extreme token and line rates" {
     try std.testing.expect(metrics.max_token_bytes > 160);
     try std.testing.expectEqual(@as(f64, 1), metrics.extreme_token_length_rate);
     try std.testing.expect(!passesQualityGate(metrics, long_token.len));
+}
+
+fn lineSpanAllocationProbe(allocator: std.mem.Allocator) !void {
+    const glyphs = [_]GlyphSpan{
+        testGlyph("Hello", 72, 700, 26),
+        testGlyph("world", 102, 700, 27),
+        testGlyph("Second", 72, 682, 36),
+        testGlyph("line", 112, 682, 18),
+    };
+    var result = try analyze(
+        allocator,
+        &glyphs,
+        .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        "Helloworld\nSecondline",
+    );
+    defer result.deinit();
+
+    const spans = try buildLineSpans(allocator, &glyphs, &result, 0);
+    defer {
+        for (spans) |span| allocator.free(@constCast(span.text));
+        allocator.free(spans);
+    }
+}
+
+test "native line span ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        lineSpanAllocationProbe,
+        .{},
+    );
 }

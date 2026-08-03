@@ -328,12 +328,16 @@ pub fn extractDocument(
     defer trace_records.deinit(allocator);
 
     var ocr_attempts: std.ArrayList(OcrAttempt) = .empty;
-    defer ocr_attempts.deinit(allocator);
-    errdefer freeOcrAttempts(allocator, ocr_attempts.items);
+    defer {
+        freeOcrAttemptItems(allocator, ocr_attempts.items);
+        ocr_attempts.deinit(allocator);
+    }
 
     var tables: std.ArrayList(layout.TableGrid) = .empty;
-    defer tables.deinit(allocator);
-    errdefer freeOwnedTables(allocator, tables.items);
+    defer {
+        freeOwnedTableItems(allocator, tables.items);
+        tables.deinit(allocator);
+    }
 
     const form_fields = try collectFormFields(allocator, document);
     errdefer freeFormFields(allocator, form_fields);
@@ -358,8 +362,9 @@ pub fn extractDocument(
 
         var geometry = try document.extractNativePageGeometryFromContent(page_idx, allocator, content_scratch_allocator, page_content);
         defer geometry.deinit();
+        try native_pages.ensureUnusedCapacity(allocator, 1);
         const spans = try cloneTextSpans(allocator, geometry.spans);
-        try native_pages.append(allocator, spans);
+        native_pages.appendAssumeCapacity(spans);
 
         const raw_recall_text = document.extractTextRawRecall(page_idx, allocator) catch try allocator.alloc(u8, 0);
         defer allocator.free(raw_recall_text);
@@ -375,6 +380,7 @@ pub fn extractDocument(
             );
         }
 
+        try layout_pages.ensureUnusedCapacity(allocator, 1);
         var readable_spans: []layout.TextSpan = undefined;
         if (native_result.quality.quality_pass) {
             readable_spans = try native_layout.buildLineSpans(allocator, geometry.glyphs, &native_result, page_index);
@@ -386,7 +392,7 @@ pub fn extractDocument(
             // quality result as a hard routing signal below.
             readable_spans = try native_layout.buildLineSpans(allocator, geometry.glyphs, &native_result, page_index);
         }
-        try layout_pages.append(allocator, readable_spans);
+        layout_pages.appendAssumeCapacity(readable_spans);
         try trace_records.append(allocator, .{
             .page_index = page_index,
             .stage = .native_spans,
@@ -512,6 +518,7 @@ pub fn extractDocument(
                     const raw_ocr_spans = recognition.spans;
                     recognition.spans = &.{};
                     const candidate_spans = try filterOcrSpansForPage(allocator, raw_ocr_spans, spans, image_boxes);
+                    errdefer ocr.freeSpans(allocator, candidate_spans);
                     const recorded_index = try appendOcrAttempt(allocator, &ocr_attempts, attempt_config, .{
                         .attempt_index = @intCast(attempt_index),
                         .page_index = page_index,
@@ -573,13 +580,15 @@ pub fn extractDocument(
         if (page_ocr_spans == null) reorderSpansToLayoutOrder(spans, page_layout.spans);
 
         for (page_layout.tables) |table| {
-            try tables.append(allocator, try copyTableGrid(allocator, table));
+            try tables.ensureUnusedCapacity(allocator, 1);
+            tables.appendAssumeCapacity(try copyTableGrid(allocator, table));
         }
 
         if (page_layout.tables.len > 0 and page_view_quality_pass) {
+            try layout_pages.ensureUnusedCapacity(allocator, 1);
             const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
             if (layout_spans.len > 0) {
-                try layout_pages.append(allocator, layout_spans);
+                layout_pages.appendAssumeCapacity(layout_spans);
                 try layers.append(allocator, .{
                     .spans = layout_spans,
                     .trust = 1.0,
@@ -838,6 +847,11 @@ fn copyTableRow(allocator: std.mem.Allocator, source: layout.TableRow) !layout.T
 }
 
 fn freeOwnedTables(allocator: std.mem.Allocator, tables: []layout.TableGrid) void {
+    freeOwnedTableItems(allocator, tables);
+    allocator.free(tables);
+}
+
+fn freeOwnedTableItems(allocator: std.mem.Allocator, tables: []layout.TableGrid) void {
     for (tables) |table| {
         for (table.rows) |row| {
             for (row.cells) |cell| allocator.free(@constCast(cell.text));
@@ -845,7 +859,6 @@ fn freeOwnedTables(allocator: std.mem.Allocator, tables: []layout.TableGrid) voi
         }
         allocator.free(table.rows);
     }
-    allocator.free(tables);
 }
 
 fn linkLogicalTables(tables: []layout.TableGrid) void {
@@ -960,6 +973,8 @@ fn filterOcrSpansForPage(
 ) ![]layout.TextSpan {
     if (ocr_spans.len == 0 or native_spans.len == 0 or images.len == 0) return ocr_spans;
 
+    var input_owned = true;
+    errdefer if (input_owned) ocr.freeSpans(allocator, ocr_spans);
     var kept = try std.ArrayList(layout.TextSpan).initCapacity(allocator, ocr_spans.len);
     errdefer {
         for (kept.items) |span| allocator.free(@constCast(span.text));
@@ -968,12 +983,13 @@ fn filterOcrSpansForPage(
 
     for (ocr_spans) |span| {
         if (spanOverlapsAnyImage(span, images)) {
-            try kept.append(allocator, span);
+            kept.appendAssumeCapacity(span);
         } else {
             allocator.free(@constCast(span.text));
         }
     }
     allocator.free(ocr_spans);
+    input_owned = false;
     return kept.toOwnedSlice(allocator);
 }
 
@@ -1717,11 +1733,15 @@ fn sanitizeDiagnosticExcerpt(allocator: std.mem.Allocator, source: []const u8, l
 }
 
 fn freeOcrAttempts(allocator: std.mem.Allocator, attempts: []OcrAttempt) void {
+    freeOcrAttemptItems(allocator, attempts);
+    allocator.free(attempts);
+}
+
+fn freeOcrAttemptItems(allocator: std.mem.Allocator, attempts: []OcrAttempt) void {
     for (attempts) |attempt| {
         allocator.free(attempt.lang);
         allocator.free(attempt.stderr_excerpt);
     }
-    allocator.free(attempts);
 }
 
 fn cloneTextSpans(allocator: std.mem.Allocator, source: []const layout.TextSpan) ![]layout.TextSpan {
@@ -1936,4 +1956,58 @@ test "mixed native OCR filter keeps image OCR and drops page furniture OCR" {
 
     try std.testing.expectEqual(@as(usize, 1), filtered.len);
     try std.testing.expectEqualStrings("scan text", filtered[0].text);
+}
+
+fn adaptiveOwnedListCleanupAllocationProbe(allocator: std.mem.Allocator) !void {
+    var attempts: std.ArrayList(OcrAttempt) = .empty;
+    defer {
+        freeOcrAttemptItems(allocator, attempts.items);
+        attempts.deinit(allocator);
+    }
+    _ = try appendOcrAttempt(allocator, &attempts, .{}, .{
+        .attempt_index = 0,
+        .page_index = 0,
+        .status = .not_invoked,
+    });
+
+    const bounds = layout.TextSpan.init(.{
+        .bbox = .{ .x0 = 0, .y0 = 0, .x1 = 10, .y1 = 10 },
+        .text = "cell",
+    });
+    var source_cells = [_]layout.TableCell{.{
+        .bounds = bounds,
+        .text = "cell",
+        .row_index = 0,
+        .column_index = 0,
+    }};
+    var source_rows = [_]layout.TableRow{.{
+        .bounds = bounds,
+        .cells = &source_cells,
+        .row_index = 0,
+    }};
+    const source_table = layout.TableGrid{
+        .bounds = bounds,
+        .block_index = 0,
+        .rows = &source_rows,
+        .column_count = 1,
+    };
+
+    var tables: std.ArrayList(layout.TableGrid) = .empty;
+    defer {
+        freeOwnedTableItems(allocator, tables.items);
+        tables.deinit(allocator);
+    }
+    try tables.ensureUnusedCapacity(allocator, 1);
+    tables.appendAssumeCapacity(try copyTableGrid(allocator, source_table));
+
+    const tail = try allocator.alloc(u8, 1);
+    defer allocator.free(tail);
+}
+
+test "adaptive owned lists are safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        adaptiveOwnedListCleanupAllocationProbe,
+        .{},
+    );
 }

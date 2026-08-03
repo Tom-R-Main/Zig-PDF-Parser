@@ -81,13 +81,15 @@ pub const CodeToCidMap = struct {
     }
 
     pub fn setName(self: *CodeToCidMap, value: []const u8) !void {
+        const replacement = try self.allocator.dupe(u8, value);
         if (self.name) |existing| self.allocator.free(existing);
-        self.name = try self.allocator.dupe(u8, value);
+        self.name = replacement;
     }
 
     pub fn setUseCMapName(self: *CodeToCidMap, value: []const u8) !void {
+        const replacement = try self.allocator.dupe(u8, value);
         if (self.usecmap_name) |existing| self.allocator.free(existing);
-        self.usecmap_name = try self.allocator.dupe(u8, value);
+        self.usecmap_name = replacement;
     }
 
     pub fn lookup(self: *const CodeToCidMap, code: u32) ?u32 {
@@ -164,13 +166,15 @@ pub const ToUnicodeMap = struct {
     }
 
     pub fn setName(self: *ToUnicodeMap, value: []const u8) !void {
+        const replacement = try self.allocator.dupe(u8, value);
         if (self.name) |existing| self.allocator.free(existing);
-        self.name = try self.allocator.dupe(u8, value);
+        self.name = replacement;
     }
 
     pub fn setUseCMapName(self: *ToUnicodeMap, value: []const u8) !void {
+        const replacement = try self.allocator.dupe(u8, value);
         if (self.usecmap_name) |existing| self.allocator.free(existing);
-        self.usecmap_name = try self.allocator.dupe(u8, value);
+        self.usecmap_name = replacement;
     }
 
     pub fn lookupScalar(self: *const ToUnicodeMap, code: u32) ?u21 {
@@ -187,6 +191,30 @@ pub const ToUnicodeMap = struct {
         return null;
     }
 };
+
+fn mappingNameReplacementAllocationProbe(allocator: std.mem.Allocator) !void {
+    var code_map = CodeToCidMap.init(allocator);
+    defer code_map.deinit();
+    try code_map.setName("first-code-map");
+    try code_map.setName("second-code-map");
+    try code_map.setUseCMapName("first-code-parent");
+    try code_map.setUseCMapName("second-code-parent");
+
+    var unicode_map = ToUnicodeMap.init(allocator);
+    defer unicode_map.deinit();
+    try unicode_map.setName("first-unicode-map");
+    try unicode_map.setName("second-unicode-map");
+    try unicode_map.setUseCMapName("first-unicode-parent");
+    try unicode_map.setUseCMapName("second-unicode-parent");
+}
+
+test "mapping name replacement is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        mappingNameReplacementAllocationProbe,
+        .{},
+    );
+}
 
 pub const SimpleEncoding = struct {
     codepoints: [256]u21,

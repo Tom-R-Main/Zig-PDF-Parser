@@ -223,34 +223,15 @@ pub const LayoutResult = struct {
 
     pub fn deinit(self: *LayoutResult) void {
         self.allocator.free(self.spans);
-        for (self.lines) |line| {
-            for (line.words) |word| {
-                self.allocator.free(word.spans);
-            }
-            self.allocator.free(line.words);
-        }
+        freeTextLines(self.allocator, self.lines);
         self.allocator.free(self.lines);
-        for (self.columns) |col| {
-            self.allocator.free(col.lines);
-        }
+        freeTextColumns(self.allocator, self.columns);
         self.allocator.free(self.columns);
-        for (self.paragraphs) |para| {
-            self.allocator.free(para.lines);
-        }
+        freeTextParagraphs(self.allocator, self.paragraphs);
         self.allocator.free(self.paragraphs);
-        for (self.blocks) |block| {
-            self.allocator.free(block.lines);
-        }
+        freeLayoutBlocks(self.allocator, self.blocks);
         self.allocator.free(self.blocks);
-        for (self.tables) |table| {
-            for (table.rows) |row| {
-                for (row.cells) |cell| {
-                    self.allocator.free(cell.text);
-                }
-                self.allocator.free(row.cells);
-            }
-            self.allocator.free(table.rows);
-        }
+        freeTableGrids(self.allocator, self.tables);
         self.allocator.free(self.tables);
         self.allocator.free(self.candidates);
         self.allocator.free(self.reading_order);
@@ -434,6 +415,27 @@ pub const LayoutResult = struct {
     }
 };
 
+fn freeTextLine(allocator: std.mem.Allocator, line: TextLine) void {
+    for (line.words) |word| allocator.free(word.spans);
+    allocator.free(line.words);
+}
+
+fn freeTextLines(allocator: std.mem.Allocator, lines: []const TextLine) void {
+    for (lines) |line| freeTextLine(allocator, line);
+}
+
+fn freeTextColumns(allocator: std.mem.Allocator, columns: []const TextColumn) void {
+    for (columns) |column| allocator.free(column.lines);
+}
+
+fn freeTextParagraphs(allocator: std.mem.Allocator, paragraphs: []const TextParagraph) void {
+    for (paragraphs) |paragraph| allocator.free(paragraph.lines);
+}
+
+fn freeLayoutBlocks(allocator: std.mem.Allocator, blocks: []const LayoutBlock) void {
+    for (blocks) |block| allocator.free(block.lines);
+}
+
 fn tableCellRoleName(role: TableCellRole) []const u8 {
     return switch (role) {
         .data => "data",
@@ -531,25 +533,13 @@ pub fn analyzeLayoutWithRulings(
     page_width: f64,
     ruling_lines: []const RulingLine,
 ) !LayoutResult {
-    if (spans.len == 0) {
-        return LayoutResult{
-            .spans = try allocator.alloc(TextSpan, 0),
-            .lines = try allocator.alloc(TextLine, 0),
-            .columns = try allocator.alloc(TextColumn, 0),
-            .paragraphs = try allocator.alloc(TextParagraph, 0),
-            .blocks = try allocator.alloc(LayoutBlock, 0),
-            .tables = try allocator.alloc(TableGrid, 0),
-            .candidates = try allocator.alloc(LayoutCandidate, 0),
-            .reading_order = try allocator.alloc(u32, 0),
-            .body_font_size = 0,
-            .allocator = allocator,
-        };
-    }
+    if (spans.len == 0) return emptyLayoutResult(allocator);
 
     const line_threshold: f64 = 10;
 
     // Sort all spans by Y (top to bottom), then X (left to right)
     const sorted = try allocator.alloc(TextSpan, spans.len);
+    defer allocator.free(sorted);
     @memcpy(sorted, spans);
 
     std.mem.sort(TextSpan, sorted, line_threshold, struct {
@@ -578,6 +568,7 @@ pub fn analyzeLayoutWithRulings(
     const is_two_column = gutter != null;
 
     var result_spans = try std.ArrayList(TextSpan).initCapacity(allocator, spans.len);
+    errdefer result_spans.deinit(allocator);
 
     if (is_two_column) {
         // Two-column layout: output left column first, then right column
@@ -608,17 +599,22 @@ pub fn analyzeLayoutWithRulings(
         }
     }
 
-    allocator.free(sorted);
-
     // Build lines from the ordered spans
     var lines = try std.ArrayList(TextLine).initCapacity(allocator, spans.len / 10);
+    errdefer {
+        freeTextLines(allocator, lines.items);
+        lines.deinit(allocator);
+    }
     var current_line_spans = try std.ArrayList(TextSpan).initCapacity(allocator, 20);
+    defer current_line_spans.deinit(allocator);
     current_y = if (result_spans.items.len > 0) result_spans.items[0].y0 else 0;
 
     for (result_spans.items) |span| {
         if (@abs(span.y0 - current_y) > line_threshold) {
             if (current_line_spans.items.len > 0) {
-                try lines.append(allocator, try makeLine(allocator, current_line_spans.items));
+                const line = try makeLine(allocator, current_line_spans.items);
+                errdefer freeTextLine(allocator, line);
+                try lines.append(allocator, line);
                 current_line_spans.clearRetainingCapacity();
             }
             current_y = span.y0;
@@ -626,15 +622,20 @@ pub fn analyzeLayoutWithRulings(
         try current_line_spans.append(allocator, span);
     }
     if (current_line_spans.items.len > 0) {
-        try lines.append(allocator, try makeLine(allocator, current_line_spans.items));
+        const line = try makeLine(allocator, current_line_spans.items);
+        errdefer freeTextLine(allocator, line);
+        try lines.append(allocator, line);
     }
-    current_line_spans.deinit(allocator);
 
     const body_font_size = try estimateBodyFontSize(allocator, result_spans.items);
     classifyLines(lines.items, body_font_size);
 
     // Build column structure
     var columns = try std.ArrayList(TextColumn).initCapacity(allocator, 1);
+    errdefer {
+        freeTextColumns(allocator, columns.items);
+        columns.deinit(allocator);
+    }
     if (lines.items.len > 0) {
         if (is_two_column) {
             var left_lines: std.ArrayList(TextLine) = .empty;
@@ -652,6 +653,7 @@ pub fn analyzeLayoutWithRulings(
 
             if (left_lines.items.len > 0) {
                 const col_lines = try left_lines.toOwnedSlice(allocator);
+                errdefer allocator.free(col_lines);
                 try columns.append(allocator, .{
                     .bounds = mergeBounds(col_lines),
                     .lines = col_lines,
@@ -660,6 +662,7 @@ pub fn analyzeLayoutWithRulings(
             }
             if (right_lines.items.len > 0) {
                 const col_lines = try right_lines.toOwnedSlice(allocator);
+                errdefer allocator.free(col_lines);
                 try columns.append(allocator, .{
                     .bounds = mergeBounds(col_lines),
                     .lines = col_lines,
@@ -668,6 +671,7 @@ pub fn analyzeLayoutWithRulings(
             }
         } else {
             const all_lines = try allocator.dupe(TextLine, lines.items);
+            errdefer allocator.free(all_lines);
             try columns.append(allocator, .{
                 .bounds = mergeBounds(all_lines),
                 .lines = all_lines,
@@ -677,12 +681,17 @@ pub fn analyzeLayoutWithRulings(
     }
 
     const order = try allocator.alloc(u32, columns.items.len);
+    errdefer allocator.free(order);
     for (order, 0..) |*o, i| {
         o.* = @intCast(i);
     }
 
     // Detect paragraphs
     var paragraphs = try std.ArrayList(TextParagraph).initCapacity(allocator, columns.items.len * 3);
+    errdefer {
+        freeTextParagraphs(allocator, paragraphs.items);
+        paragraphs.deinit(allocator);
+    }
     for (columns.items, 0..) |col, col_idx| {
         try detectParagraphs(allocator, col.lines, @intCast(col_idx), &paragraphs);
     }
@@ -695,24 +704,81 @@ pub fn analyzeLayoutWithRulings(
     try buildBlocks(allocator, paragraphs.items, &blocks);
 
     const tables = try buildTableGridsWithRulings(allocator, blocks.items, ruling_lines);
-    errdefer freeTableGrids(allocator, tables);
+    errdefer {
+        freeTableGrids(allocator, tables);
+        allocator.free(tables);
+    }
 
     var candidates: std.ArrayList(LayoutCandidate) = .empty;
     errdefer candidates.deinit(allocator);
     try collectCandidates(allocator, lines.items, blocks.items, &candidates);
 
     const final_spans = try result_spans.toOwnedSlice(allocator);
+    errdefer allocator.free(final_spans);
+    const final_lines = try lines.toOwnedSlice(allocator);
+    errdefer {
+        freeTextLines(allocator, final_lines);
+        allocator.free(final_lines);
+    }
+    const final_columns = try columns.toOwnedSlice(allocator);
+    errdefer {
+        freeTextColumns(allocator, final_columns);
+        allocator.free(final_columns);
+    }
+    const final_paragraphs = try paragraphs.toOwnedSlice(allocator);
+    errdefer {
+        freeTextParagraphs(allocator, final_paragraphs);
+        allocator.free(final_paragraphs);
+    }
+    const final_blocks = try blocks.toOwnedSlice(allocator);
+    errdefer {
+        freeLayoutBlocks(allocator, final_blocks);
+        allocator.free(final_blocks);
+    }
+    const final_candidates = try candidates.toOwnedSlice(allocator);
+    errdefer allocator.free(final_candidates);
 
     return LayoutResult{
         .spans = final_spans,
-        .lines = try lines.toOwnedSlice(allocator),
-        .columns = try columns.toOwnedSlice(allocator),
-        .paragraphs = try paragraphs.toOwnedSlice(allocator),
-        .blocks = try blocks.toOwnedSlice(allocator),
+        .lines = final_lines,
+        .columns = final_columns,
+        .paragraphs = final_paragraphs,
+        .blocks = final_blocks,
         .tables = tables,
-        .candidates = try candidates.toOwnedSlice(allocator),
+        .candidates = final_candidates,
         .reading_order = order,
         .body_font_size = body_font_size,
+        .allocator = allocator,
+    };
+}
+
+fn emptyLayoutResult(allocator: std.mem.Allocator) !LayoutResult {
+    const spans = try allocator.alloc(TextSpan, 0);
+    errdefer allocator.free(spans);
+    const lines = try allocator.alloc(TextLine, 0);
+    errdefer allocator.free(lines);
+    const columns = try allocator.alloc(TextColumn, 0);
+    errdefer allocator.free(columns);
+    const paragraphs = try allocator.alloc(TextParagraph, 0);
+    errdefer allocator.free(paragraphs);
+    const blocks = try allocator.alloc(LayoutBlock, 0);
+    errdefer allocator.free(blocks);
+    const tables = try allocator.alloc(TableGrid, 0);
+    errdefer allocator.free(tables);
+    const candidates = try allocator.alloc(LayoutCandidate, 0);
+    errdefer allocator.free(candidates);
+    const reading_order = try allocator.alloc(u32, 0);
+
+    return .{
+        .spans = spans,
+        .lines = lines,
+        .columns = columns,
+        .paragraphs = paragraphs,
+        .blocks = blocks,
+        .tables = tables,
+        .candidates = candidates,
+        .reading_order = reading_order,
+        .body_font_size = 0,
         .allocator = allocator,
     };
 }
@@ -933,22 +999,30 @@ fn makeLine(allocator: std.mem.Allocator, spans: []const TextSpan) !TextLine {
     // Estimate words as ~1 per 2-3 spans
     const estimated_words = @max(1, spans.len / 2);
     var words = try std.ArrayList(TextWord).initCapacity(allocator, estimated_words);
+    errdefer {
+        for (words.items) |word| allocator.free(word.spans);
+        words.deinit(allocator);
+    }
     var current_word_spans = try std.ArrayList(TextSpan).initCapacity(allocator, 8);
+    defer current_word_spans.deinit(allocator);
     const word_gap: f64 = 5;
 
     var prev_x1: f64 = spans[0].x0;
     for (spans) |span| {
         if (span.x0 - prev_x1 > word_gap and current_word_spans.items.len > 0) {
-            try words.append(allocator, try makeWord(allocator, current_word_spans.items));
+            const word = try makeWord(allocator, current_word_spans.items);
+            errdefer allocator.free(word.spans);
+            try words.append(allocator, word);
             current_word_spans.clearRetainingCapacity();
         }
         try current_word_spans.append(allocator, span);
         prev_x1 = span.x1;
     }
     if (current_word_spans.items.len > 0) {
-        try words.append(allocator, try makeWord(allocator, current_word_spans.items));
+        const word = try makeWord(allocator, current_word_spans.items);
+        errdefer allocator.free(word.spans);
+        try words.append(allocator, word);
     }
-    current_word_spans.deinit(allocator);
 
     const bounds = mergeSpanBounds(spans);
     return TextLine{
@@ -1253,6 +1327,7 @@ fn buildTableGridsWithRulings(
     ruling_lines: []const RulingLine,
 ) ![]TableGrid {
     if (try buildRuledTableGrid(allocator, blocks, ruling_lines)) |table| {
+        errdefer freeTableGrid(allocator, table);
         const tables = try allocator.alloc(TableGrid, 1);
         tables[0] = table;
         return tables;
@@ -1306,6 +1381,7 @@ fn buildTableGrids(allocator: std.mem.Allocator, blocks: []const LayoutBlock) ![
             };
             if (try buildTableGridForBlock(allocator, run_block, @intCast(block_index))) |built_table| {
                 var table = built_table;
+                errdefer freeTableGrid(allocator, table);
                 table.block_count = run_end - block_index;
                 try tables.append(allocator, table);
                 block_index = run_end;
@@ -1314,6 +1390,7 @@ fn buildTableGrids(allocator: std.mem.Allocator, blocks: []const LayoutBlock) ![
         }
 
         if (try buildTableGridForBlock(allocator, block, @intCast(block_index))) |table| {
+            errdefer freeTableGrid(allocator, table);
             try tables.append(allocator, table);
         }
         block_index += 1;
@@ -1379,6 +1456,7 @@ fn buildTableGridForBlock(
     for (block.lines) |line| {
         if (line.words.len == 0) continue;
         const row = try buildTableRow(allocator, line, anchors.items, block.bounds, @intCast(rows.items.len));
+        errdefer freeTableRow(allocator, row);
         const occupied_cells = occupiedCellCount(row);
         if (occupied_cells >= 2 or rows.items.len == 0 or rowIsNote(row)) {
             try rows.append(allocator, row);
@@ -1724,8 +1802,9 @@ fn buildTableRow(
     }
 
     const cells = try allocator.alloc(TableCell, anchors.len);
+    var initialized_cell_count: usize = 0;
     errdefer {
-        for (cells) |cell| allocator.free(cell.text);
+        for (cells[0..initialized_cell_count]) |cell| allocator.free(cell.text);
         allocator.free(cells);
     }
 
@@ -1739,6 +1818,7 @@ fn buildTableRow(
             .role = heuristicCellRole(row_index, @intCast(column_index), text),
             .confidence = if (text.len > 0) 0.78 else 0.45,
         };
+        initialized_cell_count += 1;
     }
 
     return .{
@@ -1765,8 +1845,9 @@ fn buildMergedTextRow(
     row_index: u32,
 ) !TableRow {
     const cells = try allocator.alloc(TableCell, anchors.len);
+    var initialized_cell_count: usize = 0;
     errdefer {
-        for (cells) |cell| allocator.free(cell.text);
+        for (cells[0..initialized_cell_count]) |cell| allocator.free(cell.text);
         allocator.free(cells);
     }
 
@@ -1785,6 +1866,7 @@ fn buildMergedTextRow(
             .role = heuristicCellRole(row_index, @intCast(column_index), text),
             .confidence = if (text.len > 0) 0.72 else 0.45,
         };
+        initialized_cell_count += 1;
     }
 
     return .{
@@ -2360,6 +2442,43 @@ fn testSpanSized(text: []const u8, x0: f64, y0: f64, x1: f64, y1: f64, size: f64
         .text = text,
         .font = .{ .name = "Body", .size = size, .has_to_unicode = true },
     });
+}
+
+fn emptyLayoutAllocationProbe(allocator: std.mem.Allocator) !void {
+    var result = try analyzeLayout(allocator, &.{}, 612);
+    defer result.deinit();
+}
+
+test "empty layout ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        emptyLayoutAllocationProbe,
+        .{},
+    );
+}
+
+fn tableLayoutAllocationProbe(allocator: std.mem.Allocator) !void {
+    const spans = [_]TextSpan{
+        testSpan("Year", 80, 720, 110, 732),
+        testSpan("Revenue", 200, 720, 250, 732),
+        testSpan("Margin", 320, 720, 365, 732),
+        testSpan("2019", 80, 700, 112, 712),
+        testSpan("100", 200, 700, 224, 712),
+        testSpan("20", 320, 700, 336, 712),
+        testSpan("2020", 80, 680, 112, 692),
+        testSpan("125", 200, 680, 224, 692),
+        testSpan("23", 320, 680, 336, 692),
+    };
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+}
+
+test "table layout ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        tableLayoutAllocationProbe,
+        .{},
+    );
 }
 
 test "layout reconstruction clusters lines and dehyphenates paragraphs" {

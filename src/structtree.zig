@@ -333,6 +333,8 @@ fn parseKids(
                 const sub_children_slice = try sub_children.toOwnedSlice(allocator);
                 errdefer allocator.free(sub_children_slice);
 
+                try elements.ensureUnusedCapacity(allocator, 1);
+                try children.ensureUnusedCapacity(allocator, 1);
                 const elem_ptr = try allocator.create(StructElement);
                 errdefer allocator.destroy(elem_ptr);
                 elem_ptr.* = .{
@@ -342,8 +344,8 @@ fn parseKids(
                     .children = sub_children_slice,
                     .page_ref = page_ref,
                 };
-                try elements.append(allocator, elem_ptr);
-                try children.append(allocator, .{ .element = elem_ptr });
+                elements.appendAssumeCapacity(elem_ptr);
+                children.appendAssumeCapacity(.{ .element = elem_ptr });
             }
         },
         else => {},
