@@ -333,7 +333,7 @@ or invalid specialist causes a non-zero exit after diagnostics are emitted.
 partial artifacts and inspect `has_specialist_failures` themselves.
 
 `inspect extraction` emits the separate `extraction_diagnostics` schema
-(`0.3.0`). Its counters distinguish page discovery, decoded page-content
+(`0.4.0`). Its counters distinguish page discovery, decoded page-content
 buffers, text-show operators and operand bytes, mapped/unmapped glyphs, and
 final structured output. The `selection` record reports decoded Form XObjects,
 the full-context Unicode inventory, candidate missing/extra codepoints, coverage,
@@ -344,6 +344,9 @@ subtype, base font, encoding CMap, CIDSystemInfo, ToUnicode presence and map/
 glyph coverage, embedded font type, CIDToGIDMap type, and glyph counts by
 mapping source: `explicit_to_unicode`, `actual_text`, `simple_encoding`,
 `adobe_collection`, `embedded_font_cmap`, `glyph_name`, or `unresolved`.
+Type3 font records also expose `type3_charprocs.metrics` and
+`type3_charprocs.d1_bboxes`, counting bounded CharProc `d0`/`d1` metric
+captures without implying glyph rendering support.
 The top-level record includes `source_id` and diagnostic `provenance`.
 Status values are `ok`, `no_text`,
 `suspect_unicode`, `incomplete`, and `no_pages`; this report is diagnostic and

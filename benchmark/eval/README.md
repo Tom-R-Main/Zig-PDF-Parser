@@ -43,11 +43,18 @@ if the adaptive counters differ from those expectations. Large or raw third-part
 corpora should live under `benchmark/eval/raw_cache/`, which is ignored by git;
 checked-in PDFs should stay small, redistributable reductions.
 
+The ignored large corpus explicitly inventories a real technical reference with
+CID Identity/no-ToUnicode cases and a public-domain scan containing JBIG2 and
+JPX images. These exercise honest fallback and routed OCR behavior; real
+predefined-collection CJK and Type3 PDFs remain acquisition targets rather than
+being represented by synthetic fixtures alone.
+
 Font-fidelity sidecars live under `benchmark/eval/ground_truth/fonts/`. They are
 discovered from `metadata.jsonl` instead of extra manifest columns so existing
 text/table/formula eval lanes stay compatible. The current `weird_fonts`
 category covers ActualText repair, Type3 fonts, broken Identity-H, vertical
-CJK, and redistribution-safe Sleisenger reductions for Symbol glyph names and
+CJK, predefined Adobe Japan1/GB1/CNS1/Korea1 mappings without ToUnicode, and
+redistribution-safe Sleisenger reductions for Symbol glyph names and
 family-scoped MathematicalPi-One private names:
 
 ```sh
@@ -65,6 +72,24 @@ Use `--require-baselines` when missing Python baselines should fail the run.
 This is a differential accuracy harness: the sidecar truth defines the expected
 behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an
 absolute oracle.
+
+The predefined CMap tables are generated from pinned Adobe BSD-3-Clause source
+revisions. The generator rejects source checkouts whose `HEAD` does not match
+those revisions, preserves scalar and multi-codepoint CID mappings, and packs
+common 16-bit CMap records to keep native/WASM artifacts bounded. Keep source
+clones in the ignored benchmark cache, regenerate, then verify determinism with:
+
+```sh
+python3 benchmark/eval/generate_cmap_resources.py \
+  --cmap-root benchmark/eval/raw_cache/cmap-resources \
+  --mapping-root benchmark/eval/raw_cache/mapping-resources-pdf \
+  --output src/cmap_resources.zig \
+  --binary-output src/cmap_resources.bin \
+  --check
+```
+
+CI repeats this check from sparse checkouts of the pinned Adobe revisions and
+enforces a 3,250,000-byte budget for the ReleaseSmall WASM artifact.
 
 Render-oracle sidecars live under
 `benchmark/eval/ground_truth/render_oracle/`. They keep visual expectations out

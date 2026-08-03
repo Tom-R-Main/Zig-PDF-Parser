@@ -166,6 +166,9 @@ pub const FontEncoding = struct {
     /// True for /Subtype /Type3 fonts. These rely on PDF glyph programs but
     /// can still expose deterministic widths, bboxes, encodings, and ToUnicode.
     is_type3: bool = false,
+    /// Metrics captured from Type3 CharProc d0/d1 operators, keyed by source
+    /// character code. Full glyph painting remains outside the text kernel.
+    type3_charproc_metrics: std.AutoHashMapUnmanaged(u8, Type3CharProcMetric) = .{},
 
     /// Diagnostic identity copied from the font dictionary/cache seam.
     font_object_num: ?u32 = null,
@@ -176,6 +179,12 @@ pub const FontEncoding = struct {
 
     pub const CMapRange = CodeToUnicodeMap.Range;
     pub const CMapCodeSpace = font_mapping.CodeSpace;
+
+    pub const Type3CharProcMetric = struct {
+        operator: enum { d0, d1 },
+        advance: [2]f64,
+        bbox: ?[4]f64 = null,
+    };
 
     pub const DecodedGlyph = struct {
         source_code: u32,
@@ -214,6 +223,7 @@ pub const FontEncoding = struct {
         self.widths.deinit();
         self.cid_to_gid.deinit(self.allocator);
         if (self.embedded_font) |*embedded| embedded.deinit();
+        self.type3_charproc_metrics.deinit(self.allocator);
     }
 
     /// Decode a string to Unicode using this encoding
@@ -350,8 +360,29 @@ pub const FontEncoding = struct {
                 if (self.cid_collection) |collection| {
                     if (cid) |resolved_cid| {
                         if (collection.lookup(resolved_cid)) |value| {
-                            codepoint = value;
-                            mapping_source = .adobe_collection;
+                            switch (value) {
+                                .scalar => |scalar| {
+                                    codepoint = scalar;
+                                    mapping_source = .adobe_collection;
+                                },
+                                .sequence => |utf8_text| {
+                                    try sink.writeDecodedGlyph(.{
+                                        .source_code = code.value,
+                                        .source_bytes = data[source_start..i],
+                                        .bytes_consumed = code.bytes_consumed,
+                                        .utf8_text = utf8_text,
+                                        .glyph_width = self.widths.getCIDWidth(metrics_cid),
+                                        .cid = cid,
+                                        .gid = gid,
+                                        .mapping_source = .adobe_collection,
+                                        .multi_char_mapping = true,
+                                        .writing_mode = self.wmode,
+                                        .ascender = self.metrics.ascender,
+                                        .descender = self.metrics.descender,
+                                    });
+                                    continue;
+                                },
+                            }
                         }
                     }
                 }
@@ -572,6 +603,7 @@ pub fn parseFontEncoding(
 
     // Parse glyph widths
     try parseWidths(allocator, font_dict, resolve_fn, resolve_ctx, &encoding);
+    if (is_type3) try parseType3CharProcMetrics(allocator, font_dict, resolve_fn, resolve_ctx, &encoding);
 
     // For Type0 fonts, also check DescendantFonts for widths
     if (is_type0) {
@@ -708,6 +740,250 @@ fn parseType3Metrics(font_dict: Object.Dict, encoding: *FontEncoding) void {
             }
         }
     }
+}
+
+const max_type3_charproc_scratch_bytes = 1024 * 1024;
+const max_type3_charprocs_scanned = 4096;
+const max_type3_charproc_total_bytes = 8 * 1024 * 1024;
+const max_type3_charproc_decode_failures = 8;
+
+fn parseType3CharProcMetrics(
+    allocator: std.mem.Allocator,
+    font_dict: Object.Dict,
+    resolve_fn: *const fn (ctx: *const anyopaque, Object) Object,
+    resolve_ctx: *const anyopaque,
+    encoding: *FontEncoding,
+) !void {
+    const charprocs_obj = font_dict.get("CharProcs") orelse return;
+    const resolved_charprocs = resolve_fn(resolve_ctx, charprocs_obj);
+    if (resolved_charprocs != .dict) return;
+
+    var explicit_names: [256]?[]const u8 = @splat(null);
+    if (font_dict.get("Encoding")) |encoding_obj| {
+        const resolved_encoding = resolve_fn(resolve_ctx, encoding_obj);
+        if (resolved_encoding == .dict) collectDifferenceNames(resolved_encoding.dict, &explicit_names);
+    }
+
+    const matrix = type3FontMatrix(font_dict);
+    const scratch = try allocator.alloc(u8, max_type3_charproc_scratch_bytes);
+    defer allocator.free(scratch);
+
+    const entries = resolved_charprocs.dict.entries[0..@min(
+        resolved_charprocs.dict.entries.len,
+        max_type3_charprocs_scanned,
+    )];
+    var selected_entry_by_code: [256]?usize = @splat(null);
+    var ambiguous_code: [256]bool = @splat(false);
+
+    // Differences names are authoritative. Resolve them exactly before using
+    // the necessarily weaker Unicode-name fallback for named encodings.
+    for (&explicit_names, 0..) |name, code| {
+        if (name) |glyph_name| {
+            selected_entry_by_code[code] = findType3CharProcIndex(entries, glyph_name);
+        }
+    }
+
+    for (entries, 0..) |entry, entry_index| {
+        if (std.mem.eql(u8, entry.key, ".notdef")) continue;
+        const glyph_scalar = glyphNameToUnicodeForFont(encoding.base_font, entry.key) orelse continue;
+        for (encoding.simple_encoding.codepoints, 0..) |codepoint, code| {
+            if (explicit_names[code] != null or ambiguous_code[code] or codepoint != glyph_scalar) continue;
+            if (selected_entry_by_code[code]) |selected_index| {
+                if (selected_index != entry_index) {
+                    selected_entry_by_code[code] = null;
+                    ambiguous_code[code] = true;
+                }
+            } else {
+                selected_entry_by_code[code] = entry_index;
+            }
+        }
+    }
+
+    const CachedMetric = struct {
+        source: Object,
+        metric: FontEncoding.Type3CharProcMetric,
+    };
+    var cached_metrics: [256]CachedMetric = undefined;
+    var cached_metric_count: usize = 0;
+    var total_decoded_bytes: usize = 0;
+    var decode_failures: usize = 0;
+
+    for (selected_entry_by_code, 0..) |entry_index, code| {
+        const selected_index = entry_index orelse continue;
+        if (ambiguous_code[code]) continue;
+        const entry = entries[selected_index];
+
+        var metric: ?FontEncoding.Type3CharProcMetric = null;
+        for (cached_metrics[0..cached_metric_count]) |cached| {
+            if (sameType3CharProcSource(cached.source, entry.value)) {
+                metric = cached.metric;
+                break;
+            }
+        }
+        if (metric == null) {
+            if (total_decoded_bytes >= max_type3_charproc_total_bytes) break;
+            const resolved = resolve_fn(resolve_ctx, entry.value);
+            if (resolved != .stream) continue;
+
+            var fixed = std.heap.FixedBufferAllocator.init(scratch);
+            const data = decompress.decompressStream(
+                fixed.allocator(),
+                resolved.stream.data,
+                resolved.stream.dict.get("Filter"),
+                resolved.stream.dict.get("DecodeParms"),
+            ) catch {
+                decode_failures += 1;
+                if (decode_failures >= max_type3_charproc_decode_failures) break;
+                continue;
+            };
+            if (data.len > max_type3_charproc_total_bytes - total_decoded_bytes) continue;
+            total_decoded_bytes += data.len;
+            metric = parseType3CharProcMetric(data, matrix) orelse continue;
+            cached_metrics[cached_metric_count] = .{ .source = entry.value, .metric = metric.? };
+            cached_metric_count += 1;
+        }
+        try setType3Metric(allocator, encoding, @intCast(code), metric.?);
+    }
+}
+
+fn findType3CharProcIndex(entries: []const Object.Dict.Entry, glyph_name: []const u8) ?usize {
+    for (entries, 0..) |entry, index| {
+        if (std.mem.eql(u8, entry.key, glyph_name)) return index;
+    }
+    return null;
+}
+
+fn sameType3CharProcSource(a: Object, b: Object) bool {
+    return switch (a) {
+        .reference => |a_ref| switch (b) {
+            .reference => |b_ref| a_ref.eql(b_ref),
+            else => false,
+        },
+        .stream => |a_stream| switch (b) {
+            .stream => |b_stream| a_stream.data.ptr == b_stream.data.ptr and a_stream.data.len == b_stream.data.len,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn collectDifferenceNames(encoding_dict: Object.Dict, names: *[256]?[]const u8) void {
+    const differences = encoding_dict.getArray("Differences") orelse return;
+    var code: u16 = 0;
+    for (differences) |item| switch (item) {
+        .integer => |value| code = @intCast(@max(0, @min(255, value))),
+        .name => |name| {
+            if (code < 256) {
+                names[code] = name;
+                code += 1;
+            }
+        },
+        else => {},
+    };
+}
+
+fn type3FontMatrix(font_dict: Object.Dict) [6]f64 {
+    var matrix: [6]f64 = .{ 0.001, 0, 0, 0.001, 0, 0 };
+    const values = font_dict.getArray("FontMatrix") orelse return matrix;
+    if (values.len < matrix.len) return matrix;
+    for (&matrix, 0..) |*value, index| value.* = getNumber(values[index]) orelse return .{ 0.001, 0, 0, 0.001, 0, 0 };
+    return matrix;
+}
+
+fn parseType3CharProcMetric(data: []const u8, matrix: [6]f64) ?FontEncoding.Type3CharProcMetric {
+    var operands: [6]f64 = @splat(0);
+    var operand_count: usize = 0;
+    var pos: usize = 0;
+    while (pos < data.len) {
+        while (pos < data.len and isWhitespace(data[pos])) pos += 1;
+        if (pos >= data.len) break;
+        if (data[pos] == '%') {
+            while (pos < data.len and data[pos] != '\n' and data[pos] != '\r') pos += 1;
+            continue;
+        }
+
+        const start = pos;
+        while (pos < data.len and !isType3TokenDelimiter(data[pos])) pos += 1;
+        if (start == pos) return null;
+        const token = data[start..pos];
+        if (std.mem.eql(u8, token, "d0")) {
+            if (operand_count < 2) return null;
+            const raw = operands[operand_count - 2 .. operand_count];
+            const advance = transformType3Vector(matrix, raw[0], raw[1]);
+            if (!validType3MetricValues(&advance)) return null;
+            return .{ .operator = .d0, .advance = advance };
+        }
+        if (std.mem.eql(u8, token, "d1")) {
+            if (operand_count < 6) return null;
+            const raw = operands[operand_count - 6 .. operand_count];
+            const advance = transformType3Vector(matrix, raw[0], raw[1]);
+            const bbox = transformType3BBox(matrix, .{ raw[2], raw[3], raw[4], raw[5] });
+            if (!validType3MetricValues(&advance) or !validType3MetricValues(&bbox)) return null;
+            return .{ .operator = .d1, .advance = advance, .bbox = bbox };
+        }
+
+        const value = std.fmt.parseFloat(f64, token) catch return null;
+        if (!std.math.isFinite(value) or @abs(value) > 1.0e9) return null;
+        if (operand_count == operands.len) {
+            std.mem.copyForwards(f64, operands[0 .. operands.len - 1], operands[1..]);
+            operand_count -= 1;
+        }
+        operands[operand_count] = value;
+        operand_count += 1;
+    }
+    return null;
+}
+
+fn isType3TokenDelimiter(byte: u8) bool {
+    return isWhitespace(byte) or switch (byte) {
+        '(', ')', '<', '>', '[', ']', '{', '}', '/', '%' => true,
+        else => false,
+    };
+}
+
+fn transformType3Vector(matrix: [6]f64, x: f64, y: f64) [2]f64 {
+    return .{
+        (matrix[0] * x + matrix[2] * y) * 1000,
+        (matrix[1] * x + matrix[3] * y) * 1000,
+    };
+}
+
+fn transformType3BBox(matrix: [6]f64, raw: [4]f64) [4]f64 {
+    var result: [4]f64 = .{ std.math.inf(f64), std.math.inf(f64), -std.math.inf(f64), -std.math.inf(f64) };
+    const corners = [_][2]f64{
+        .{ raw[0], raw[1] },
+        .{ raw[0], raw[3] },
+        .{ raw[2], raw[1] },
+        .{ raw[2], raw[3] },
+    };
+    for (corners) |corner| {
+        const x = (matrix[0] * corner[0] + matrix[2] * corner[1] + matrix[4]) * 1000;
+        const y = (matrix[1] * corner[0] + matrix[3] * corner[1] + matrix[5]) * 1000;
+        result[0] = @min(result[0], x);
+        result[1] = @min(result[1], y);
+        result[2] = @max(result[2], x);
+        result[3] = @max(result[3], y);
+    }
+    return result;
+}
+
+fn validType3MetricValues(values: []const f64) bool {
+    for (values) |value| if (!std.math.isFinite(value) or @abs(value) > 1.0e9) return false;
+    return true;
+}
+
+fn setType3Metric(
+    allocator: std.mem.Allocator,
+    encoding: *FontEncoding,
+    code: u8,
+    metric: FontEncoding.Type3CharProcMetric,
+) !void {
+    try encoding.type3_charproc_metrics.put(allocator, code, metric);
+    const horizontal_advance = if (@abs(metric.advance[0]) > 0.0001)
+        metric.advance[0]
+    else
+        @sqrt(metric.advance[0] * metric.advance[0] + metric.advance[1] * metric.advance[1]);
+    encoding.widths.simple_widths[code] = horizontal_advance;
 }
 
 /// Parse /Widths array for simple fonts
@@ -1074,6 +1350,13 @@ fn applyPredefinedCMap(encoding: *FontEncoding, name: []const u8) !void {
         return;
     }
 
+    if (encoding.code_cmap.attachPredefined(name)) {
+        encoding.bytes_per_char = encoding.code_cmap.bytes_per_char;
+        encoding.wmode = encoding.code_cmap.wmode;
+        setUnicodeCodingFromName(&encoding.code_cmap, name);
+        return;
+    }
+
     if (std.mem.indexOf(u8, name, "Adobe-Japan1") != null or
         std.mem.indexOf(u8, name, "Adobe-GB1") != null or
         std.mem.indexOf(u8, name, "Adobe-CNS1") != null or
@@ -1285,6 +1568,7 @@ pub fn parseEncodingCMap(allocator: std.mem.Allocator, stream: Object.Stream, en
     var notdef_ranges: std.ArrayList(CodeToCidMap.Range) = .empty;
     errdefer notdef_ranges.deinit(allocator);
     var max_source_bytes: u8 = 1;
+    var wmode_explicit = false;
     var pos: usize = 0;
 
     while (pos < data.len) {
@@ -1295,6 +1579,7 @@ pub fn parseEncodingCMap(allocator: std.mem.Allocator, stream: Object.Stream, en
             if (parseUnsignedToken(data, &pos)) |value| {
                 encoding.code_cmap.wmode = @intCast(@min(value, 1));
                 encoding.wmode = encoding.code_cmap.wmode;
+                wmode_explicit = true;
             }
         } else if (matchAt(data, pos, "begincodespacerange")) {
             pos += 19;
@@ -1319,8 +1604,21 @@ pub fn parseEncodingCMap(allocator: std.mem.Allocator, stream: Object.Stream, en
     encoding.code_cmap.codespaces = try code_spaces.toOwnedSlice(allocator);
     encoding.code_cmap.ranges = try ranges.toOwnedSlice(allocator);
     encoding.code_cmap.notdef_ranges = try notdef_ranges.toOwnedSlice(allocator);
-    encoding.code_cmap.bytes_per_char = max_source_bytes;
-    encoding.bytes_per_char = max_source_bytes;
+    const has_local_codespaces = encoding.code_cmap.codespaces.len > 0;
+    const local_wmode = encoding.code_cmap.wmode;
+    if (encoding.code_cmap.usecmap_name) |parent_name| {
+        if (std.mem.eql(u8, parent_name, "Identity-H") or std.mem.eql(u8, parent_name, "Identity-V")) {
+            if (!has_local_codespaces) encoding.code_cmap.bytes_per_char = 2;
+            if (!wmode_explicit and std.mem.eql(u8, parent_name, "Identity-V")) {
+                encoding.code_cmap.wmode = 1;
+            }
+        } else {
+            _ = encoding.code_cmap.attachPredefined(parent_name);
+        }
+    }
+    if (has_local_codespaces) encoding.code_cmap.bytes_per_char = max_source_bytes;
+    if (wmode_explicit) encoding.code_cmap.wmode = local_wmode;
+    encoding.bytes_per_char = encoding.code_cmap.bytes_per_char;
     encoding.wmode = encoding.code_cmap.wmode;
 }
 
@@ -2449,6 +2747,34 @@ test "Encoding CMap grammar parses CID and notdef mappings independently" {
     try std.testing.expectEqual(@as(usize, 0), enc.to_unicode.scalar_map.count());
 }
 
+test "Encoding CMap inherits Identity-V width and writing mode" {
+    const cmap =
+        \\/CIDInit /ProcSet findresource begin
+        \\12 dict begin
+        \\begincmap
+        \\/CMapName /Fixture-Identity-V def
+        \\/Identity-V usecmap
+        \\endcmap
+        \\end
+        \\end
+    ;
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+    enc.is_cid = true;
+    try parseEncodingCMap(std.testing.allocator, .{
+        .dict = .{ .entries = &.{} },
+        .data = cmap,
+    }, &enc);
+
+    try std.testing.expect(enc.code_cmap.identity);
+    try std.testing.expectEqual(@as(u8, 2), enc.code_cmap.bytes_per_char);
+    try std.testing.expectEqual(@as(u8, 1), enc.code_cmap.wmode);
+    try std.testing.expectEqual(@as(?u32, 0x1234), enc.code_cmap.lookup(0x1234));
+    const code = enc.code_cmap.readCharCode(&.{ 0x12, 0x34 }).?;
+    try std.testing.expectEqual(@as(u32, 0x1234), code.value);
+    try std.testing.expectEqual(@as(u8, 2), code.bytes_consumed);
+}
+
 test "glyph widths" {
     var widths = GlyphWidths.init(std.testing.allocator);
     defer widths.deinit();
@@ -2560,6 +2886,16 @@ fn resolveEncodingTestObject(_: *const anyopaque, obj: Object) Object {
     return obj;
 }
 
+const ResolveEncodingStreamCounter = struct {
+    stream_resolves: usize = 0,
+
+    fn resolve(ctx: *const anyopaque, obj: Object) Object {
+        const self: *ResolveEncodingStreamCounter = @ptrCast(@alignCast(@constCast(ctx)));
+        if (obj == .stream) self.stream_resolves += 1;
+        return obj;
+    }
+};
+
 test "Type3 font honors widths font bbox and ToUnicode" {
     const allocator = std.testing.allocator;
     const widths = [_]Object{ .{ .integer = 400 }, .{ .integer = 700 } };
@@ -2581,6 +2917,113 @@ test "Type3 font honors widths font bbox and ToUnicode" {
     try std.testing.expectEqual(@as(f64, 700), enc.widths.getWidth('B'));
     try std.testing.expectEqual(@as(f64, -120), enc.metrics.descender);
     try std.testing.expectEqual(@as(f64, 760), enc.metrics.ascender);
+}
+
+test "Type3 CharProc d1 metrics override declared width and preserve bbox" {
+    const allocator = std.testing.allocator;
+    const widths = [_]Object{.{ .integer = 300 }};
+    const bbox = [_]Object{ .{ .integer = 0 }, .{ .integer = -200 }, .{ .integer = 1000 }, .{ .integer = 900 } };
+    const matrix = [_]Object{ .{ .real = 0.001 }, .{ .integer = 0 }, .{ .integer = 0 }, .{ .real = 0.001 }, .{ .integer = 0 }, .{ .integer = 0 } };
+    const differences = [_]Object{ .{ .integer = 65 }, .{ .name = "A" } };
+    const encoding_entries = [_]Object.Dict.Entry{.{ .key = "Differences", .value = .{ .array = @constCast(differences[0..]) } }};
+    const charproc_entries = [_]Object.Dict.Entry{.{
+        .key = "A",
+        .value = .{ .stream = .{
+            .dict = .{ .entries = &.{} },
+            .data = "600 0 10 -20 500 700 d1\n0 0 m\n",
+        } },
+    }};
+    const entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type3" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 65 } },
+        .{ .key = "Widths", .value = .{ .array = @constCast(widths[0..]) } },
+        .{ .key = "FontBBox", .value = .{ .array = @constCast(bbox[0..]) } },
+        .{ .key = "FontMatrix", .value = .{ .array = @constCast(matrix[0..]) } },
+        .{ .key = "Encoding", .value = .{ .dict = .{ .entries = @constCast(encoding_entries[0..]) } } },
+        .{ .key = "CharProcs", .value = .{ .dict = .{ .entries = @constCast(charproc_entries[0..]) } } },
+    };
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, resolveEncodingTestObject, undefined);
+    defer enc.deinit();
+
+    try std.testing.expectEqual(@as(f64, 600), enc.widths.getWidth('A'));
+    const metric = enc.type3_charproc_metrics.get('A').?;
+    try std.testing.expectEqual(.d1, metric.operator);
+    try std.testing.expectEqual([2]f64{ 600, 0 }, metric.advance);
+    for ([4]f64{ 10, -20, 500, 700 }, metric.bbox.?) |expected, actual| {
+        try std.testing.expectApproxEqAbs(expected, actual, 0.0001);
+    }
+}
+
+test "Type3 Differences names prevent Unicode alias metric overwrite" {
+    const allocator = std.testing.allocator;
+    const widths = [_]Object{.{ .integer = 300 }};
+    const differences = [_]Object{ .{ .integer = 65 }, .{ .name = "uni0041" } };
+    const encoding_entries = [_]Object.Dict.Entry{.{ .key = "Differences", .value = .{ .array = @constCast(differences[0..]) } }};
+    const charproc_entries = [_]Object.Dict.Entry{
+        .{ .key = "uni0041", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "600 0 d0\n" } } },
+        .{ .key = "A", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "200 0 d0\n" } } },
+    };
+    const entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type3" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 65 } },
+        .{ .key = "Widths", .value = .{ .array = @constCast(widths[0..]) } },
+        .{ .key = "Encoding", .value = .{ .dict = .{ .entries = @constCast(encoding_entries[0..]) } } },
+        .{ .key = "CharProcs", .value = .{ .dict = .{ .entries = @constCast(charproc_entries[0..]) } } },
+    };
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, resolveEncodingTestObject, undefined);
+    defer enc.deinit();
+
+    try std.testing.expectEqual(@as(f64, 600), enc.widths.getWidth('A'));
+    try std.testing.expectEqual(@as(f64, 600), enc.type3_charproc_metrics.get('A').?.advance[0]);
+}
+
+test "Type3 metric discovery does not resolve unencoded CharProcs" {
+    const allocator = std.testing.allocator;
+    const widths = [_]Object{.{ .integer = 300 }};
+    const differences = [_]Object{ .{ .integer = 65 }, .{ .name = "A" } };
+    const encoding_entries = [_]Object.Dict.Entry{.{ .key = "Differences", .value = .{ .array = @constCast(differences[0..]) } }};
+    const charproc_entries = [_]Object.Dict.Entry{
+        .{ .key = "A", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "600 0 d0\n" } } },
+        .{ .key = "unencoded-hostile-stream", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "not parsed" } } },
+    };
+    const entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type3" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 65 } },
+        .{ .key = "Widths", .value = .{ .array = @constCast(widths[0..]) } },
+        .{ .key = "Encoding", .value = .{ .dict = .{ .entries = @constCast(encoding_entries[0..]) } } },
+        .{ .key = "CharProcs", .value = .{ .dict = .{ .entries = @constCast(charproc_entries[0..]) } } },
+    };
+    var counter = ResolveEncodingStreamCounter{};
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, ResolveEncodingStreamCounter.resolve, &counter);
+    defer enc.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), counter.stream_resolves);
+    try std.testing.expectEqual(@as(f64, 600), enc.widths.getWidth('A'));
+}
+
+test "Type3 Unicode fallback rejects ambiguous CharProc aliases" {
+    const allocator = std.testing.allocator;
+    const widths = [_]Object{.{ .integer = 300 }};
+    const charproc_entries = [_]Object.Dict.Entry{
+        .{ .key = "A", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "600 0 d0\n" } } },
+        .{ .key = "uni0041", .value = .{ .stream = .{ .dict = .{ .entries = &.{} }, .data = "200 0 d0\n" } } },
+    };
+    const entries = [_]Object.Dict.Entry{
+        .{ .key = "Subtype", .value = .{ .name = "Type3" } },
+        .{ .key = "FirstChar", .value = .{ .integer = 65 } },
+        .{ .key = "LastChar", .value = .{ .integer = 65 } },
+        .{ .key = "Widths", .value = .{ .array = @constCast(widths[0..]) } },
+        .{ .key = "Encoding", .value = .{ .name = "WinAnsiEncoding" } },
+        .{ .key = "CharProcs", .value = .{ .dict = .{ .entries = @constCast(charproc_entries[0..]) } } },
+    };
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, resolveEncodingTestObject, undefined);
+    defer enc.deinit();
+
+    try std.testing.expectEqual(@as(f64, 300), enc.widths.getWidth('A'));
+    try std.testing.expect(enc.type3_charproc_metrics.get('A') == null);
 }
 
 test "Base14 fallback metrics and symbolic encodings" {
@@ -2615,6 +3058,31 @@ test "predefined CJK CMaps set width and writing mode conservatively" {
     try applyPredefinedCMap(&gb, "GBK-EUC-H");
     try std.testing.expectEqual(@as(u8, 2), gb.bytes_per_char);
     try std.testing.expectEqual(@as(u8, 0), gb.wmode);
+}
+
+test "Adobe collection fallback preserves multi-codepoint mappings" {
+    var enc = FontEncoding.init(std.testing.allocator);
+    defer enc.deinit();
+    enc.is_cid = true;
+    enc.bytes_per_char = 2;
+    enc.code_cmap.identity = true;
+    enc.code_cmap.bytes_per_char = 2;
+    enc.cid_collection = .{ .kind = .adobe_japan1, .supplement = 7 };
+
+    var sink = struct {
+        text: std.ArrayList(u8) = .empty,
+        saw_sequence: bool = false,
+
+        fn writeDecodedGlyph(self: *@This(), glyph: FontEncoding.DecodedGlyph) !void {
+            self.saw_sequence = self.saw_sequence or glyph.multi_char_mapping;
+            try self.text.appendSlice(std.testing.allocator, glyph.utf8_text);
+        }
+    }{};
+    defer sink.text.deinit(std.testing.allocator);
+
+    try enc.decodeRecords(&.{ 0x00, 0xe6 }, &sink);
+    try std.testing.expectEqualStrings("0\xef\xb8\x80", sink.text.items);
+    try std.testing.expect(sink.saw_sequence);
 }
 
 test "broken Identity CID without ToUnicode reports map error" {

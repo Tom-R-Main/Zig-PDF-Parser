@@ -22,7 +22,8 @@ accuracy work are active development areas.
 - Memory-mapped file reading, zero-copy where possible
 - Streaming text extraction with efficient arena allocation
 - Multiple decompression filters: FlateDecode, ASCII85, ASCIIHex, LZW, RunLength
-- Font encoding support: WinAnsi, MacRoman, ToUnicode CMap
+- Font encoding support: WinAnsi, MacRoman, ToUnicode CMap, embedded Type0
+  CMaps, and predefined Adobe Japan1/GB1/CNS1/Korea1 CMaps
 - XRef table and stream parsing (PDF 1.5+)
 - Known-password Standard Security Handler decryption for encrypted PDFs
 - Configurable error handling (strict or permissive)
@@ -313,8 +314,10 @@ collector.
 
 `inspect extraction` includes per-font CMap, CIDSystemInfo, ToUnicode,
 embedded-font, CIDToGIDMap, and Unicode mapping-provenance counters so missing
-text can be attributed to a specific font and mapping layer. Selection
-diagnostics also compare reading-order candidates with a Form-aware full-context
+text can be attributed to a specific font and mapping layer. It also counts
+bounded Type3 CharProc `d0`/`d1` metric and bounding-box captures separately
+from rendering support. Selection diagnostics compare reading-order candidates
+with a Form-aware full-context
 Unicode inventory and report missing/extra codepoints, decoded Form XObjects,
 coverage, and the selected output path.
 
@@ -630,8 +633,11 @@ without removing the older top-level compatibility fields.
 | Encrypted PDFs | Known password | Yes | Yes | Via dependencies |
 | Rendering | No | Yes | Yes | No |
 
-*\*CID fonts: Works when CMap is embedded directly; broken Identity CIDs now
-emit lower-confidence Unicode-map evidence instead of silently looking clean.*
+*\*CID fonts: Supports embedded encoding CMaps, 167 predefined Adobe CMaps,
+`usecmap` inheritance, vertical writing mode, and supplement-bounded scalar or
+multi-codepoint CID-to-Unicode fallback for Adobe Japan1/GB1/CNS1/Korea1.
+Identity CIDs without ToUnicode or another defensible Unicode source remain
+explicitly unresolved.*
 
 **Use pdf-parser when:** Batch extraction, deterministic Zig-native pipelines,
 PDF/UA/tagged PDFs, local OCR fallback, financial table provenance, form values,

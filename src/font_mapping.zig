@@ -6,6 +6,9 @@
 
 const std = @import("std");
 const cff = @import("cff.zig");
+const cmap_resources = @import("cmap_resources.zig");
+
+pub const CollectionUnicodeMapping = cmap_resources.UnicodeMapping;
 
 pub const MappingSource = enum(u8) {
     explicit_to_unicode,
@@ -44,6 +47,7 @@ pub const CodeToCidMap = struct {
     ranges: []const Range = &.{},
     notdef_singles: std.AutoHashMapUnmanaged(u32, u32) = .{},
     notdef_ranges: []const Range = &.{},
+    predefined: ?*const cmap_resources.PredefinedCMap = null,
     bytes_per_char: u8 = 2,
     wmode: u8 = 0,
     identity: bool = false,
@@ -92,11 +96,26 @@ pub const CodeToCidMap = struct {
         self.usecmap_name = replacement;
     }
 
+    pub fn attachPredefined(self: *CodeToCidMap, name: []const u8) bool {
+        const predefined = cmap_resources.findPredefined(name) orelse return false;
+        self.predefined = predefined;
+        self.bytes_per_char = predefined.bytes_per_char;
+        self.wmode = predefined.wmode;
+        return true;
+    }
+
     pub fn lookup(self: *const CodeToCidMap, code: u32) ?u32 {
         if (self.singles.get(code)) |cid| return cid;
         if (lookupRange(self.ranges, code)) |cid| return cid;
         if (self.notdef_singles.get(code)) |cid| return cid;
         if (lookupRange(self.notdef_ranges, code)) |cid| return cid;
+        if (self.predefined) |predefined| {
+            if (cmap_resources.lookupCode(predefined, code)) |cid| return cid;
+        } else if (self.usecmap_name) |parent_name| {
+            if (cmap_resources.findPredefined(parent_name)) |parent| {
+                if (cmap_resources.lookupCode(parent, code)) |cid| return cid;
+            }
+        }
         if (self.identity) return code;
         return null;
     }
@@ -114,6 +133,20 @@ pub const CodeToCidMap = struct {
                 }
             }
             return null;
+        }
+        if (self.predefined) |predefined| {
+            if (cmap_resources.readCharCode(predefined, data)) |code| {
+                return .{ .value = code.value, .bytes_consumed = code.bytes_consumed };
+            }
+            return null;
+        }
+        if (self.usecmap_name) |parent_name| {
+            if (cmap_resources.findPredefined(parent_name)) |parent| {
+                if (cmap_resources.readCharCode(parent, data)) |code| {
+                    return .{ .value = code.value, .bytes_consumed = code.bytes_consumed };
+                }
+                return null;
+            }
         }
         if (self.bytes_per_char > 1 and data.len >= self.bytes_per_char) {
             return .{
@@ -257,10 +290,15 @@ pub const CidCollectionMap = struct {
         };
     }
 
-    /// Collection resources are intentionally separate from the mapping
-    /// mechanism. Until a collection table is loaded, absence is explicit.
-    pub fn lookup(_: CidCollectionMap, _: u32) ?u21 {
-        return null;
+    pub fn lookup(self: CidCollectionMap, cid: u32) ?CollectionUnicodeMapping {
+        const resource_kind: cmap_resources.CollectionKind = switch (self.kind) {
+            .adobe_japan1 => .adobe_japan1,
+            .adobe_gb1 => .adobe_gb1,
+            .adobe_cns1 => .adobe_cns1,
+            .adobe_korea1 => .adobe_korea1,
+            .none, .identity => return null,
+        };
+        return cmap_resources.lookupCollection(resource_kind, self.supplement, cid);
     }
 };
 
@@ -489,7 +527,7 @@ test "CID and embedded mappings remain independent" {
     try std.testing.expectEqual(@as(u32, 41), cid_to_gid.getGid(41));
 
     const collection = CidCollectionMap{ .kind = .identity };
-    try std.testing.expectEqual(@as(?u21, null), collection.lookup(41));
+    try std.testing.expect(collection.lookup(41) == null);
 }
 
 test "embedded TrueType cmap validates GID to Unicode mapping" {

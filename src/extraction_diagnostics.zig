@@ -20,6 +20,8 @@ pub const FontReport = struct {
     to_unicode_mapped_codes: usize = 0,
     embedded_font_type: []const u8 = "none",
     cid_to_gid_map_type: []const u8 = "identity",
+    type3_charproc_metrics: usize = 0,
+    type3_d1_bboxes: usize = 0,
     glyph_count: usize = 0,
     mapping_counts: [mapping_source_count]usize = @splat(0),
 
@@ -122,7 +124,7 @@ pub const Report = struct {
 };
 
 pub fn renderJson(writer: anytype, document_id: []const u8, report: Report) !void {
-    try writer.writeAll("{\"schema_name\":\"extraction_diagnostics\",\"schema_version\":\"0.3.0\",\"record_type\":\"extraction_diagnostics\",\"source_id\":\"");
+    try writer.writeAll("{\"schema_name\":\"extraction_diagnostics\",\"schema_version\":\"0.4.0\",\"record_type\":\"extraction_diagnostics\",\"source_id\":\"");
     try writeJsonEscaped(writer, document_id);
     try writer.writeAll("\",\"provenance\":{\"source_kind\":\"native_pdf\",\"operation\":\"inspect_extraction\"}");
     try writer.writeAll(",\"document_id\":\"");
@@ -205,7 +207,11 @@ pub fn renderJson(writer: anytype, document_id: []const u8, report: Report) !voi
         try writeJsonEscaped(writer, font.embedded_font_type);
         try writer.writeAll("\",\"cid_to_gid_map_type\":\"");
         try writeJsonEscaped(writer, font.cid_to_gid_map_type);
-        try writer.print("\",\"glyph_count\":{},\"mapping_sources\":{{", .{font.glyph_count});
+        try writer.print("\",\"type3_charprocs\":{{\"metrics\":{},\"d1_bboxes\":{}}},\"glyph_count\":{},\"mapping_sources\":{{", .{
+            font.type3_charproc_metrics,
+            font.type3_d1_bboxes,
+            font.glyph_count,
+        });
         inline for (@typeInfo(encoding.MappingSource).@"enum".fields, 0..) |field, source_index| {
             if (source_index > 0) try writer.writeByte(',');
             try writer.print("\"{s}\":{}", .{ field.name, font.mapping_counts[source_index] });
@@ -268,11 +274,12 @@ test "diagnostic JSON includes per-font mapping provenance" {
     });
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, output.items, .{});
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("0.3.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.4.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("fixture.pdf", parsed.value.object.get("source_id").?.string);
     const rendered_font = parsed.value.object.get("fonts").?.array.items[0].object;
     try std.testing.expectEqual(@as(i64, 1111), rendered_font.get("font_object").?.integer);
     try std.testing.expectEqual(@as(i64, 8), rendered_font.get("mapping_sources").?.object.get("glyph_name").?.integer);
+    try std.testing.expectEqual(@as(i64, 0), rendered_font.get("type3_charprocs").?.object.get("metrics").?.integer);
     const selection = parsed.value.object.get("selection").?.object;
     try std.testing.expectEqual(@as(i64, 2), selection.get("form_xobjects_decoded").?.integer);
     try std.testing.expectEqual(@as(i64, 2), selection.get("missing_codepoints").?.integer);

@@ -280,41 +280,86 @@ pub fn buildLineSpans(
 ) ![]layout.TextSpan {
     var spans: std.ArrayList(layout.TextSpan) = .empty;
     errdefer {
-        for (spans.items) |span| allocator.free(@constCast(span.text));
+        for (spans.items) |span| {
+            allocator.free(@constCast(span.text));
+            if (span.font.name) |name| allocator.free(@constCast(name));
+        }
         spans.deinit(allocator);
     }
 
     for (result.lines) |line| {
-        var text: std.ArrayList(u8) = .empty;
-        errdefer text.deinit(allocator);
         const start: usize = @intCast(line.ordered_start);
         const count: usize = @intCast(line.glyph_count);
-        for (result.ordered_glyph_indices[start .. start + count], 0..) |glyph_index, local_index| {
-            const boundary = result.boundaries[start + local_index];
-            const glyph = glyphs[glyph_index];
-            if (local_index > 0 and boundary.kind == .space and !endsInWhitespace(text.items)) {
-                try text.append(allocator, ' ');
+        if (count == 0) continue;
+
+        var segment_start: usize = 0;
+        while (segment_start < count) {
+            const representative = glyphs[result.ordered_glyph_indices[start + segment_start]];
+            var segment_end = segment_start + 1;
+            while (segment_end < count) : (segment_end += 1) {
+                const candidate = glyphs[result.ordered_glyph_indices[start + segment_end]];
+                if (!sameTextSpanProvenance(representative, candidate)) break;
             }
-            try appendNormalizedGlyph(allocator, &text, glyph.text);
+
+            var text: std.ArrayList(u8) = .empty;
+            errdefer text.deinit(allocator);
+            var segment_bbox = representative.bbox;
+            for (segment_start..segment_end) |local_index| {
+                const ordered_index = start + local_index;
+                const boundary = result.boundaries[ordered_index];
+                const glyph = glyphs[result.ordered_glyph_indices[ordered_index]];
+                segment_bbox = unionBox(segment_bbox, glyph.bbox);
+                if (local_index > 0 and boundary.kind == .space and !endsInWhitespace(text.items)) {
+                    try text.append(allocator, ' ');
+                }
+                try appendNormalizedGlyph(allocator, &text, glyph.text);
+            }
+            trimTrailingWhitespace(&text);
+            if (text.items.len == 0) {
+                text.deinit(allocator);
+                segment_start = segment_end;
+                continue;
+            }
+
+            const font_name = if (representative.font_name) |name| try allocator.dupe(u8, name) else null;
+            var font_name_transferred = false;
+            errdefer if (!font_name_transferred) {
+                if (font_name) |name| allocator.free(name);
+            };
+            try spans.ensureUnusedCapacity(allocator, 1);
+            const owned_text = try text.toOwnedSlice(allocator);
+            spans.appendAssumeCapacity(layout.TextSpan.init(.{
+                .page_index = page_index,
+                .bbox = segment_bbox,
+                .text = owned_text,
+                .source = .native_pdf,
+                .confidence = lineConfidence(result, line),
+                .font = .{ .name = font_name, .size = representative.font_size },
+                .line_id = line.line_index,
+                .mcid = representative.mcid,
+                .unicode_map_error = representative.unicode_map_error,
+                .actual_text = representative.actual_text,
+                .writing_mode = representative.writing_mode,
+            }));
+            font_name_transferred = true;
+            segment_start = segment_end;
         }
-        trimTrailingWhitespace(&text);
-        if (text.items.len == 0) {
-            text.deinit(allocator);
-            continue;
-        }
-        try spans.ensureUnusedCapacity(allocator, 1);
-        const owned_text = try text.toOwnedSlice(allocator);
-        spans.appendAssumeCapacity(layout.TextSpan.init(.{
-            .page_index = page_index,
-            .bbox = line.bbox,
-            .text = owned_text,
-            .source = .native_pdf,
-            .confidence = lineConfidence(result, line),
-            .font = .{ .size = line.font_size },
-            .line_id = line.line_index,
-        }));
     }
     return spans.toOwnedSlice(allocator);
+}
+
+fn sameTextSpanProvenance(a: GlyphSpan, b: GlyphSpan) bool {
+    return optionalTextEqual(a.font_name, b.font_name) and
+        a.font_size == b.font_size and
+        a.mcid == b.mcid and
+        a.unicode_map_error == b.unicode_map_error and
+        a.actual_text == b.actual_text and
+        a.writing_mode == b.writing_mode;
+}
+
+fn optionalTextEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    if (a == null or b == null) return a == null and b == null;
+    return std.mem.eql(u8, a.?, b.?);
 }
 
 fn candidateGlyphIndex(line_glyphs: []const u32, line: PendingLine) u32 {
@@ -992,6 +1037,62 @@ test "glyph geometry reconstructs missing spaces and line breaks" {
     try std.testing.expect(result.quality.quality_pass);
     try std.testing.expectEqual(BoundaryKind.space, result.boundaries[1].kind);
     try std.testing.expectEqual(BoundaryKind.line_break, result.boundaries[2].kind);
+}
+
+test "line spans preserve representative font and vertical provenance" {
+    var glyph = testGlyph("日", 300, 700, 12);
+    glyph.font_name = "FVertical";
+    glyph.writing_mode = 1;
+    glyph.actual_text = true;
+    glyph.mcid = 7;
+    const glyphs = [_]GlyphSpan{glyph};
+    var result = try analyze(std.testing.allocator, &glyphs, .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 }, "日");
+    defer result.deinit();
+
+    const spans = try buildLineSpans(std.testing.allocator, &glyphs, &result, 0);
+    defer {
+        for (spans) |span| {
+            std.testing.allocator.free(@constCast(span.text));
+            if (span.font.name) |name| std.testing.allocator.free(@constCast(name));
+        }
+        std.testing.allocator.free(spans);
+    }
+    try std.testing.expectEqual(@as(usize, 1), spans.len);
+    try std.testing.expectEqualStrings("FVertical", spans[0].font.name.?);
+    try std.testing.expectEqual(@as(u8, 1), spans[0].writing_mode);
+    try std.testing.expect(spans[0].actual_text);
+    try std.testing.expectEqual(@as(?i32, 7), spans[0].mcid);
+}
+
+test "line spans split mixed font and marked-content provenance" {
+    var regular = testGlyph("Alpha", 72, 700, 25);
+    regular.font_name = "Regular";
+    regular.mcid = 3;
+    var bold = testGlyph("Bold", 97, 700, 20);
+    bold.font_name = "Bold";
+    bold.mcid = 4;
+    bold.actual_text = true;
+    const glyphs = [_]GlyphSpan{ regular, bold };
+    var result = try analyze(std.testing.allocator, &glyphs, .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 }, "AlphaBold");
+    defer result.deinit();
+
+    const spans = try buildLineSpans(std.testing.allocator, &glyphs, &result, 0);
+    defer {
+        for (spans) |span| {
+            std.testing.allocator.free(@constCast(span.text));
+            if (span.font.name) |name| std.testing.allocator.free(@constCast(name));
+        }
+        std.testing.allocator.free(spans);
+    }
+    try std.testing.expectEqual(@as(usize, 2), spans.len);
+    try std.testing.expectEqualStrings("Alpha", spans[0].text);
+    try std.testing.expectEqualStrings("Bold", spans[1].text);
+    try std.testing.expectEqualStrings("Regular", spans[0].font.name.?);
+    try std.testing.expectEqualStrings("Bold", spans[1].font.name.?);
+    try std.testing.expectEqual(@as(?i32, 3), spans[0].mcid);
+    try std.testing.expectEqual(@as(?i32, 4), spans[1].mcid);
+    try std.testing.expect(!spans[0].actual_text);
+    try std.testing.expect(spans[1].actual_text);
 }
 
 test "explicit and generated whitespace retain provenance" {

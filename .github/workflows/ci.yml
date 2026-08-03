@@ -20,6 +20,35 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Checkout pinned Adobe CMap resources
+        uses: actions/checkout@v7
+        with:
+          repository: adobe-type-tools/cmap-resources
+          ref: f5cf3bca7fdfeaceb77aa82847e974f2306c20b4
+          path: benchmark/eval/raw_cache/cmap-resources
+          sparse-checkout: |
+            Adobe-CNS1-7
+            Adobe-GB1-6
+            Adobe-Japan1-7
+            Adobe-Korea1-2
+
+      - name: Checkout pinned Adobe CID mappings
+        uses: actions/checkout@v7
+        with:
+          repository: adobe-type-tools/mapping-resources-pdf
+          ref: 2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5
+          path: benchmark/eval/raw_cache/mapping-resources-pdf
+          sparse-checkout: pdf2unicode
+
+      - name: Verify generated Adobe CMap resources
+        run: |
+          python3 benchmark/eval/generate_cmap_resources.py \
+            --cmap-root benchmark/eval/raw_cache/cmap-resources \
+            --mapping-root benchmark/eval/raw_cache/mapping-resources-pdf \
+            --output src/cmap_resources.zig \
+            --binary-output src/cmap_resources.bin \
+            --check
+
       - name: Check formatting
         run: zig fmt --check $(git ls-files '*.zig')
 
@@ -48,6 +77,14 @@ jobs:
 
       - name: Build WASM
         run: zig build wasm
+
+      - name: Enforce WASM size budget
+        run: |
+          wasm_size=$(wc -c < zig-out/bin/pdf_parser.wasm)
+          if [ "$wasm_size" -gt 3250000 ]; then
+            echo "WASM artifact exceeds 3,250,000-byte budget: $wasm_size"
+            exit 1
+          fi
 
   adaptive-ocr:
     name: Adaptive OCR quality gate

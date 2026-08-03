@@ -691,6 +691,121 @@ const fixtures = [_]Fixture{
         .generate = testpdf.generateIdentityVVerticalCjkPdf,
     },
     .{
+        .category = "weird_fonts",
+        .doc_id = "predefined-japan1",
+        .pdf_name = "predefined-japan1.pdf",
+        .source_note = "synthetic 90ms-RKSJ-H and Adobe-Japan1 fixture without ToUnicode",
+        .truth =
+        \\日本
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "日本",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "predefined-cmap", "adobe-japan1", "missing-tounicode" },
+        .generate = testpdf.generatePredefinedJapan1Pdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "predefined-japan1-vertical",
+        .pdf_name = "predefined-japan1-vertical.pdf",
+        .source_note = "synthetic 90ms-RKSJ-V parent-inheritance and Adobe-Japan1 fixture without ToUnicode",
+        .truth =
+        \\日本
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "日本",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 1,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "predefined-cmap", "usecmap", "vertical-cjk", "adobe-japan1", "missing-tounicode" },
+        .generate = testpdf.generatePredefinedJapan1VerticalPdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "predefined-gb1",
+        .pdf_name = "predefined-gb1.pdf",
+        .source_note = "synthetic GBK-EUC-H and Adobe-GB1 fixture without ToUnicode",
+        .truth =
+        \\中国
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "中国",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "predefined-cmap", "adobe-gb1", "missing-tounicode" },
+        .generate = testpdf.generatePredefinedGB1Pdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "predefined-cns1",
+        .pdf_name = "predefined-cns1.pdf",
+        .source_note = "synthetic ETen-B5-H and Adobe-CNS1 fixture without ToUnicode",
+        .truth =
+        \\中文
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "中文",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "predefined-cmap", "adobe-cns1", "missing-tounicode" },
+        .generate = testpdf.generatePredefinedCNS1Pdf,
+    },
+    .{
+        .category = "weird_fonts",
+        .doc_id = "predefined-korea1",
+        .pdf_name = "predefined-korea1.pdf",
+        .source_note = "synthetic KSCms-UHC-H and Adobe-Korea1 fixture without ToUnicode",
+        .truth =
+        \\한국
+        \\
+        ,
+        .font_truth =
+        \\{
+        \\  "expected_text": "한국",
+        \\  "require_exact_text": true,
+        \\  "expect_actual_text": false,
+        \\  "expect_unicode_map_error": false,
+        \\  "expected_writing_mode": 0,
+        \\  "required_glyph_trace_fields": ["record_type", "page_index", "span_id", "bbox", "source_code", "source_bytes", "text", "font_name", "font_size", "writing_mode", "unicode_map_error", "actual_text", "mcid"]
+        \\}
+        \\
+        ,
+        .font_case_tags = &.{ "predefined-cmap", "adobe-korea1", "missing-tounicode" },
+        .generate = testpdf.generatePredefinedKorea1Pdf,
+    },
+    .{
         .category = "visual_truth",
         .doc_id = "rotated-page-text",
         .pdf_name = "rotated-page-text.pdf",

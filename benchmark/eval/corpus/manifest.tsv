@@ -22,6 +22,11 @@ weird_fonts	type3-simple	benchmark/eval/corpus/weird_fonts/type3-simple.pdf	benc
 weird_fonts	type3-tounicode	benchmark/eval/corpus/weird_fonts/type3-tounicode.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-tounicode.txt
 weird_fonts	identity-h-broken	benchmark/eval/corpus/weird_fonts/identity-h-broken.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-h-broken.txt
 weird_fonts	identity-v-vertical-cjk	benchmark/eval/corpus/weird_fonts/identity-v-vertical-cjk.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-v-vertical-cjk.txt
+weird_fonts	predefined-japan1	benchmark/eval/corpus/weird_fonts/predefined-japan1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-japan1.txt
+weird_fonts	predefined-japan1-vertical	benchmark/eval/corpus/weird_fonts/predefined-japan1-vertical.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-japan1-vertical.txt
+weird_fonts	predefined-gb1	benchmark/eval/corpus/weird_fonts/predefined-gb1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-gb1.txt
+weird_fonts	predefined-cns1	benchmark/eval/corpus/weird_fonts/predefined-cns1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-cns1.txt
+weird_fonts	predefined-korea1	benchmark/eval/corpus/weird_fonts/predefined-korea1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-korea1.txt
 visual_truth	rotated-page-text	benchmark/eval/corpus/visual_truth/rotated-page-text.pdf	benchmark/eval/ground_truth/page_text/visual_truth/rotated-page-text.txt
 visual_truth	clipped-text	benchmark/eval/corpus/visual_truth/clipped-text.pdf	benchmark/eval/ground_truth/page_text/visual_truth/clipped-text.txt
 visual_truth	invisible-ocr-layer	benchmark/eval/corpus/visual_truth/invisible-ocr-layer.pdf	benchmark/eval/ground_truth/page_text/visual_truth/invisible-ocr-layer.txt

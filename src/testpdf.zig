@@ -858,16 +858,16 @@ pub fn generateType3SimplePdf(allocator: std.mem.Allocator) ![]u8 {
         "5 0 obj\n" ++
             "<< /Type /Font /Subtype /Type3 /Name /F1 /FontBBox [0 -200 1000 900] " ++
             "/FontMatrix [0.001 0 0 0.001 0 0] /FirstChar 32 /LastChar 122 " ++
-            "/Widths [{s}] /Encoding /WinAnsiEncoding /Resources << >> /CharProcs << /.notdef 6 0 R >> >>\n" ++
+            "/Widths [{s}] /Encoding /WinAnsiEncoding /Resources << >> /CharProcs << /.notdef 6 0 R /T 6 0 R >> >>\n" ++
             "endobj\n",
         .{widths},
     );
     defer allocator.free(font);
     const charproc =
         "6 0 obj\n" ++
-        "<< /Length 17 >>\n" ++
+        "<< /Length 24 >>\n" ++
         "stream\n" ++
-        "600 0 0 0 0 0 d0\n" ++
+        "600 0 0 -200 600 800 d1\n" ++
         "endstream\n" ++
         "endobj\n";
     const content = "BT\n/F1 16 Tf\n100 700 Td\n(Type3 simple text) Tj\nET\n";
@@ -981,6 +981,61 @@ pub fn generateIdentityVVerticalCjkPdf(allocator: std.mem.Allocator) ![]u8 {
     );
     defer allocator.free(cmap_object);
     return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, descendant, cmap_object });
+}
+
+fn generatePredefinedCMapWithoutToUnicodePdf(
+    allocator: std.mem.Allocator,
+    cmap_name: []const u8,
+    ordering: []const u8,
+    supplement: u8,
+    hex_text: []const u8,
+) ![]u8 {
+    const content = try std.fmt.allocPrint(
+        allocator,
+        "BT\n/F1 18 Tf\n100 700 Td\n<{s}> Tj\nET\n",
+        .{hex_text},
+    );
+    defer allocator.free(content);
+    const font = try std.fmt.allocPrint(
+        allocator,
+        "5 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /PredefinedCID /Encoding /{s} " ++
+            "/DescendantFonts [6 0 R] >>\nendobj\n",
+        .{cmap_name},
+    );
+    defer allocator.free(font);
+    const descendant = try std.fmt.allocPrint(
+        allocator,
+        "6 0 obj\n<< /Type /Font /Subtype /CIDFontType2 /BaseFont /PredefinedCID " ++
+            "/CIDSystemInfo << /Registry (Adobe) /Ordering ({s}) /Supplement {} >> /DW 1000 >>\nendobj\n",
+        .{ ordering, supplement },
+    );
+    defer allocator.free(descendant);
+    return generateSinglePageFontFixturePdf(allocator, "/F1 5 0 R", content, &.{ font, descendant });
+}
+
+/// Exercise 90ms-RKSJ-H and Adobe-Japan1 fallback without a ToUnicode map.
+pub fn generatePredefinedJapan1Pdf(allocator: std.mem.Allocator) ![]u8 {
+    return generatePredefinedCMapWithoutToUnicodePdf(allocator, "90ms-RKSJ-H", "Japan1", 7, "93FA967B");
+}
+
+/// Exercise 90ms-RKSJ-V parent fallback and vertical writing mode.
+pub fn generatePredefinedJapan1VerticalPdf(allocator: std.mem.Allocator) ![]u8 {
+    return generatePredefinedCMapWithoutToUnicodePdf(allocator, "90ms-RKSJ-V", "Japan1", 7, "93FA967B");
+}
+
+/// Exercise GBK-EUC-H and Adobe-GB1 fallback without a ToUnicode map.
+pub fn generatePredefinedGB1Pdf(allocator: std.mem.Allocator) ![]u8 {
+    return generatePredefinedCMapWithoutToUnicodePdf(allocator, "GBK-EUC-H", "GB1", 6, "D6D0B9FA");
+}
+
+/// Exercise ETen-B5-H and Adobe-CNS1 fallback without a ToUnicode map.
+pub fn generatePredefinedCNS1Pdf(allocator: std.mem.Allocator) ![]u8 {
+    return generatePredefinedCMapWithoutToUnicodePdf(allocator, "ETen-B5-H", "CNS1", 7, "A4A4A4E5");
+}
+
+/// Exercise KSCms-UHC-H and Adobe-Korea1 fallback without a ToUnicode map.
+pub fn generatePredefinedKorea1Pdf(allocator: std.mem.Allocator) ![]u8 {
+    return generatePredefinedCMapWithoutToUnicodePdf(allocator, "KSCms-UHC-H", "Korea1", 2, "C7D1B1B9");
 }
 
 /// Generate a PDF whose leaf page node omits /Type (valid but often rejected).

@@ -3927,8 +3927,19 @@ fn ensureFontReport(
         .to_unicode_mapped_codes = toUnicodeMappedCodeCount(&font.to_unicode),
         .embedded_font_type = embedded_font_type,
         .cid_to_gid_map_type = if (font.is_cid) font.cid_to_gid.name() else "not_applicable",
+        .type3_charproc_metrics = font.type3_charproc_metrics.count(),
+        .type3_d1_bboxes = type3D1MetricCount(font),
     });
     return &reports.items[reports.items.len - 1];
+}
+
+fn type3D1MetricCount(font: *const encoding.FontEncoding) usize {
+    var count: usize = 0;
+    var metrics = font.type3_charproc_metrics.iterator();
+    while (metrics.next()) |entry| {
+        if (entry.value_ptr.operator == .d1) count += 1;
+    }
+    return count;
 }
 
 fn toUnicodeMappedCodeCount(map: *const encoding.CodeToUnicodeMap) usize {
