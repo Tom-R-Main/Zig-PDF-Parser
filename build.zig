@@ -365,6 +365,25 @@ pub fn build(b: *std.Build) void {
 
     const bench_step = b.step("bench", "Run benchmarks");
     bench_step.dependOn(&bench_cmd.step);
+
+    // Narrow in-process scanner benchmark. Unlike the document benchmark above,
+    // this keeps allocation, subprocesses, and I/O outside the timed region.
+    const simd_bench = b.addExecutable(.{
+        .name = "simd-bench",
+        .root_module = parserModule(b, "src/simd_bench.zig", target, optimize, ocr_build),
+    });
+    const simd_bench_cmd = b.addRunArtifact(simd_bench);
+    if (b.args) |args| {
+        simd_bench_cmd.addArgs(args);
+    }
+
+    const simd_bench_step = b.step("simd-bench", "Benchmark scalar, std, and existing SIMD substring search");
+    simd_bench_step.dependOn(&simd_bench_cmd.step);
+
+    const simd_bench_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/simd_bench.zig", target, optimize, ocr_build),
+    });
+    test_step.dependOn(&b.addRunArtifact(simd_bench_tests).step);
 }
 
 const OcrBuildOptions = struct {

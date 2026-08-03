@@ -59,6 +59,20 @@ pub fn extractAdaptiveStreaming(
     var event_index: u64 = 0;
     var table_context = StreamTableContext{};
 
+    var owned_fallback_page_index: ?adaptive.DocumentTextPageIndex = null;
+    if (options.adaptive_options.fallback_page_index == null) {
+        if (options.adaptive_options.fallback_document_text) |document_text| {
+            owned_fallback_page_index = try adaptive.DocumentTextPageIndex.init(allocator, document_text, page_end);
+        }
+    }
+    defer if (owned_fallback_page_index) |*index| index.deinit();
+    const fallback_page_index: ?*const adaptive.DocumentTextPageIndex = if (options.adaptive_options.fallback_page_index) |index|
+        index
+    else if (owned_fallback_page_index) |*index|
+        index
+    else
+        null;
+
     var manifest_options = options.schema_options;
     manifest_options.include_debug_asset_refs = options.include_debug_asset_refs;
     if (manifest_options.page_count == null) manifest_options.page_count = document.pages.items.len;
@@ -79,6 +93,7 @@ pub fn extractAdaptiveStreaming(
         var page_options = options.adaptive_options;
         page_options.page_start = page_idx;
         page_options.page_end = page_idx + 1;
+        page_options.fallback_page_index = fallback_page_index;
 
         var page_result = try adaptive.extractDocument(allocator, document, page_options);
         defer page_result.deinit();

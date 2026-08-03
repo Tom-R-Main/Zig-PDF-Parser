@@ -30,6 +30,9 @@ pub const ExtractOptions = struct {
     /// It is consumed page-by-page only when native readable layout fails its
     /// quality gate; ownership remains with the caller.
     fallback_document_text: ?[]const u8 = null,
+    /// Optional pre-indexed view of `fallback_document_text`. Streaming callers
+    /// use this to share one linear scan across page-scoped extractions.
+    fallback_page_index: ?*const DocumentTextPageIndex = null,
     reconcile_options: ReconcileOptions = .{},
 };
 
@@ -277,6 +280,20 @@ pub fn extractDocument(
     const page_end = options.page_end orelse document.pages.items.len;
     if (page_start > page_end or page_end > document.pages.items.len) return error.InvalidPageRange;
 
+    var owned_fallback_page_index: ?DocumentTextPageIndex = null;
+    if (options.fallback_page_index == null) {
+        if (options.fallback_document_text) |document_text| {
+            owned_fallback_page_index = try DocumentTextPageIndex.init(allocator, document_text, page_end);
+        }
+    }
+    defer if (owned_fallback_page_index) |*index| index.deinit();
+    const fallback_page_index: ?*const DocumentTextPageIndex = if (options.fallback_page_index) |index|
+        index
+    else if (owned_fallback_page_index) |*index|
+        index
+    else
+        null;
+
     var native_pages: std.ArrayList([]layout.TextSpan) = .empty;
     defer {
         for (native_pages.items) |spans| freeTextSpans(allocator, spans);
@@ -348,22 +365,21 @@ pub fn extractDocument(
         defer allocator.free(raw_recall_text);
         var native_result = try native_layout.analyze(allocator, geometry.glyphs, page_bbox, raw_recall_text);
         defer native_result.deinit();
-        if (options.fallback_document_text) |document_text| {
-            if (documentTextPage(document_text, page_idx)) |reference_text| {
-                native_result.quality = try native_layout.compareAgainstReference(
-                    allocator,
-                    raw_recall_text,
-                    native_result.text,
-                    reference_text,
-                );
-            }
+        const fallback_page_text = if (fallback_page_index) |index| index.get(page_idx) else null;
+        if (fallback_page_text) |reference_text| {
+            native_result.quality = try native_layout.compareAgainstReference(
+                allocator,
+                raw_recall_text,
+                native_result.text,
+                reference_text,
+            );
         }
 
         var readable_spans: []layout.TextSpan = undefined;
         if (native_result.quality.quality_pass) {
             readable_spans = try native_layout.buildLineSpans(allocator, geometry.glyphs, &native_result, page_index);
-        } else if (options.fallback_document_text) |document_text| {
-            readable_spans = try fallbackTextSpans(allocator, document_text, page_idx, page_index, page_bbox);
+        } else if (fallback_page_text) |page_text| {
+            readable_spans = try fallbackTextSpans(allocator, page_text, page_index, page_bbox);
         } else {
             // Keep the best native readable reconstruction available when the
             // external comparator is unavailable, while preserving the failed
@@ -1725,12 +1741,10 @@ fn cloneTextSpans(allocator: std.mem.Allocator, source: []const layout.TextSpan)
 
 fn fallbackTextSpans(
     allocator: std.mem.Allocator,
-    document_text: []const u8,
-    page_number: usize,
+    page_text: []const u8,
     page_index: u32,
     page_bbox: BBox,
 ) ![]layout.TextSpan {
-    const page_text = documentTextPage(document_text, page_number) orelse return allocator.alloc(layout.TextSpan, 0);
     const trimmed = std.mem.trim(u8, page_text, " \t\r\n");
     if (trimmed.len == 0) return allocator.alloc(layout.TextSpan, 0);
     const spans = try allocator.alloc(layout.TextSpan, 1);
@@ -1746,17 +1760,48 @@ fn fallbackTextSpans(
     return spans;
 }
 
-fn documentTextPage(document_text: []const u8, wanted_page: usize) ?[]const u8 {
-    var page: usize = 0;
-    var start: usize = 0;
-    for (document_text, 0..) |byte, index| {
-        if (byte != '\x0c') continue;
-        if (page == wanted_page) return document_text[start..index];
-        page += 1;
-        start = index + 1;
+pub const DocumentTextPageIndex = struct {
+    allocator: std.mem.Allocator,
+    pages: []?[]const u8,
+
+    pub fn init(allocator: std.mem.Allocator, document_text: []const u8, page_count: usize) !DocumentTextPageIndex {
+        const pages = try allocator.alloc(?[]const u8, page_count);
+        @memset(pages, null);
+
+        var page: usize = 0;
+        var start: usize = 0;
+        for (document_text, 0..) |byte, index| {
+            if (byte != '\x0c') continue;
+            if (page < pages.len) pages[page] = document_text[start..index];
+            page += 1;
+            start = index + 1;
+            if (page >= pages.len) break;
+        }
+        if (page < pages.len) pages[page] = document_text[start..];
+
+        return .{ .allocator = allocator, .pages = pages };
     }
-    if (page == wanted_page) return document_text[start..];
-    return null;
+
+    pub fn deinit(self: *DocumentTextPageIndex) void {
+        self.allocator.free(self.pages);
+        self.* = undefined;
+    }
+
+    fn get(self: DocumentTextPageIndex, page: usize) ?[]const u8 {
+        if (page >= self.pages.len) return null;
+        return self.pages[page];
+    }
+};
+
+test "document text page index preserves form-feed page boundaries" {
+    var index = try DocumentTextPageIndex.init(std.testing.allocator, "first\x0csecond\x0c", 4);
+    defer index.deinit();
+
+    try std.testing.expectEqualStrings("first", index.get(0).?);
+    try std.testing.expectEqualStrings("second", index.get(1).?);
+    try std.testing.expectEqualStrings("", index.get(2).?);
+    try std.testing.expect(index.get(3) == null);
+    try std.testing.expect(index.get(4) == null);
 }
 
 fn freeOwnedTextSpan(allocator: std.mem.Allocator, span: layout.TextSpan) void {

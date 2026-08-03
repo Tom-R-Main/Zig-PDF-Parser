@@ -426,6 +426,21 @@ PR notes; keep public claims conservative unless they cite these ReleaseFast
 artifacts. Files written under `benchmark/eval/outputs/` are ignored local run
 artifacts; commit scripts, manifests, and docs, not machine-specific timings.
 
+For isolated substring-search evidence, compare the scalar loop, Zig standard
+library, and existing SIMD implementation in-process:
+
+```sh
+zig build simd-bench -Doptimize=ReleaseFast -- \
+  --warmup 100 --repeat 1000 --format json
+```
+
+The command reports its Zig version, optimization mode, architecture, resolved
+vector width, buffer distribution, iteration counts, medians, and median
+absolute deviations. It emits no verdict outside ReleaseFast. A kernel result
+is only isolated evidence; pair it with corpus exposure before changing parser
+code, and accept “no qualifying target” when representative workloads do not
+reach that kernel at vector-sized lengths.
+
 Install optional baselines in your own environment when you want strict
 side-by-side numbers:
 
