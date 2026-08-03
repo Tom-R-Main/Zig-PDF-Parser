@@ -1721,6 +1721,85 @@ test "text search case insensitive" {
     try std.testing.expectEqual(@as(usize, 1), results.len);
 }
 
+test "detailed search returns normalized source mapping and native geometry" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "Evaluation summary");
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var report = try doc.searchDetailed(allocator, "evaluation summary", .{});
+    defer report.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), report.matches.len);
+    try std.testing.expectEqual(@as(usize, 0), report.page_failures.len);
+    try std.testing.expect(report.matches[0].bbox != null);
+    try std.testing.expect(report.matches[0].first_glyph_index != null);
+    try std.testing.expect(report.matches[0].glyph_indices.len > 0);
+    try std.testing.expectEqual(
+        report.matches[0].first_glyph_index.?,
+        report.matches[0].glyph_indices[0],
+    );
+    try std.testing.expectEqual(
+        report.matches[0].last_glyph_index.?,
+        report.matches[0].glyph_indices[report.matches[0].glyph_indices.len - 1],
+    );
+    try std.testing.expect(report.matches[0].normalized_offset == null);
+    try std.testing.expect(report.matches[0].source_start == null);
+    try std.testing.expect(report.matches[0].source_end == null);
+    var context_view = try zpdf.text_search.buildView(
+        allocator,
+        report.matches[0].context,
+        .native_reading,
+        .richDefault(),
+        &.{},
+    );
+    defer context_view.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, context_view.normalized_text, "evaluation summary") != null);
+}
+
+test "detailed search preserves Form XObject inventory recall" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generatePartiallyTaggedFormXObjectPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var report = try doc.searchDetailed(allocator, "Form-only recall text", .{});
+    defer report.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), report.matches.len);
+    try std.testing.expectEqual(@as(usize, 0), report.matches[0].page);
+    try std.testing.expect(
+        report.matches[0].source_kind == .legacy_structured or
+            report.matches[0].source_kind == .full_context_text,
+    );
+    try std.testing.expect(report.matches[0].bbox == null);
+    try std.testing.expect(report.matches[0].normalized_offset != null);
+    try std.testing.expect(report.matches[0].source_start != null);
+    try std.testing.expect(report.matches[0].source_end != null);
+}
+
+test "detailed search reports pages considered for an empty normalized query" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "Searchable page");
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var report = try doc.searchDetailed(allocator, " \u{00ad} ", .{});
+    defer report.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), report.matches.len);
+    try std.testing.expectEqual(@as(usize, 1), report.pages_searched);
+}
+
 test "text search no matches" {
     const allocator = std.testing.allocator;
 

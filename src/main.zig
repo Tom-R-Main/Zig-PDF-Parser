@@ -2589,34 +2589,73 @@ fn runSearch(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer doc.close();
 
-    const results = doc.search(allocator, query) catch |err| {
+    var report = doc.searchDetailed(allocator, query, .{}) catch |err| {
         std.debug.print("Error searching: {}\n", .{err});
         return;
     };
-    defer zpdf.Document.freeSearchResults(allocator, results);
+    defer report.deinit();
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_bw = runtime.stdoutWriter(&stdout_buf);
     const stdout = &stdout_bw.interface;
     defer stdout.flush() catch {};
 
-    if (results.len == 0) {
+    if (report.matches.len == 0) {
         try stdout.print("No matches found for \"{s}\" in {s}\n", .{ query, path });
+        if (report.page_failures.len > 0) {
+            try stdout.print("Warning: {} source-lane failure{s}; search may be partial\n", .{
+                report.page_failures.len,
+                if (report.page_failures.len == 1) "" else "s",
+            });
+        }
         return;
     }
 
     try stdout.print("Found {} match{s} for \"{s}\" in {s}:\n\n", .{
-        results.len,
-        if (results.len == 1) "" else "es",
+        report.matches.len,
+        if (report.matches.len == 1) "" else "es",
         query,
         path,
     });
 
-    for (results) |r| {
-        try stdout.print("  Page {}, offset {}: \"...{s}...\"\n", .{
-            r.page + 1,
-            r.offset,
-            r.context,
+    for (report.matches) |r| {
+        if (r.source_start) |source_start| {
+            try stdout.print("  Page {}, source {s}, source offset {}: \"...{s}...\"\n", .{
+                r.page + 1,
+                @tagName(r.source_kind),
+                source_start,
+                r.context,
+            });
+        } else if (r.glyph_indices.len > 0) {
+            try stdout.print("  Page {}, source {s}, glyphs [", .{
+                r.page + 1,
+                @tagName(r.source_kind),
+            });
+            for (r.glyph_indices, 0..) |glyph_index, index| {
+                if (index > 0) try stdout.writeAll(",");
+                try stdout.print("{}", .{glyph_index});
+            }
+            try stdout.print("]: \"...{s}...\"\n", .{r.context});
+        } else if (r.first_glyph_index) |first_glyph_index| {
+            try stdout.print("  Page {}, source {s}, glyphs {}-{}: \"...{s}...\"\n", .{
+                r.page + 1,
+                @tagName(r.source_kind),
+                first_glyph_index,
+                r.last_glyph_index orelse first_glyph_index,
+                r.context,
+            });
+        } else {
+            try stdout.print("  Page {}, source {s}: \"...{s}...\"\n", .{
+                r.page + 1,
+                @tagName(r.source_kind),
+                r.context,
+            });
+        }
+    }
+    if (report.page_failures.len > 0) {
+        try stdout.print("\nWarning: {} source-lane failure{s}; successful source lanes were still searched\n", .{
+            report.page_failures.len,
+            if (report.page_failures.len == 1) "" else "s",
         });
     }
 }

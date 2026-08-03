@@ -277,11 +277,39 @@ pdf-parser extract --adaptive -f debug-svg doc.pdf
 pdf-parser extract --adaptive --trace doc.pdf
 pdf-parser inspect complexity doc.pdf --format json
 pdf-parser inspect extraction doc.pdf --format json
+pdf-parser search "Evaluation summary" document.pdf # Normalized, multi-source phrase search
 pdf-parser info document.pdf                 # Show document info
 pdf-parser bench document.pdf                # Run benchmark
 pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv \
   --tools pdf-parser:adaptive --output /tmp/pdf-parser-scorecard.json
 ```
+
+### Search semantics
+
+`pdf-parser search` uses the rich native search path. It normalizes ASCII case,
+Unicode whitespace, compatibility hyphens and quotes, common presentation
+ligatures, and conservative line-end hyphenation. Each page compares structured,
+full-context, native reading-order, and native content-order views, unions their
+matches, and conservatively deduplicates occurrences only when supported by
+normalized page identity, exact glyph evidence, or matching local context.
+Candidates without one of those signals are
+retained rather than silently dropped. Results
+identify their source. Reproducible text views report byte offsets; native
+glyph-backed results expose their exact sorted glyph indices as stable locators;
+the first/last fields are a compatibility envelope. They retain geometry through
+the Zig API. Search normalization removes PDF layout controls such as
+zero-width space and word joiner but preserves script-shaping ZWNJ and ZWJ.
+
+The existing `Document.search`, C `zpdf_search`, and Python `Document.search`
+surfaces remain compatibility APIs: ASCII-case-insensitive exact substring
+matching over structured extraction with independently allocated context
+strings. New Zig callers can use `Document.searchDetailed` and must call
+`SearchReport.deinit`. Its `page_failures` distinguishes a partial search from
+a true no-match result, while `pages_searched` reports the number of document
+pages considered (including for a query that normalizes to empty). Full-context
+inventory hits may have no geometry when their text came from a Form XObject or
+document-scoped AcroForm value that is not represented in the native glyph
+collector.
 
 `inspect extraction` includes per-font CMap, CIDSystemInfo, ToUnicode,
 embedded-font, CIDToGIDMap, and Unicode mapping-provenance counters so missing

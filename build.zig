@@ -141,6 +141,12 @@ pub fn build(b: *std.Build) void {
 
     const run_native_layout_unit_tests = b.addRunArtifact(native_layout_unit_tests);
 
+    const text_search_unit_tests = b.addTest(.{
+        .root_module = parserModule(b, "src/text_search.zig", target, optimize, ocr_build),
+    });
+
+    const run_text_search_unit_tests = b.addRunArtifact(text_search_unit_tests);
+
     const complexity_unit_tests = b.addTest(.{
         .root_module = parserModule(b, "src/complexity.zig", target, optimize, ocr_build),
     });
@@ -324,6 +330,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_runtime_unit_tests.step);
     test_step.dependOn(&run_layout_unit_tests.step);
     test_step.dependOn(&run_native_layout_unit_tests.step);
+    test_step.dependOn(&run_text_search_unit_tests.step);
     test_step.dependOn(&run_complexity_unit_tests.step);
     test_step.dependOn(&run_specialists_unit_tests.step);
     test_step.dependOn(&run_specialist_protocol_unit_tests.step);

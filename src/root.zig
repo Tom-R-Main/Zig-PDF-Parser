@@ -29,6 +29,7 @@ pub const structural = @import("structural.zig");
 pub const simd = @import("simd.zig");
 pub const layout = @import("layout.zig");
 pub const native_layout = @import("native_layout.zig");
+pub const text_search = @import("text_search.zig");
 pub const structtree = @import("structtree.zig");
 pub const markdown = @import("markdown.zig");
 pub const outline = @import("outline.zig");
@@ -55,6 +56,8 @@ pub const TextSpan = layout.TextSpan;
 pub const GlyphSpan = interpreter.GlyphSpan;
 pub const NativeLayoutResult = native_layout.Result;
 pub const NativeLayoutQuality = native_layout.QualityMetrics;
+pub const SearchTextOptions = text_search.Options;
+pub const SearchSourceKind = text_search.SourceKind;
 pub const LineRole = layout.LineRole;
 pub const BlockKind = layout.BlockKind;
 pub const CandidateKind = layout.CandidateKind;
@@ -2035,6 +2038,292 @@ pub const Document = struct {
         context: []const u8,
     };
 
+    pub const DetailedSearchOptions = struct {
+        normalization: text_search.Options = text_search.Options.richDefault(),
+        context_radius: usize = 50,
+        max_results_per_page: ?usize = null,
+    };
+
+    pub const SearchFailureStage = enum(u8) {
+        structured_text,
+        page_content,
+        full_context_text,
+        native_geometry,
+        native_layout,
+    };
+
+    pub const SearchPageFailure = struct {
+        page: usize,
+        stage: SearchFailureStage,
+        error_name: []const u8,
+    };
+
+    pub const DetailedSearchMatch = struct {
+        page: usize,
+        source_kind: text_search.SourceKind,
+        /// Byte offset into a caller-reproducible normalized text view.
+        /// Native glyph lanes use null because their synthetic views are not
+        /// retained after searchDetailed returns.
+        normalized_offset: ?usize,
+        /// Byte offsets into a caller-reproducible text view. Native glyph
+        /// lanes use null and expose glyph indices as their stable locator.
+        source_start: ?usize,
+        source_end: ?usize,
+        context: []u8,
+        /// Sorted, unique glyph ids contributing to a native match. This is
+        /// the exact stable locator; first/last remain a compatibility envelope.
+        glyph_indices: []u32 = &.{},
+        first_glyph_index: ?u32 = null,
+        last_glyph_index: ?u32 = null,
+        bbox: ?layout.BBox = null,
+        transformations: u32 = 0,
+    };
+
+    pub const SearchReport = struct {
+        allocator: std.mem.Allocator,
+        matches: []DetailedSearchMatch,
+        page_failures: []SearchPageFailure,
+        pages_searched: usize,
+
+        pub fn deinit(self: *SearchReport) void {
+            for (self.matches) |match| {
+                self.allocator.free(match.context);
+                self.allocator.free(match.glyph_indices);
+            }
+            self.allocator.free(self.matches);
+            self.allocator.free(self.page_failures);
+            self.* = undefined;
+        }
+    };
+
+    /// Rich normalized search with explicit source provenance and page failures.
+    ///
+    /// Each page unions matches from all available source views. Matches are
+    /// deduplicated only when page-view identity, exact glyph evidence, or
+    /// matching local context identifies the same occurrence.
+    pub fn searchDetailed(
+        self: *Document,
+        allocator: std.mem.Allocator,
+        query: []const u8,
+        options: DetailedSearchOptions,
+    ) !SearchReport {
+        const normalized_query = try text_search.normalizeQuery(allocator, query, options.normalization);
+        defer allocator.free(normalized_query);
+
+        var matches: std.ArrayList(DetailedSearchMatch) = .empty;
+        errdefer {
+            freeDetailedSearchMatches(allocator, matches.items);
+            matches.deinit(allocator);
+        }
+        var failures: std.ArrayList(SearchPageFailure) = .empty;
+        errdefer failures.deinit(allocator);
+
+        if (normalized_query.len == 0) {
+            return finishSearchReport(
+                allocator,
+                &matches,
+                &failures,
+                self.pages.items.len,
+            );
+        }
+
+        for (0..self.pages.items.len) |page_idx| {
+            var page_candidates: [4]std.ArrayList(SearchCandidate) = @splat(.empty);
+            defer {
+                for (&page_candidates) |*candidate_list| {
+                    freeSearchCandidates(allocator, candidate_list.items);
+                    candidate_list.deinit(allocator);
+                }
+            }
+
+            const structured = self.extractTextStructured(page_idx, allocator) catch |err| blk: {
+                if (err == error.OutOfMemory) return err;
+                try failures.append(allocator, .{
+                    .page = page_idx,
+                    .stage = .structured_text,
+                    .error_name = @errorName(err),
+                });
+                break :blk null;
+            };
+            if (structured) |source_text| {
+                defer allocator.free(source_text);
+                var view = try text_search.buildView(
+                    allocator,
+                    source_text,
+                    .legacy_structured,
+                    options.normalization,
+                    &.{},
+                );
+                defer view.deinit();
+                try collectViewMatches(
+                    allocator,
+                    page_idx,
+                    &view,
+                    normalized_query,
+                    options,
+                    &page_candidates[0],
+                );
+            }
+
+            var scratch_arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer scratch_arena.deinit();
+            const scratch_allocator = scratch_arena.allocator();
+            const content = self.getPageContentForScratch(page_idx, scratch_allocator) catch |err| {
+                if (err == error.OutOfMemory) return err;
+                try failures.append(allocator, .{
+                    .page = page_idx,
+                    .stage = .page_content,
+                    .error_name = @errorName(err),
+                });
+                try appendUniqueCandidates(
+                    allocator,
+                    &matches,
+                    &page_candidates,
+                    options.max_results_per_page,
+                );
+                continue;
+            };
+
+            const raw = self.extractTextFullContextFromContent(
+                page_idx,
+                allocator,
+                scratch_allocator,
+                content,
+                null,
+            ) catch |err| blk: {
+                if (err == error.OutOfMemory) return err;
+                try failures.append(allocator, .{
+                    .page = page_idx,
+                    .stage = .full_context_text,
+                    .error_name = @errorName(err),
+                });
+                break :blk null;
+            };
+            defer if (raw) |source_text| allocator.free(source_text);
+            if (raw) |source_text| {
+                var view = try text_search.buildView(
+                    allocator,
+                    source_text,
+                    .full_context_text,
+                    options.normalization,
+                    &.{},
+                );
+                defer view.deinit();
+                try collectViewMatches(
+                    allocator,
+                    page_idx,
+                    &view,
+                    normalized_query,
+                    options,
+                    &page_candidates[1],
+                );
+            }
+
+            var geometry = self.extractNativePageGeometryFromContent(
+                page_idx,
+                allocator,
+                scratch_allocator,
+                content,
+            ) catch |err| blk: {
+                if (err == error.OutOfMemory) return err;
+                try failures.append(allocator, .{
+                    .page = page_idx,
+                    .stage = .native_geometry,
+                    .error_name = @errorName(err),
+                });
+                break :blk null;
+            };
+            if (geometry) |*page_geometry| {
+                defer page_geometry.deinit();
+                const raw_or_empty: []const u8 = if (raw) |raw_text| raw_text else "";
+                const page = self.pages.items[page_idx];
+                var native_result = native_layout.analyze(
+                    allocator,
+                    page_geometry.glyphs,
+                    .{
+                        .x0 = page.media_box[0],
+                        .y0 = page.media_box[1],
+                        .x1 = page.media_box[2],
+                        .y1 = page.media_box[3],
+                    },
+                    raw_or_empty,
+                ) catch |err| blk: {
+                    if (err == error.OutOfMemory) return err;
+                    try failures.append(allocator, .{
+                        .page = page_idx,
+                        .stage = .native_layout,
+                        .error_name = @errorName(err),
+                    });
+                    break :blk null;
+                };
+                if (native_result) |*result| {
+                    defer result.deinit();
+                    var reading_source = try buildGlyphSearchSource(
+                        allocator,
+                        page_geometry.glyphs,
+                        result.ordered_glyph_indices,
+                        result.boundaries,
+                    );
+                    defer reading_source.deinit();
+                    var reading_view = try text_search.buildView(
+                        allocator,
+                        reading_source.text,
+                        .native_reading,
+                        options.normalization,
+                        reading_source.evidence,
+                    );
+                    defer reading_view.deinit();
+                    try collectViewMatches(
+                        allocator,
+                        page_idx,
+                        &reading_view,
+                        normalized_query,
+                        options,
+                        &page_candidates[2],
+                    );
+                }
+
+                var content_source = try buildGlyphSearchSource(
+                    allocator,
+                    page_geometry.glyphs,
+                    null,
+                    null,
+                );
+                defer content_source.deinit();
+                var content_view = try text_search.buildView(
+                    allocator,
+                    content_source.text,
+                    .native_content,
+                    options.normalization,
+                    content_source.evidence,
+                );
+                defer content_view.deinit();
+                try collectViewMatches(
+                    allocator,
+                    page_idx,
+                    &content_view,
+                    normalized_query,
+                    options,
+                    &page_candidates[3],
+                );
+            }
+
+            try appendUniqueCandidates(
+                allocator,
+                &matches,
+                &page_candidates,
+                options.max_results_per_page,
+            );
+        }
+
+        return finishSearchReport(
+            allocator,
+            &matches,
+            &failures,
+            self.pages.items.len,
+        );
+    }
+
     /// Search for text across all pages. Returns matches with page, offset, and context.
     /// Caller must free the returned slice and each context string.
     pub fn search(self: *Document, allocator: std.mem.Allocator, query: []const u8) ![]SearchResult {
@@ -2102,6 +2391,401 @@ pub const Document = struct {
 
     fn asciiToLower(c: u8) u8 {
         return if (c >= 'A' and c <= 'Z') c + 32 else c;
+    }
+
+    const search_anchor_radius = 32;
+    const search_position_scale: u32 = 1_000_000;
+
+    const SearchCandidate = struct {
+        match: DetailedSearchMatch,
+        normalized_source_hash: u64,
+        normalized_source_len: usize,
+        normalized_page_offset: usize,
+        page_position: u32,
+        glyph_identity_hash: ?u64 = null,
+        left_anchor: [search_anchor_radius]u8 = @splat(0),
+        left_anchor_len: u8 = 0,
+        right_anchor: [search_anchor_radius]u8 = @splat(0),
+        right_anchor_len: u8 = 0,
+        duplicate_ordinal: usize = 0,
+    };
+
+    const GlyphSearchSource = struct {
+        allocator: std.mem.Allocator,
+        text: []u8,
+        evidence: []text_search.SourceEvidence,
+
+        fn deinit(self: *GlyphSearchSource) void {
+            self.allocator.free(self.text);
+            self.allocator.free(self.evidence);
+            self.* = undefined;
+        }
+    };
+
+    fn buildGlyphSearchSource(
+        allocator: std.mem.Allocator,
+        glyphs: []const GlyphSpan,
+        ordered_indices: ?[]const u32,
+        boundaries: ?[]const native_layout.Boundary,
+    ) !GlyphSearchSource {
+        var text: std.ArrayList(u8) = .empty;
+        errdefer text.deinit(allocator);
+        var evidence: std.ArrayList(text_search.SourceEvidence) = .empty;
+        errdefer evidence.deinit(allocator);
+
+        const count = if (ordered_indices) |ordered| ordered.len else glyphs.len;
+        for (0..count) |ordered_index| {
+            const glyph_index: u32 = if (ordered_indices) |ordered|
+                ordered[ordered_index]
+            else
+                @intCast(ordered_index);
+            if (boundaries) |items| {
+                if (ordered_index > 0) switch (items[ordered_index].kind) {
+                    .join => {},
+                    .space => if (text.items.len == 0 or !std.ascii.isWhitespace(text.items[text.items.len - 1])) {
+                        try text.append(allocator, ' ');
+                    },
+                    .line_break => try text.append(allocator, '\n'),
+                    .block_break, .region_break => {
+                        try text.append(allocator, '\n');
+                        try text.append(allocator, '\n');
+                    },
+                };
+            }
+            const glyph = glyphs[glyph_index];
+            if (glyph.text.len == 0) continue;
+            const source_start = text.items.len;
+            try text.appendSlice(allocator, glyph.text);
+            try evidence.append(allocator, .{
+                .source_start = source_start,
+                .source_end = text.items.len,
+                .glyph_index = glyph_index,
+                .bbox = glyph.bbox,
+            });
+        }
+
+        const owned_text = try text.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_text);
+        const owned_evidence = try evidence.toOwnedSlice(allocator);
+        return .{
+            .allocator = allocator,
+            .text = owned_text,
+            .evidence = owned_evidence,
+        };
+    }
+
+    fn collectViewMatches(
+        allocator: std.mem.Allocator,
+        page_idx: usize,
+        view: *const text_search.SearchTextView,
+        normalized_query: []const u8,
+        options: DetailedSearchOptions,
+        output: *std.ArrayList(SearchCandidate),
+    ) !void {
+        const locations = try view.findAll(
+            allocator,
+            normalized_query,
+            options.max_results_per_page,
+        );
+        defer allocator.free(locations);
+        const normalized_source_hash = std.hash.Wyhash.hash(0, view.normalized_text);
+        for (locations, 0..) |location, occurrence_ordinal| {
+            const bounds = text_search.contextBounds(
+                view.source_text,
+                location.source.source_start,
+                location.source.source_end,
+                options.context_radius,
+            );
+            const context = try allocator.dupe(u8, view.source_text[bounds.start..bounds.end]);
+            errdefer allocator.free(context);
+            const glyph_identity = try view.glyphIdentity(
+                allocator,
+                location.source.source_start,
+                location.source.source_end,
+            );
+            errdefer allocator.free(glyph_identity);
+
+            var candidate = SearchCandidate{
+                .match = .{
+                    .page = page_idx,
+                    .source_kind = view.source_kind,
+                    .normalized_offset = if (sourceOffsetsAreStable(view.source_kind))
+                        location.normalized_start
+                    else
+                        null,
+                    .source_start = if (sourceOffsetsAreStable(view.source_kind))
+                        location.source.source_start
+                    else
+                        null,
+                    .source_end = if (sourceOffsetsAreStable(view.source_kind))
+                        location.source.source_end
+                    else
+                        null,
+                    .context = context,
+                    .glyph_indices = glyph_identity,
+                    .first_glyph_index = location.source.first_glyph_index,
+                    .last_glyph_index = location.source.last_glyph_index,
+                    .bbox = location.source.bbox,
+                    .transformations = location.source.transformations,
+                },
+                .normalized_source_hash = normalized_source_hash,
+                .normalized_source_len = view.normalized_text.len,
+                .normalized_page_offset = location.normalized_start,
+                .page_position = normalizedPagePosition(
+                    location.normalized_start,
+                    view.normalized_text.len,
+                ),
+                .glyph_identity_hash = if (glyph_identity.len > 0)
+                    std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(glyph_identity))
+                else
+                    null,
+                .duplicate_ordinal = occurrence_ordinal,
+            };
+            fillSearchAnchors(&candidate, view.normalized_text, location);
+            try output.append(allocator, candidate);
+        }
+    }
+
+    fn appendUniqueCandidates(
+        allocator: std.mem.Allocator,
+        output: *std.ArrayList(DetailedSearchMatch),
+        candidate_lists: *[4]std.ArrayList(SearchCandidate),
+        max_results: ?usize,
+    ) !void {
+        var flat_candidates: std.ArrayList(*const SearchCandidate) = .empty;
+        defer flat_candidates.deinit(allocator);
+        var lane_starts: [4]usize = @splat(0);
+        var lane_lengths: [4]usize = @splat(0);
+        for (candidate_lists, 0..) |*candidate_list, lane_index| {
+            lane_starts[lane_index] = flat_candidates.items.len;
+            lane_lengths[lane_index] = candidate_list.items.len;
+            for (candidate_list.items) |*candidate| {
+                try flat_candidates.append(allocator, candidate);
+            }
+        }
+
+        const parents = try allocator.alloc(usize, flat_candidates.items.len);
+        defer allocator.free(parents);
+        for (parents, 0..) |*parent, index| parent.* = index;
+
+        var glyph_groups = std.AutoHashMap(u64, usize).init(allocator);
+        defer glyph_groups.deinit();
+        for (candidate_lists, 0..) |*candidate_list, lane_index| {
+            for (candidate_list.items, 0..) |*candidate, occurrence_ordinal| {
+                const candidate_index = lane_starts[lane_index] + occurrence_ordinal;
+                if (candidate.glyph_identity_hash) |identity_hash| {
+                    if (glyph_groups.get(identity_hash)) |existing_index| {
+                        const existing = flat_candidates.items[existing_index];
+                        if (std.mem.eql(u32, candidate.match.glyph_indices, existing.match.glyph_indices)) {
+                            searchUnion(parents, candidate_index, existing_index);
+                        }
+                    } else {
+                        try glyph_groups.put(identity_hash, candidate_index);
+                    }
+                }
+                for (0..lane_index) |prior_lane| {
+                    if (occurrence_ordinal >= lane_lengths[prior_lane]) continue;
+                    const existing_index = lane_starts[prior_lane] + occurrence_ordinal;
+                    if (samePhysicalSearchMatch(candidate, flat_candidates.items[existing_index])) {
+                        searchUnion(parents, candidate_index, existing_index);
+                    }
+                }
+            }
+        }
+
+        var representatives = std.AutoHashMap(usize, usize).init(allocator);
+        defer representatives.deinit();
+        for (flat_candidates.items, 0..) |candidate, candidate_index| {
+            const root_index = searchFind(parents, candidate_index);
+            const entry = try representatives.getOrPut(root_index);
+            if (!entry.found_existing or
+                preferSearchCandidate(candidate, flat_candidates.items[entry.value_ptr.*]))
+            {
+                entry.value_ptr.* = candidate_index;
+            }
+        }
+
+        var selected: std.ArrayList(*const SearchCandidate) = .empty;
+        defer selected.deinit(allocator);
+        for (flat_candidates.items, 0..) |candidate, candidate_index| {
+            const root_index = searchFind(parents, candidate_index);
+            if (representatives.get(root_index).? == candidate_index) {
+                try selected.append(allocator, candidate);
+            }
+        }
+        std.mem.sort(*const SearchCandidate, selected.items, {}, searchCandidateLessThan);
+
+        const result_count = if (max_results) |limit|
+            @min(limit, selected.items.len)
+        else
+            selected.items.len;
+        for (selected.items[0..result_count]) |candidate| {
+            const context = try allocator.dupe(u8, candidate.match.context);
+            errdefer allocator.free(context);
+            const glyph_indices = try allocator.dupe(u32, candidate.match.glyph_indices);
+            errdefer allocator.free(glyph_indices);
+            var owned = candidate.match;
+            owned.context = context;
+            owned.glyph_indices = glyph_indices;
+            try output.append(allocator, owned);
+        }
+    }
+
+    fn searchFind(parents: []usize, start_index: usize) usize {
+        var root_index = start_index;
+        while (parents[root_index] != root_index) root_index = parents[root_index];
+        var index = start_index;
+        while (parents[index] != index) {
+            const next_index = parents[index];
+            parents[index] = root_index;
+            index = next_index;
+        }
+        return root_index;
+    }
+
+    fn searchUnion(parents: []usize, a_index: usize, b_index: usize) void {
+        const a_root = searchFind(parents, a_index);
+        const b_root = searchFind(parents, b_index);
+        if (a_root != b_root) parents[b_root] = a_root;
+    }
+
+    fn normalizedPagePosition(normalized_offset: usize, normalized_length: usize) u32 {
+        if (normalized_length == 0) return 0;
+        const scaled: u128 = @as(u128, normalized_offset) * search_position_scale;
+        return @intCast(@min(scaled / normalized_length, search_position_scale));
+    }
+
+    fn fillSearchAnchors(
+        candidate: *SearchCandidate,
+        normalized_text: []const u8,
+        location: text_search.MatchLocation,
+    ) void {
+        const left_start = location.normalized_start -| search_anchor_radius;
+        const left = normalized_text[left_start..location.normalized_start];
+        @memcpy(candidate.left_anchor[0..left.len], left);
+        candidate.left_anchor_len = @intCast(left.len);
+
+        const right_end = @min(
+            normalized_text.len,
+            location.normalized_end +| search_anchor_radius,
+        );
+        const right = normalized_text[location.normalized_end..right_end];
+        @memcpy(candidate.right_anchor[0..right.len], right);
+        candidate.right_anchor_len = @intCast(right.len);
+    }
+
+    fn samePhysicalSearchMatch(a: *const SearchCandidate, b: *const SearchCandidate) bool {
+        if (a.match.page != b.match.page) return false;
+        if (a.match.glyph_indices.len > 0 and b.match.glyph_indices.len > 0 and
+            a.glyph_identity_hash == b.glyph_identity_hash and
+            std.mem.eql(u32, a.match.glyph_indices, b.match.glyph_indices))
+        {
+            return true;
+        }
+        if (a.normalized_source_hash == b.normalized_source_hash and
+            a.normalized_source_len == b.normalized_source_len and
+            a.normalized_page_offset == b.normalized_page_offset)
+        {
+            return true;
+        }
+        if (a.duplicate_ordinal != b.duplicate_ordinal) return false;
+        return sameSearchAnchor(a, b);
+    }
+
+    fn sameSearchAnchor(a: *const SearchCandidate, b: *const SearchCandidate) bool {
+        const left_len = @min(@as(u8, 12), @min(a.left_anchor_len, b.left_anchor_len));
+        const right_len = @min(@as(u8, 12), @min(a.right_anchor_len, b.right_anchor_len));
+        const left_matches = if (left_len >= 8) blk: {
+            const a_start = a.left_anchor_len - left_len;
+            const b_start = b.left_anchor_len - left_len;
+            break :blk std.mem.eql(
+                u8,
+                a.left_anchor[a_start..a.left_anchor_len],
+                b.left_anchor[b_start..b.left_anchor_len],
+            );
+        } else false;
+        const right_matches = right_len >= 8 and std.mem.eql(
+            u8,
+            a.right_anchor[0..right_len],
+            b.right_anchor[0..right_len],
+        );
+        if (left_len >= 8 and right_len >= 8) return left_matches and right_matches;
+        return left_matches or right_matches;
+    }
+
+    fn searchCandidateLessThan(
+        _: void,
+        a: *const SearchCandidate,
+        b: *const SearchCandidate,
+    ) bool {
+        if (a.page_position != b.page_position) return a.page_position < b.page_position;
+        if (a.duplicate_ordinal != b.duplicate_ordinal) {
+            return a.duplicate_ordinal < b.duplicate_ordinal;
+        }
+        const a_preference = sourcePreference(a.match.source_kind);
+        const b_preference = sourcePreference(b.match.source_kind);
+        if (a_preference != b_preference) return a_preference > b_preference;
+        if (a.normalized_page_offset != b.normalized_page_offset) {
+            return a.normalized_page_offset < b.normalized_page_offset;
+        }
+        return @intFromEnum(a.match.source_kind) < @intFromEnum(b.match.source_kind);
+    }
+
+    fn preferSearchCandidate(candidate: *const SearchCandidate, current: *const SearchCandidate) bool {
+        if (candidate.match.bbox != null and current.match.bbox == null) return true;
+        if (candidate.match.bbox == null and current.match.bbox != null) return false;
+        return sourcePreference(candidate.match.source_kind) > sourcePreference(current.match.source_kind);
+    }
+
+    fn sourcePreference(source_kind: text_search.SourceKind) u8 {
+        return switch (source_kind) {
+            .native_reading => 5,
+            .native_content => 4,
+            .full_context_text => 3,
+            .legacy_structured => 2,
+            .poppler_text => 1,
+        };
+    }
+
+    fn sourceOffsetsAreStable(source_kind: text_search.SourceKind) bool {
+        return switch (source_kind) {
+            .native_reading, .native_content => false,
+            .full_context_text, .legacy_structured, .poppler_text => true,
+        };
+    }
+
+    fn finishSearchReport(
+        allocator: std.mem.Allocator,
+        matches: *std.ArrayList(DetailedSearchMatch),
+        failures: *std.ArrayList(SearchPageFailure),
+        pages_searched: usize,
+    ) !SearchReport {
+        const owned_matches = try matches.toOwnedSlice(allocator);
+        errdefer {
+            freeDetailedSearchMatches(allocator, owned_matches);
+            allocator.free(owned_matches);
+        }
+        const owned_failures = try failures.toOwnedSlice(allocator);
+        return .{
+            .allocator = allocator,
+            .matches = owned_matches,
+            .page_failures = owned_failures,
+            .pages_searched = pages_searched,
+        };
+    }
+
+    fn freeSearchCandidates(allocator: std.mem.Allocator, candidates: []SearchCandidate) void {
+        for (candidates) |candidate| {
+            allocator.free(candidate.match.context);
+            allocator.free(candidate.match.glyph_indices);
+        }
+    }
+
+    fn freeDetailedSearchMatches(allocator: std.mem.Allocator, matches: []DetailedSearchMatch) void {
+        for (matches) |match| {
+            allocator.free(match.context);
+            allocator.free(match.glyph_indices);
+        }
     }
 
     // =========================================================================
@@ -4362,4 +5046,351 @@ test "allocated memory path cleanup" {
 
     // Verify document parsed correctly
     try std.testing.expectEqual(@as(usize, 1), doc.pageCount());
+}
+
+fn searchReportOwnershipProbe(allocator: std.mem.Allocator) !void {
+    var matches: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    errdefer {
+        Document.freeDetailedSearchMatches(allocator, matches.items);
+        matches.deinit(allocator);
+    }
+    var failures: std.ArrayList(Document.SearchPageFailure) = .empty;
+    errdefer failures.deinit(allocator);
+
+    const context = try allocator.dupe(u8, "owned context");
+    var context_transferred = false;
+    errdefer if (!context_transferred) allocator.free(context);
+    const glyph_indices = try allocator.dupe(u32, &.{ 2, 4 });
+    var glyph_indices_transferred = false;
+    errdefer if (!glyph_indices_transferred) allocator.free(glyph_indices);
+    try matches.append(allocator, .{
+        .page = 0,
+        .source_kind = .legacy_structured,
+        .normalized_offset = 0,
+        .source_start = 0,
+        .source_end = 5,
+        .context = context,
+        .glyph_indices = glyph_indices,
+    });
+    context_transferred = true;
+    glyph_indices_transferred = true;
+    try failures.append(allocator, .{
+        .page = 0,
+        .stage = .full_context_text,
+        .error_name = "SyntheticFailure",
+    });
+
+    var report = try Document.finishSearchReport(allocator, &matches, &failures, 1);
+    defer report.deinit();
+}
+
+test "search report ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        searchReportOwnershipProbe,
+        .{},
+    );
+}
+
+fn makeMergeCandidate(
+    allocator: std.mem.Allocator,
+    source_kind: text_search.SourceKind,
+    context: []const u8,
+    left_anchor: []const u8,
+    normalized_offset: usize,
+    glyph_identity: []const u32,
+    bbox: ?layout.BBox,
+) !Document.SearchCandidate {
+    const owned_context = try allocator.dupe(u8, context);
+    errdefer allocator.free(owned_context);
+    const owned_glyph_identity = try allocator.dupe(u32, glyph_identity);
+    errdefer allocator.free(owned_glyph_identity);
+    var candidate = Document.SearchCandidate{
+        .match = .{
+            .page = 0,
+            .source_kind = source_kind,
+            .normalized_offset = if (Document.sourceOffsetsAreStable(source_kind)) normalized_offset else null,
+            .source_start = if (Document.sourceOffsetsAreStable(source_kind)) normalized_offset else null,
+            .source_end = if (Document.sourceOffsetsAreStable(source_kind)) normalized_offset + 5 else null,
+            .context = owned_context,
+            .glyph_indices = owned_glyph_identity,
+            .bbox = bbox,
+        },
+        .normalized_source_hash = @intCast(normalized_offset + @as(usize, @intFromEnum(source_kind)) + 1),
+        .normalized_source_len = 100,
+        .normalized_page_offset = normalized_offset,
+        .page_position = Document.normalizedPagePosition(normalized_offset, 100),
+        .glyph_identity_hash = if (owned_glyph_identity.len > 0)
+            std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(owned_glyph_identity))
+        else
+            null,
+    };
+    @memcpy(candidate.left_anchor[0..left_anchor.len], left_anchor);
+    candidate.left_anchor_len = @intCast(left_anchor.len);
+    return candidate;
+}
+
+test "search candidate union retains disjoint lane matches and enriches duplicates" {
+    const allocator = std.testing.allocator;
+    var candidates: [4]std.ArrayList(Document.SearchCandidate) = @splat(.empty);
+    defer {
+        for (&candidates) |*candidate_list| {
+            Document.freeSearchCandidates(allocator, candidate_list.items);
+            candidate_list.deinit(allocator);
+        }
+    }
+
+    try candidates[0].append(allocator, try makeMergeCandidate(
+        allocator,
+        .legacy_structured,
+        "shared occurrence",
+        "garbled-before",
+        10,
+        &.{},
+        null,
+    ));
+    try candidates[0].append(allocator, try makeMergeCandidate(
+        allocator,
+        .legacy_structured,
+        "form-only occurrence",
+        "form---before",
+        40,
+        &.{},
+        null,
+    ));
+    try candidates[1].append(allocator, try makeMergeCandidate(
+        allocator,
+        .full_context_text,
+        "shared occurrence",
+        "clean---before",
+        11,
+        &.{},
+        null,
+    ));
+    var native_shared = try makeMergeCandidate(
+        allocator,
+        .native_reading,
+        "shared occurrence",
+        "garbled-before",
+        12,
+        &.{ 3, 7 },
+        .{ .x0 = 1, .y0 = 2, .x1 = 3, .y1 = 4 },
+    );
+    native_shared.match.first_glyph_index = 3;
+    native_shared.match.last_glyph_index = 7;
+    try candidates[2].append(allocator, native_shared);
+    try candidates[2].append(allocator, try makeMergeCandidate(
+        allocator,
+        .native_reading,
+        "native-only occurrence",
+        "native-before",
+        70,
+        &.{ 20, 21 },
+        .{ .x0 = 5, .y0 = 6, .x1 = 7, .y1 = 8 },
+    ));
+    var content_shared = try makeMergeCandidate(
+        allocator,
+        .native_content,
+        "shared occurrence",
+        "clean---before",
+        13,
+        &.{ 3, 7 },
+        .{ .x0 = 1, .y0 = 2, .x1 = 3, .y1 = 4 },
+    );
+    content_shared.match.first_glyph_index = 3;
+    content_shared.match.last_glyph_index = 7;
+    try candidates[3].append(allocator, content_shared);
+
+    var merged: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    defer {
+        Document.freeDetailedSearchMatches(allocator, merged.items);
+        merged.deinit(allocator);
+    }
+    try Document.appendUniqueCandidates(allocator, &merged, &candidates, null);
+
+    try std.testing.expectEqual(@as(usize, 3), merged.items.len);
+    var found_enriched_shared = false;
+    var found_form_only = false;
+    var found_native_only = false;
+    for (merged.items) |match| {
+        if (std.mem.eql(u8, match.context, "shared occurrence")) {
+            found_enriched_shared = match.bbox != null and match.source_start == null;
+        } else if (std.mem.eql(u8, match.context, "form-only occurrence")) {
+            found_form_only = true;
+        } else if (std.mem.eql(u8, match.context, "native-only occurrence")) {
+            found_native_only = true;
+        }
+    }
+    try std.testing.expect(found_enriched_shared);
+    try std.testing.expect(found_form_only);
+    try std.testing.expect(found_native_only);
+}
+
+test "search candidate union does not merge sparse overlapping glyph ranges" {
+    const allocator = std.testing.allocator;
+    var candidates: [4]std.ArrayList(Document.SearchCandidate) = @splat(.empty);
+    defer {
+        for (&candidates) |*candidate_list| {
+            Document.freeSearchCandidates(allocator, candidate_list.items);
+            candidate_list.deinit(allocator);
+        }
+    }
+
+    var sparse = try makeMergeCandidate(
+        allocator,
+        .native_reading,
+        "sparse range",
+        "left sparse anchor",
+        10,
+        &.{ 1, 100 },
+        .{ .x0 = 1, .y0 = 1, .x1 = 2, .y1 = 2 },
+    );
+    sparse.match.first_glyph_index = 1;
+    sparse.match.last_glyph_index = 100;
+    try candidates[2].append(allocator, sparse);
+
+    var middle = try makeMergeCandidate(
+        allocator,
+        .native_content,
+        "middle range",
+        "other middle text",
+        80,
+        &.{50},
+        .{ .x0 = 10, .y0 = 10, .x1 = 11, .y1 = 11 },
+    );
+    middle.match.first_glyph_index = 50;
+    middle.match.last_glyph_index = 50;
+    try candidates[3].append(allocator, middle);
+
+    var merged: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    defer {
+        Document.freeDetailedSearchMatches(allocator, merged.items);
+        merged.deinit(allocator);
+    }
+    try Document.appendUniqueCandidates(allocator, &merged, &candidates, null);
+    try std.testing.expectEqual(@as(usize, 2), merged.items.len);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 100 }, merged.items[0].glyph_indices);
+    try std.testing.expectEqualSlices(u32, &.{50}, merged.items[1].glyph_indices);
+}
+
+test "search candidate union retains short text lanes without identity evidence" {
+    const allocator = std.testing.allocator;
+    var candidates: [4]std.ArrayList(Document.SearchCandidate) = @splat(.empty);
+    defer {
+        for (&candidates) |*candidate_list| {
+            Document.freeSearchCandidates(allocator, candidate_list.items);
+            candidate_list.deinit(allocator);
+        }
+    }
+    try candidates[0].append(allocator, try makeMergeCandidate(
+        allocator,
+        .legacy_structured,
+        "Title",
+        "",
+        0,
+        &.{},
+        null,
+    ));
+    try candidates[1].append(allocator, try makeMergeCandidate(
+        allocator,
+        .full_context_text,
+        "Title with divergent surrounding extraction",
+        "different",
+        0,
+        &.{},
+        null,
+    ));
+
+    var merged: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    defer {
+        Document.freeDetailedSearchMatches(allocator, merged.items);
+        merged.deinit(allocator);
+    }
+    try Document.appendUniqueCandidates(allocator, &merged, &candidates, null);
+    try std.testing.expectEqual(@as(usize, 2), merged.items.len);
+}
+
+test "search result cap is applied after deterministic page ordering" {
+    const allocator = std.testing.allocator;
+    var candidates: [4]std.ArrayList(Document.SearchCandidate) = @splat(.empty);
+    defer {
+        for (&candidates) |*candidate_list| {
+            Document.freeSearchCandidates(allocator, candidate_list.items);
+            candidate_list.deinit(allocator);
+        }
+    }
+    try candidates[0].append(allocator, try makeMergeCandidate(
+        allocator,
+        .legacy_structured,
+        "late occurrence",
+        "late context",
+        80,
+        &.{},
+        null,
+    ));
+    try candidates[1].append(allocator, try makeMergeCandidate(
+        allocator,
+        .full_context_text,
+        "early occurrence",
+        "early context",
+        10,
+        &.{},
+        null,
+    ));
+
+    var merged: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    defer {
+        Document.freeDetailedSearchMatches(allocator, merged.items);
+        merged.deinit(allocator);
+    }
+    try Document.appendUniqueCandidates(allocator, &merged, &candidates, 1);
+    try std.testing.expectEqual(@as(usize, 1), merged.items.len);
+    try std.testing.expectEqualStrings("early occurrence", merged.items[0].context);
+}
+
+fn searchCandidateUnionAllocationProbe(allocator: std.mem.Allocator) !void {
+    var candidates: [4]std.ArrayList(Document.SearchCandidate) = @splat(.empty);
+    defer {
+        for (&candidates) |*candidate_list| {
+            Document.freeSearchCandidates(allocator, candidate_list.items);
+            candidate_list.deinit(allocator);
+        }
+    }
+    try candidates[0].ensureUnusedCapacity(allocator, 1);
+    const text_candidate = try makeMergeCandidate(
+        allocator,
+        .legacy_structured,
+        "text candidate",
+        "shared anchor",
+        10,
+        &.{},
+        null,
+    );
+    candidates[0].appendAssumeCapacity(text_candidate);
+    try candidates[2].ensureUnusedCapacity(allocator, 1);
+    const glyph_candidate = try makeMergeCandidate(
+        allocator,
+        .native_reading,
+        "glyph candidate",
+        "shared anchor",
+        10,
+        &.{ 3, 4, 5 },
+        .{ .x0 = 1, .y0 = 2, .x1 = 3, .y1 = 4 },
+    );
+    candidates[2].appendAssumeCapacity(glyph_candidate);
+
+    var merged: std.ArrayList(Document.DetailedSearchMatch) = .empty;
+    defer {
+        Document.freeDetailedSearchMatches(allocator, merged.items);
+        merged.deinit(allocator);
+    }
+    try Document.appendUniqueCandidates(allocator, &merged, &candidates, null);
+}
+
+test "search candidate union ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        searchCandidateUnionAllocationProbe,
+        .{},
+    );
 }
