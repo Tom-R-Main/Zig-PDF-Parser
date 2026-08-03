@@ -305,6 +305,17 @@ pub const LayoutResult = struct {
     /// Render reconstructed block text, skipping page-furniture candidates and
     /// joining soft hyphenated line breaks inside body paragraphs.
     pub fn getReconstructedText(self: *const LayoutResult, allocator: std.mem.Allocator) ![]u8 {
+        return self.getReconstructedTextOptions(allocator, false);
+    }
+
+    /// Render a completeness-preserving candidate for extraction selection.
+    /// The caller's inventory oracle decides whether reordered text is safe, so
+    /// headers and footers must remain available to that comparison.
+    pub fn getCompleteReconstructedText(self: *const LayoutResult, allocator: std.mem.Allocator) ![]u8 {
+        return self.getReconstructedTextOptions(allocator, true);
+    }
+
+    fn getReconstructedTextOptions(self: *const LayoutResult, allocator: std.mem.Allocator, include_removed: bool) ![]u8 {
         if (self.blocks.len == 0) return self.getTextInOrder(allocator);
 
         var output: std.ArrayList(u8) = .empty;
@@ -312,7 +323,7 @@ pub const LayoutResult = struct {
 
         var emitted_block = false;
         for (self.blocks, 0..) |block, block_index| {
-            if (block.removed) continue;
+            if (block.removed and !include_removed) continue;
             if (block.lines.len == 0) continue;
 
             if (emitted_block and output.items.len > 0 and output.items[output.items.len - 1] != '\n') {
@@ -703,7 +714,7 @@ pub fn analyzeLayoutWithRulings(
     }
     try buildBlocks(allocator, paragraphs.items, &blocks);
 
-    const tables = try buildTableGridsWithRulings(allocator, blocks.items, ruling_lines);
+    const tables = try buildTableGridsWithRulings(allocator, blocks.items, result_spans.items, ruling_lines);
     errdefer {
         freeTableGrids(allocator, tables);
         allocator.free(tables);
@@ -1093,12 +1104,12 @@ fn classifyLines(lines: []TextLine, body_font_size: f64) void {
         const can_detect_furniture = lines.len >= 4;
         if (lineStartsWithCaption(line)) {
             line.role = if (lineStartsWithFigureCaption(line)) .figure_candidate else .caption;
-        } else if (lineStartsWithListMarker(line)) {
-            line.role = .list_item;
         } else if (lineLooksLikeFormula(line, body_font_size)) {
             line.role = .formula_candidate;
         } else if (lineLooksLikeTable(line)) {
             line.role = .table_candidate;
+        } else if (lineStartsWithListMarker(line)) {
+            line.role = .list_item;
         } else if (line.bounds.font_size >= body_font_size * 1.18 and text_len <= 160) {
             line.role = .heading;
         } else if (can_detect_furniture and top_band and line_index <= 1 and text_len <= 120) {
@@ -1324,9 +1335,10 @@ fn appendLineText(allocator: std.mem.Allocator, output: *std.ArrayList(u8), line
 fn buildTableGridsWithRulings(
     allocator: std.mem.Allocator,
     blocks: []const LayoutBlock,
+    spans: []const TextSpan,
     ruling_lines: []const RulingLine,
 ) ![]TableGrid {
-    if (try buildRuledTableGrid(allocator, blocks, ruling_lines)) |table| {
+    if (try buildRuledTableGrid(allocator, blocks, spans, ruling_lines)) |table| {
         errdefer freeTableGrid(allocator, table);
         const tables = try allocator.alloc(TableGrid, 1);
         tables[0] = table;
@@ -1486,13 +1498,13 @@ fn buildTableGridForBlock(
 }
 
 const CellBucket = struct {
-    text: std.ArrayList(u8) = .empty,
-    bounds: ?TextSpan = null,
+    spans: std.ArrayList(TextSpan) = .empty,
 };
 
 fn buildRuledTableGrid(
     allocator: std.mem.Allocator,
     blocks: []const LayoutBlock,
+    spans: []const TextSpan,
     ruling_lines: []const RulingLine,
 ) !?TableGrid {
     if (blocks.len == 0 or ruling_lines.len < 4) return null;
@@ -1548,10 +1560,10 @@ fn buildRuledTableGrid(
     }
     if (block_count == 0) return null;
 
-    var rows = try allocator.alloc(TableRow, row_count);
+    var rows: std.ArrayList(TableRow) = .empty;
     errdefer {
-        for (rows[0..row_count]) |row| freeTableRow(allocator, row);
-        allocator.free(rows);
+        for (rows.items) |row| freeTableRow(allocator, row);
+        rows.deinit(allocator);
     }
 
     for (0..row_count) |row_index| {
@@ -1559,63 +1571,62 @@ fn buildRuledTableGrid(
         const bottom = ys.items[row_index + 1];
         var buckets = try allocator.alloc(CellBucket, column_count);
         defer {
-            for (buckets) |*bucket| bucket.text.deinit(allocator);
+            for (buckets) |*bucket| bucket.spans.deinit(allocator);
             allocator.free(buckets);
         }
         for (buckets) |*bucket| bucket.* = .{};
 
-        for (blocks) |block| {
-            if (!intersectsSpan(block.bounds, grid_bbox)) continue;
-            for (block.lines) |line| {
-                for (line.words) |word| {
-                    const cx = (word.bounds.x0 + word.bounds.x1) / 2.0;
-                    const cy = (word.bounds.y0 + word.bounds.y1) / 2.0;
-                    if (cy > top + 1.0 or cy < bottom - 1.0) continue;
-                    const col_index = columnForX(xs.items, cx) orelse continue;
-                    if (buckets[col_index].text.items.len > 0) try buckets[col_index].text.append(allocator, ' ');
-                    try appendWordText(allocator, &buckets[col_index].text, word);
-                    buckets[col_index].bounds = if (buckets[col_index].bounds) |existing|
-                        mergeTwoBounds(existing, word.bounds)
-                    else
-                        word.bounds;
-                }
+        // Ruling geometry is a stronger boundary than the deliberately
+        // forgiving baseline tolerance used to build layout words. Assign the
+        // original spans so raised or wrapped text cannot absorb a neighbor.
+        for (spans) |span| {
+            if (!intersectsSpan(span, grid_bbox)) continue;
+            const cx = (span.x0 + span.x1) / 2.0;
+            const cy = (span.y0 + span.y1) / 2.0;
+            if (cy > top + 1.0 or cy < bottom - 1.0) continue;
+            const col_index = columnForX(xs.items, cx) orelse continue;
+            try buckets[col_index].spans.append(allocator, span);
+        }
+
+        const cells = cells_block: {
+            const built_cells = try allocator.alloc(TableCell, column_count);
+            var initialized: usize = 0;
+            errdefer {
+                for (built_cells[0..initialized]) |cell| allocator.free(cell.text);
+                allocator.free(built_cells);
             }
-        }
+            for (built_cells, 0..) |*cell, column_index| {
+                const bucket_spans = buckets[column_index].spans.items;
+                const text = try ruledCellText(allocator, bucket_spans);
+                const cell_bbox = TextSpan.init(.{
+                    .page_index = grid_bbox.page_index,
+                    .bbox = .{
+                        .x0 = xs.items[column_index],
+                        .y0 = bottom,
+                        .x1 = xs.items[column_index + 1],
+                        .y1 = top,
+                    },
+                    .text = "",
+                    .source = .table_model,
+                    .confidence = 0.82,
+                    .font = .{},
+                });
+                cell.* = .{
+                    .bounds = if (bucket_spans.len > 0) mergeSpanBounds(bucket_spans) else cell_bbox,
+                    .text = text,
+                    .row_index = @intCast(rows.items.len),
+                    .column_index = @intCast(column_index),
+                    .rowspan = if (text.len > 0) inferredRowspan(ruling_lines, ys.items, row_index, xs.items[column_index], xs.items[column_index + 1]) else 1,
+                    .colspan = inferredColspan(ruling_lines, xs.items, column_index, bottom, top),
+                    .role = ruledCellRole(@intCast(row_index), @intCast(column_index), text),
+                    .confidence = if (text.len > 0) 0.86 else 0.42,
+                };
+                initialized += 1;
+            }
+            break :cells_block built_cells;
+        };
 
-        const cells = try allocator.alloc(TableCell, column_count);
-        errdefer {
-            for (cells) |cell| allocator.free(cell.text);
-            allocator.free(cells);
-        }
-
-        for (cells, 0..) |*cell, column_index| {
-            const text = try buckets[column_index].text.toOwnedSlice(allocator);
-            const cell_bbox = TextSpan.init(.{
-                .page_index = grid_bbox.page_index,
-                .bbox = .{
-                    .x0 = xs.items[column_index],
-                    .y0 = bottom,
-                    .x1 = xs.items[column_index + 1],
-                    .y1 = top,
-                },
-                .text = "",
-                .source = .table_model,
-                .confidence = 0.82,
-                .font = .{},
-            });
-            cell.* = .{
-                .bounds = buckets[column_index].bounds orelse cell_bbox,
-                .text = text,
-                .row_index = @intCast(row_index),
-                .column_index = @intCast(column_index),
-                .rowspan = if (text.len > 0) inferredRowspan(ruling_lines, ys.items, row_index, xs.items[column_index], xs.items[column_index + 1]) else 1,
-                .colspan = inferredColspan(ruling_lines, xs.items, column_index, bottom, top),
-                .role = ruledCellRole(@intCast(row_index), @intCast(column_index), text),
-                .confidence = if (text.len > 0) 0.86 else 0.42,
-            };
-        }
-
-        rows[row_index] = .{
+        const row = TableRow{
             .bounds = TextSpan.init(.{
                 .page_index = grid_bbox.page_index,
                 .bbox = .{ .x0 = grid_bbox.x0, .y0 = bottom, .x1 = grid_bbox.x1, .y1 = top },
@@ -1625,17 +1636,27 @@ fn buildRuledTableGrid(
                 .font = .{},
             }),
             .cells = cells,
-            .row_index = @intCast(row_index),
+            .row_index = @intCast(rows.items.len),
         };
+        var occupied_cells: usize = 0;
+        for (row.cells) |cell| if (cell.text.len > 0) {
+            occupied_cells += 1;
+        };
+        if (occupied_cells == 0) {
+            freeTableRow(allocator, row);
+            continue;
+        }
+        try appendRuledRowOrSplit(allocator, &rows, row, buckets);
     }
 
-    markFooterRows(rows);
+    if (rows.items.len == 0) return null;
+    markFooterRows(rows.items);
 
     return TableGrid{
         .bounds = grid_bbox,
         .block_index = first_block_index.?,
         .block_count = block_count,
-        .rows = rows,
+        .rows = try rows.toOwnedSlice(allocator),
         .column_count = column_count,
         .page_index = grid_bbox.page_index,
         .confidence = 0.86,
@@ -1662,6 +1683,176 @@ fn columnForX(xs: []const f64, x: f64) ?usize {
         if (x >= xs[index] - 1.0 and x <= xs[index + 1] + 1.0) return index;
     }
     return null;
+}
+
+fn ruledCellText(allocator: std.mem.Allocator, spans: []const TextSpan) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (spans) |span| {
+        const trimmed = std.mem.trim(u8, span.text, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (text.items.len > 0) try text.append(allocator, ' ');
+        try text.appendSlice(allocator, trimmed);
+    }
+    return text.toOwnedSlice(allocator);
+}
+
+fn appendRuledRowOrSplit(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(TableRow),
+    row: TableRow,
+    buckets: []const CellBucket,
+) !void {
+    errdefer freeTableRow(allocator, row);
+
+    if (rows.items.len == 0) {
+        for (row.cells, buckets, 0..) |cell, bucket, column_index| {
+            if (cell.colspan <= 1 or ruledCellLineCount(bucket.spans.items) != 2) continue;
+            if (column_index + cell.colspan > row.cells.len) continue;
+            try appendNestedRuledHeader(allocator, rows, row, buckets, column_index);
+            freeTableRow(allocator, row);
+            return;
+        }
+    }
+
+    var split_count: ?usize = null;
+    for (row.cells, buckets) |cell, bucket| {
+        if (cell.text.len == 0) continue;
+        const line_count = ruledCellLineCount(bucket.spans.items);
+        if (line_count <= 1) {
+            try rows.append(allocator, row);
+            return;
+        }
+        if (split_count) |expected| {
+            if (line_count != expected) {
+                try rows.append(allocator, row);
+                return;
+            }
+        } else {
+            split_count = line_count;
+        }
+    }
+
+    const count = split_count orelse {
+        try rows.append(allocator, row);
+        return;
+    };
+    for (0..count) |line_index| {
+        {
+            const cells = try allocator.alloc(TableCell, row.cells.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (cells[0..initialized]) |cell| allocator.free(cell.text);
+                allocator.free(cells);
+            }
+            for (row.cells, 0..) |source, column_index| {
+                cells[column_index] = source;
+                cells[column_index].text = try ruledCellTextLine(allocator, buckets[column_index].spans.items, line_index);
+                cells[column_index].row_index = @intCast(rows.items.len);
+                initialized += 1;
+            }
+            const split_row = TableRow{
+                .bounds = row.bounds,
+                .cells = cells,
+                .row_index = @intCast(rows.items.len),
+            };
+            try rows.append(allocator, split_row);
+        }
+    }
+    freeTableRow(allocator, row);
+}
+
+fn appendNestedRuledHeader(
+    allocator: std.mem.Allocator,
+    rows: *std.ArrayList(TableRow),
+    row: TableRow,
+    buckets: []const CellBucket,
+    group_column: usize,
+) !void {
+    const group_end = group_column + row.cells[group_column].colspan;
+
+    for (0..2) |level| {
+        {
+            const cells = try allocator.alloc(TableCell, row.cells.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (cells[0..initialized]) |cell| allocator.free(cell.text);
+                allocator.free(cells);
+            }
+            for (row.cells, 0..) |source, column_index| {
+                cells[column_index] = source;
+                cells[column_index].row_index = @intCast(rows.items.len);
+                cells[column_index].role = .header;
+
+                const inside_group = column_index >= group_column and column_index < group_end;
+                if (level == 0) {
+                    if (column_index == group_column) {
+                        cells[column_index].text = try ruledCellTextLine(allocator, buckets[column_index].spans.items, 0);
+                    } else if (inside_group) {
+                        cells[column_index].text = try allocator.alloc(u8, 0);
+                    } else {
+                        cells[column_index].text = try allocator.dupe(u8, source.text);
+                        if (source.text.len > 0) cells[column_index].rowspan = 2;
+                    }
+                } else if (inside_group) {
+                    cells[column_index].text = if (column_index == group_column)
+                        try ruledCellTextLine(allocator, buckets[column_index].spans.items, 1)
+                    else
+                        try allocator.dupe(u8, source.text);
+                    cells[column_index].colspan = 1;
+                    cells[column_index].rowspan = 1;
+                } else {
+                    cells[column_index].text = try allocator.alloc(u8, 0);
+                    cells[column_index].colspan = 1;
+                    cells[column_index].rowspan = 1;
+                }
+                initialized += 1;
+            }
+            const nested_row = TableRow{
+                .bounds = row.bounds,
+                .cells = cells,
+                .row_index = @intCast(rows.items.len),
+            };
+            try rows.append(allocator, nested_row);
+        }
+    }
+}
+
+fn ruledCellLineCount(spans: []const TextSpan) usize {
+    var count: usize = 0;
+    var previous_y: ?f64 = null;
+    var previous_font_size: f64 = 0;
+    for (spans) |span| {
+        if (std.mem.trim(u8, span.text, " \t\r\n").len == 0) continue;
+        if (previous_y == null or @abs(span.y0 - previous_y.?) > @max(previous_font_size, span.font_size) * 0.7) {
+            count += 1;
+        }
+        previous_y = span.y0;
+        previous_font_size = span.font_size;
+    }
+    return count;
+}
+
+fn ruledCellTextLine(allocator: std.mem.Allocator, spans: []const TextSpan, target: usize) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    var line_index: usize = 0;
+    var previous_y: ?f64 = null;
+    var previous_font_size: f64 = 0;
+    for (spans) |span| {
+        const trimmed = std.mem.trim(u8, span.text, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (previous_y != null and @abs(span.y0 - previous_y.?) > @max(previous_font_size, span.font_size) * 0.7) {
+            line_index += 1;
+        }
+        if (line_index == target) {
+            if (text.items.len > 0) try text.append(allocator, ' ');
+            try text.appendSlice(allocator, trimmed);
+        }
+        previous_y = span.y0;
+        previous_font_size = span.font_size;
+    }
+    return text.toOwnedSlice(allocator);
 }
 
 fn inferredColspan(ruling_lines: []const RulingLine, xs: []const f64, column_index: usize, bottom: f64, top: f64) u32 {
@@ -2066,9 +2257,22 @@ fn appendTablePlain(allocator: std.mem.Allocator, output: *std.ArrayList(u8), ta
         for (row.cells) |cell| {
             if (cell.text.len == 0) continue;
             if (wrote_cell) try output.append(allocator, ' ');
-            try output.appendSlice(allocator, cell.text);
+            try appendNormalizedCellText(allocator, output, cell.text);
             wrote_cell = true;
         }
+    }
+}
+
+fn appendNormalizedCellText(allocator: std.mem.Allocator, output: *std.ArrayList(u8), text: []const u8) !void {
+    var pending_space = false;
+    for (text) |byte| {
+        if (std.ascii.isWhitespace(byte)) {
+            pending_space = output.items.len > 0;
+            continue;
+        }
+        if (pending_space) try output.append(allocator, ' ');
+        try output.append(allocator, byte);
+        pending_space = false;
     }
 }
 
@@ -2549,6 +2753,32 @@ test "layout reconstruction does not split table-heavy rows into page columns" {
     try std.testing.expectEqual(@as(usize, 1), result.columns.len);
     try std.testing.expect(result.lines[0].words.len >= 5);
     try std.testing.expect(result.tables.len >= 1);
+}
+
+test "aligned numbered rows are classified as a borderless table" {
+    const allocator = std.testing.allocator;
+    const spans = [_]TextSpan{
+        testSpan("Clause", 76, 708, 112, 720),
+        testSpan("Party", 180, 708, 214, 720),
+        testSpan("Amount", 282, 708, 328, 720),
+        testSpan("Notes", 360, 708, 394, 720),
+        testSpan("1.1", 76, 680, 96, 692),
+        testSpan("Seller", 180, 680, 218, 692),
+        testSpan("1,000", 282, 680, 322, 692),
+        testSpan("Escrow release", 360, 680, 448, 692),
+        testSpan("2.4", 76, 652, 96, 664),
+        testSpan("Buyer", 180, 652, 214, 664),
+        testSpan("(250)", 282, 652, 322, 664),
+        testSpan("Credit memo", 360, 652, 430, 664),
+    };
+
+    var result = try analyzeLayout(allocator, &spans, 612);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.tables.len);
+    try std.testing.expectEqual(@as(usize, 3), result.tables[0].rows.len);
+    try std.testing.expectEqualStrings("1.1", result.tables[0].rows[1].cells[0].text);
+    try std.testing.expectEqualStrings("Escrow release", result.tables[0].rows[1].cells[3].text);
 }
 
 test "layout reconstruction detects headings and list items" {

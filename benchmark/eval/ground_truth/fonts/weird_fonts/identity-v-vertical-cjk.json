@@ -1,5 +1,6 @@
 {
   "expected_text": "日本",
+  "require_exact_text": true,
   "expect_actual_text": false,
   "expect_unicode_map_error": false,
   "expected_writing_mode": 1,

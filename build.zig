@@ -320,6 +320,40 @@ pub fn build(b: *std.Build) void {
     const benchmark_eval_step = b.step("benchmark-eval", "Run corpus benchmark scorecard");
     benchmark_eval_step.dependOn(&benchmark_eval_cmd.step);
 
+    const benchmark_quality_cmd = b.addRunArtifact(exe);
+    benchmark_quality_cmd.step.dependOn(b.getInstallStep());
+    benchmark_quality_cmd.addArgs(&.{
+        "benchmark",
+        "--manifest",
+        "benchmark/eval/gates/born-digital.tsv",
+        "--suite-id",
+        "born-digital-gate",
+        "--tools",
+        "pdf-parser:native",
+        "--thresholds",
+        "benchmark/eval/gates/born-digital-thresholds.json",
+        "--fail-on-regression",
+        "--fail-on-skipped",
+    });
+    benchmark_eval_step.dependOn(&benchmark_quality_cmd.step);
+
+    const benchmark_font_quality_cmd = b.addRunArtifact(exe);
+    benchmark_font_quality_cmd.step.dependOn(b.getInstallStep());
+    benchmark_font_quality_cmd.addArgs(&.{
+        "benchmark",
+        "--manifest",
+        "benchmark/eval/gates/hard-fonts.tsv",
+        "--suite-id",
+        "hard-font-gate",
+        "--tools",
+        "pdf-parser:native",
+        "--thresholds",
+        "benchmark/eval/gates/hard-fonts-thresholds.json",
+        "--fail-on-regression",
+        "--fail-on-skipped",
+    });
+    benchmark_eval_step.dependOn(&benchmark_font_quality_cmd.step);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_simd_unit_tests.step);

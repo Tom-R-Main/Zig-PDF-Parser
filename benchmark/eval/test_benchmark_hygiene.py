@@ -35,9 +35,44 @@ font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
 render_oracle = load_module("render_oracle", EVAL_DIR / "render_oracle.py")
 table_compare = load_module("table_compare", EVAL_DIR / "table_compare.py")
 ocr_form_quality = load_module("ocr_form_quality", EVAL_DIR / "ocr_form_quality.py")
+encrypted_twin_quality = load_module("encrypted_twin_quality", EVAL_DIR / "encrypted_twin_quality.py")
+pdfium_rasterizer = load_module("pdfium_rasterizer", EVAL_DIR / "pdfium_rasterizer.py")
 
 
 class BenchmarkHygieneTests(unittest.TestCase):
+    def test_pdfium_rasterizer_matches_single_page_output_contract(self) -> None:
+        args = pdfium_rasterizer.build_parser().parse_args(
+            ["-q", "-png", "-gray", "-singlefile", "-r", "300", "-f", "2", "-l", "2", "doc.pdf", "page"]
+        )
+
+        self.assertTrue(args.gray)
+        self.assertEqual(300, args.r)
+        self.assertEqual(Path("page.png"), pdfium_rasterizer.output_path(args.output_prefix, args.singlefile, args.f))
+
+    def test_encrypted_twin_quality_requires_readable_and_raw_equivalence(self) -> None:
+        report = encrypted_twin_quality.compare_twin_outputs(
+            "Page one\fPage two\n",
+            "Page  one\fPage two\n",
+            "raw one\fraw two",
+            "raw one\fraw two",
+        )
+
+        self.assertEqual("pass", report["status"])
+        self.assertEqual(2, report["plain"]["page_count"])
+        self.assertTrue(report["checks"]["normalized_text_equal"])
+        self.assertTrue(report["checks"]["raw_recall_equal"])
+
+    def test_encrypted_twin_quality_rejects_successful_but_degraded_text(self) -> None:
+        report = encrypted_twin_quality.compare_twin_outputs(
+            "Readable source text",
+            "scrambled text",
+            "same raw text",
+            "same raw text",
+        )
+
+        self.assertEqual("fail", report["status"])
+        self.assertFalse(report["checks"]["normalized_text_equal"])
+
     def test_ocr_form_quality_enforces_absolute_numeric_and_row_floors(self) -> None:
         artifacts = [
             {
@@ -83,6 +118,8 @@ class BenchmarkHygieneTests(unittest.TestCase):
             "total": "10.00",
             "floors": {
                 "token_recall": 1.0,
+                "token_precision": 1.0,
+                "token_f1": 1.0,
                 "row_count_exact": 1.0,
                 "date_exact_recall": 1.0,
                 "vendor_exact_recall": 1.0,
@@ -98,6 +135,13 @@ class BenchmarkHygieneTests(unittest.TestCase):
         failing = ocr_form_quality.evaluate(artifacts, truth)
         self.assertEqual("fail", failing["status"])
         self.assertIn("numeric_exact_match", [item["metric"] for item in failing["failures"]])
+
+    def test_ocr_form_quality_token_f1_penalizes_duplicate_output(self) -> None:
+        metrics = ocr_form_quality.token_metrics("ALPHA SUPPLY 10.00", "ALPHA SUPPLY 10.00 ALPHA SUPPLY 10.00")
+
+        self.assertEqual(1.0, metrics["recall"])
+        self.assertEqual(0.5, metrics["precision"])
+        self.assertAlmostEqual(2.0 / 3.0, metrics["f1"])
 
     def test_ocr_form_quality_normalizes_separator_glyph_loss_in_dates(self) -> None:
         self.assertEqual("03/21/2026", ocr_form_quality.normalize_ocr_date("0321/2026"))
@@ -280,6 +324,22 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertIn("artifact-jsonl", adaptive_cmd)
         self.assertIn("--no-ocr", adaptive_cmd)
         self.assertNotIn("--ocr-dpi", adaptive_cmd)
+
+        fast_cmd = profile_lanes.build_lane_command(
+            Path("/repo/zig-out/bin/pdf-parser"),
+            entry,
+            "native-fast",
+            Path("/tmp/out.txt"),
+            "tesseract",
+            "pdftoppm",
+            200,
+            False,
+            False,
+            None,
+        )
+
+        self.assertEqual(["/repo/zig-out/bin/pdf-parser", "extract", "--fast"], fast_cmd[:3])
+        self.assertIn("--password", fast_cmd)
 
         ocr_cmd = profile_lanes.build_lane_command(
             Path("/repo/zig-out/bin/pdf-parser"),
@@ -719,7 +779,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
         row = table_compare.skipped(entry, "pymupdf-find-tables", "PyMuPDF is not installed")
 
         self.assertEqual("table_compare_result", row["record_type"])
-        self.assertEqual("0.2.0", row["table_compare_schema_version"])
+        self.assertEqual("0.3.0", row["table_compare_schema_version"])
         self.assertEqual("skipped", row["status"])
         self.assertEqual(["invoice"], row["table_case_tags"])
 

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+
+if [ -x "$repo_dir/.venv/bin/python" ]; then
+    exec "$repo_dir/.venv/bin/python" "$script_dir/pdfium_rasterizer.py" "$@"
+fi
+
+exec python3 "$script_dir/pdfium_rasterizer.py" "$@"

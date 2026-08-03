@@ -1,0 +1,9 @@
+{
+  "benchmark_schema_version": "0.3.0",
+  "description": "Absolute native text-quality gate for checked-in CID, Type3, ActualText, vertical CJK, Symbol, and legacy mathematical-font fixtures.",
+  "metrics": {
+    "cer": { "direction": "lower", "max_regression": 0.02, "required": true, "maximum": 0.0 },
+    "wer": { "direction": "lower", "max_regression": 0.02, "required": true, "maximum": 0.0 },
+    "token_f1": { "direction": "higher", "max_regression": 0.02, "required": true, "minimum": 1.0 }
+  }
+}

@@ -37,7 +37,7 @@ outcomes now preserve `not_invoked`, `unavailable`, `failed`, `timeout`,
 empty output. Schema `0.10.0` added `poppler_text` as a span source and `external_text` as its
 provenance source kind. This source appears only when native readable layout
 fails its quality gate and a single document-level `pdftotext` fallback
-succeeds. Schema `0.9.0` added the `glyph_trace_jsonl` debug asset kind for page-scoped
+succeeds and improves the native readable candidate. Schema `0.9.0` added the `glyph_trace_jsonl` debug asset kind for page-scoped
 character/glyph review evidence. Earlier schema `0.8.0` added
 encrypted-document manifest metadata for known-password PDF parsing.
 
@@ -243,6 +243,9 @@ Materialized page assets use deterministic filenames such as
 `page-0001.ocr-routes.svg`, `page-0001.span-block-ids.svg`, and
 `page-0001.glyph-trace.jsonl`. Document-level assets include `document.debug.svg`, `document.hocr.html`,
 `document.alto.xml`, and `document.route-trace.json`.
+Glyph traces describe native pre-reconciliation spans so font mapping,
+`ActualText`, writing mode, and Unicode-map errors remain inspectable even when
+the readable output lane selects Poppler or OCR text.
 
 ### Streaming lifecycle records
 

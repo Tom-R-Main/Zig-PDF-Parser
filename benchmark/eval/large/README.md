@@ -16,7 +16,7 @@ corpus.
 
 .venv/bin/python benchmark/eval/profile_lanes.py \
   --manifest benchmark/eval/large/manifest.tsv \
-  --lanes native-text,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
+  --lanes native-text,native-fast,adaptive-artifact-jsonl,adaptive-stream-jsonl,ocr-routed \
   --ocr-pages 1-10 \
   --output benchmark/eval/outputs/profile/large.jsonl
 ```
@@ -32,3 +32,14 @@ compatibility A/B run against the older RGB raster path.
 The encrypted derivative uses the known benchmark password
 `benchmark-password`. This is not a secret; it exists only to exercise
 known-password parsing and should not be reused for private files.
+
+After building ReleaseFast, gate the encrypted derivative against its source
+twin. The check requires equal normalized readable text, page count, raw-recall
+text, and non-empty encrypted output, so successful authentication cannot hide
+a degraded extraction result:
+
+```sh
+zig build -Doptimize=ReleaseFast --summary all
+python3 benchmark/eval/encrypted_twin_quality.py \
+  --output benchmark/eval/outputs/encrypted-twin-quality.json
+```

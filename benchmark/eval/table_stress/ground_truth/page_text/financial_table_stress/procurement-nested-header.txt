@@ -1,4 +1,5 @@
 Procurement Schedule
 Vendor Materials Labor Total
+Cost Fees
 Northwind 10 hrs 500 900 1,400
 Contoso 8 hrs 450 840 1,290

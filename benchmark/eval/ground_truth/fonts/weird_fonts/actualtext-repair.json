@@ -1,5 +1,6 @@
 {
   "expected_text": "Correct ActualText replacement",
+  "require_exact_text": true,
   "expect_actual_text": true,
   "expect_unicode_map_error": false,
   "expected_writing_mode": 0,

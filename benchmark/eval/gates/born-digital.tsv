@@ -1,0 +1,3 @@
+# category	doc_id	pdf_path	truth_text_path
+clean_born_digital	clean-native	benchmark/eval/corpus/clean_born_digital/clean-native.pdf	benchmark/eval/ground_truth/page_text/clean_born_digital/clean-native.txt
+academic_two_column	two-column	benchmark/eval/corpus/academic_two_column/two-column.pdf	benchmark/eval/ground_truth/page_text/academic_two_column/two-column.txt

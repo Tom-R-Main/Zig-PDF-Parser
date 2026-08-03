@@ -1,6 +1,6 @@
 {
-  "benchmark_schema_version": "0.2.0",
-  "description": "Conservative default regression thresholds for the checked-in tiny corpus. Lower-is-better metrics may increase by at most max_regression; higher-is-better metrics may decrease by at most max_regression.",
+  "benchmark_schema_version": "0.3.0",
+  "description": "Conservative default regression thresholds for the checked-in tiny corpus. Lower-is-better metrics may increase by at most max_regression; higher-is-better metrics may decrease by at most max_regression. Optional minimum and maximum values enforce absolute candidate quality floors without a baseline executable.",
   "metrics": {
     "cer": { "direction": "lower", "max_regression": 0.02, "required": false },
     "wer": { "direction": "lower", "max_regression": 0.02, "required": false },

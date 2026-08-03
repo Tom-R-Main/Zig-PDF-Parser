@@ -262,53 +262,62 @@ fn renderGlyphTraceJsonl(allocator: std.mem.Allocator, result: anytype, page_ind
     const writer = runtime.arrayListWriter(&output, allocator);
 
     var char_index: usize = 0;
-    for (result.reconciled.spans, 0..) |span_record, span_index| {
-        const span = span_record.span;
-        if (span.page_index != page_index) continue;
-
-        const estimated_chars = @max(1, utf8ScalarCount(span.text));
-        const char_width = width(span.bbox) / @as(f64, @floatFromInt(estimated_chars));
-        var byte_index: usize = 0;
-        var local_char_index: usize = 0;
-        while (byte_index < span.text.len) {
-            const len = std.unicode.utf8ByteSequenceLength(span.text[byte_index]) catch 1;
-            const end = @min(span.text.len, byte_index + len);
-            const x0 = span.bbox.x0 + char_width * @as(f64, @floatFromInt(local_char_index));
-            const bbox = layout.BBox{
-                .x0 = x0,
-                .y0 = span.bbox.y0,
-                .x1 = if (local_char_index + 1 == estimated_chars) span.bbox.x1 else x0 + char_width,
-                .y1 = span.bbox.y1,
-            };
-            try writer.print(
-                "{{\"record_type\":\"glyph_trace\",\"page_index\":{},\"span_id\":\"span-{}\",\"glyph_index\":{},\"char_index\":{},\"bbox\":{{\"x0\":{d:.3},\"y0\":{d:.3},\"x1\":{d:.3},\"y1\":{d:.3}}},\"source_code\":null,\"source_bytes\":null,\"text\":\"",
-                .{ page_index, span_index, char_index, char_index, bbox.x0, bbox.y0, bbox.x1, bbox.y1 },
-            );
-            try writeJsonEscaped(writer, span.text[byte_index..end]);
-            try writer.print(
-                "\",\"font_name\":",
-                .{},
-            );
-            try writeOptionalJsonString(writer, span.font.name);
-            try writer.print(
-                ",\"font_size\":{d:.3},\"writing_mode\":{},\"generated\":false,\"hyphen\":{},\"unicode_map_error\":{},\"actual_text\":{},\"mcid\":",
-                .{ span.font_size, span.writing_mode, isHyphenText(span.text[byte_index..end]), span.unicode_map_error, span.actual_text },
-            );
-            if (span.mcid) |mcid| {
-                try writer.print("{}", .{mcid});
-            } else {
-                try writer.writeAll("null");
+    var span_index: usize = 0;
+    if (comptime @hasField(@TypeOf(result.*), "native_pages")) {
+        for (result.native_pages) |page_spans| {
+            for (page_spans) |span| {
+                if (span.page_index == page_index) try writeGlyphTraceSpan(writer, span, span_index, &char_index);
+                span_index += 1;
             }
-            try writer.writeByte('}');
-            try writer.writeByte('\n');
-
-            char_index += 1;
-            local_char_index += 1;
-            byte_index = end;
+        }
+    } else {
+        for (result.reconciled.spans) |span_record| {
+            const span = span_record.span;
+            if (span.page_index == page_index) try writeGlyphTraceSpan(writer, span, span_index, &char_index);
+            span_index += 1;
         }
     }
 
     return output.toOwnedSlice(allocator);
+}
+
+fn writeGlyphTraceSpan(writer: anytype, span: layout.TextSpan, span_index: usize, char_index: *usize) !void {
+    const estimated_chars = @max(1, utf8ScalarCount(span.text));
+    const char_width = width(span.bbox) / @as(f64, @floatFromInt(estimated_chars));
+    var byte_index: usize = 0;
+    var local_char_index: usize = 0;
+    while (byte_index < span.text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(span.text[byte_index]) catch 1;
+        const end = @min(span.text.len, byte_index + len);
+        const x0 = span.bbox.x0 + char_width * @as(f64, @floatFromInt(local_char_index));
+        const bbox = layout.BBox{
+            .x0 = x0,
+            .y0 = span.bbox.y0,
+            .x1 = if (local_char_index + 1 == estimated_chars) span.bbox.x1 else x0 + char_width,
+            .y1 = span.bbox.y1,
+        };
+        try writer.print(
+            "{{\"record_type\":\"glyph_trace\",\"page_index\":{},\"span_id\":\"span-{}\",\"glyph_index\":{},\"char_index\":{},\"bbox\":{{\"x0\":{d:.3},\"y0\":{d:.3},\"x1\":{d:.3},\"y1\":{d:.3}}},\"source_code\":null,\"source_bytes\":null,\"text\":\"",
+            .{ span.page_index, span_index, char_index.*, char_index.*, bbox.x0, bbox.y0, bbox.x1, bbox.y1 },
+        );
+        try writeJsonEscaped(writer, span.text[byte_index..end]);
+        try writer.writeAll("\",\"font_name\":");
+        try writeOptionalJsonString(writer, span.font.name);
+        try writer.print(
+            ",\"font_size\":{d:.3},\"writing_mode\":{},\"generated\":false,\"hyphen\":{},\"unicode_map_error\":{},\"actual_text\":{},\"mcid\":",
+            .{ span.font_size, span.writing_mode, isHyphenText(span.text[byte_index..end]), span.unicode_map_error, span.actual_text },
+        );
+        if (span.mcid) |mcid| {
+            try writer.print("{}", .{mcid});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll("}\n");
+
+        char_index.* += 1;
+        local_char_index += 1;
+        byte_index = end;
+    }
 }
 
 fn writeSvgOpen(writer: anytype, box: layout.BBox, label: []const u8) !void {

@@ -112,6 +112,7 @@ fn printUsage() !void {
         \\  --trace         Emit adaptive route trace JSON
         \\  --sequential    Disable parallel extraction
         \\  --raw-recall    Preserve loss-minimizing native text for search/diagnostics
+        \\  --fast          Use the cheaper stream-order native text lane
         \\  --reading-order Use visual reading order (experimental, slower)
         \\  --strict        Fail on any parse error
         \\  --permissive    Continue past all errors
@@ -134,6 +135,7 @@ fn printUsage() !void {
         \\  pdf-parser inspect extraction doc.pdf --format json
         \\  pdf-parser inspect structure doc.pdf --format json
         \\  pdf-parser check doc.pdf --format json
+        \\  pdf-parser extract --fast doc.pdf            # Cheaper stream-order text
         \\  pdf-parser extract --reading-order doc.pdf   # Visual reading order
         \\  pdf-parser search "revenue" document.pdf      # Search across all pages
         \\  pdf-parser bench document.pdf                # Benchmark vs mutool
@@ -146,6 +148,7 @@ fn printUsage() !void {
 const ExtractionMode = enum {
     normal, // Default: use structure tree for reading order (falls back to stream order)
     raw_recall, // Loss-minimizing content stream channel for search/diagnostics
+    fast, // Cheaper stream-order text without layout analysis or readable fallback
     visual, // Use visual layout analysis for reading order (experimental)
 };
 
@@ -314,6 +317,8 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             extraction_mode = .visual;
         } else if (std.mem.eql(u8, arg, "--raw-recall")) {
             extraction_mode = .raw_recall;
+        } else if (std.mem.eql(u8, arg, "--fast")) {
+            extraction_mode = .fast;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             input_file = arg;
         }
@@ -331,6 +336,11 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     if (trace and !adaptive) {
         std.debug.print("--trace requires --adaptive.\n", .{});
+        return error.InvalidArguments;
+    }
+
+    if (extraction_mode == .fast and (adaptive or output_format != .text)) {
+        std.debug.print("--fast supports only native text output.\n", .{});
         return error.InvalidArguments;
     }
 
@@ -379,7 +389,7 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     defer if (fallback_document_text) |text_value| allocator.free(text_value);
     const readable_output = adaptive or (extraction_mode == .normal and (output_format == .text or output_format == .json));
     if (readable_output and try nativeReadableQualityFails(doc, pages, allocator)) {
-        fallback_document_text = runPdftotextDocument(allocator, path) catch |err| blk: {
+        fallback_document_text = runVerifiedPdftotextDocument(doc, pages, allocator, path, password_input.value) catch |err| blk: {
             std.debug.print("Warning: readable quality gate failed and pdftotext fallback was unavailable: {}\n", .{err});
             break :blk null;
         };
@@ -400,6 +410,24 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (output_format == .markdown and page_range == null) {
         const result = doc.extractAllMarkdown(allocator) catch |err| {
             std.debug.print("Error during markdown extraction: {}\n", .{err});
+            return err;
+        };
+        defer allocator.free(result);
+
+        if (output_handle) |h| {
+            runtime.writeAllFile(h, result) catch |err| {
+                std.debug.print("Error writing output: {}\n", .{err});
+                return err;
+            };
+        } else {
+            runtime.writeAllStdout(result) catch |err| {
+                std.debug.print("Error writing output: {}\n", .{err});
+                return err;
+            };
+        }
+    } else if (output_format == .text and page_range == null and extraction_mode == .fast) {
+        const result = doc.extractAllTextFast(allocator) catch |err| {
+            std.debug.print("Error during fast extraction: {}\n", .{err});
             return err;
         };
         defer allocator.free(result);
@@ -477,9 +505,24 @@ fn nativeReadableQualityFails(doc: *zpdf.Document, pages: []const usize, allocat
     return false;
 }
 
-fn runPdftotextDocument(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
-    const argv = [_][]const u8{ "pdftotext", path, "-" };
-    const result = try runtime.runCapture(allocator, &argv, .{
+fn pdftotextArgv(storage: *[5][]const u8, path: []const u8, password: ?[]const u8) []const []const u8 {
+    var len: usize = 0;
+    storage[len] = "pdftotext";
+    len += 1;
+    if (password) |value| {
+        storage[len] = "-upw";
+        storage[len + 1] = value;
+        len += 2;
+    }
+    storage[len] = path;
+    storage[len + 1] = "-";
+    return storage[0 .. len + 2];
+}
+
+fn runPdftotextDocument(allocator: std.mem.Allocator, path: []const u8, password: ?[]const u8) !?[]u8 {
+    var argv_storage: [5][]const u8 = undefined;
+    const argv = pdftotextArgv(&argv_storage, path, password);
+    const result = try runtime.runCapture(allocator, argv, .{
         .stdout_limit = 512 * 1024 * 1024,
         .stderr_limit = 4 * 1024 * 1024,
         .timeout_ms = 180_000,
@@ -496,6 +539,79 @@ fn runPdftotextDocument(allocator: std.mem.Allocator, path: []const u8) !?[]u8 {
         },
     }
     return result.stdout;
+}
+
+fn runVerifiedPdftotextDocument(
+    doc: *zpdf.Document,
+    pages: []const usize,
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    password: ?[]const u8,
+) !?[]u8 {
+    const fallback = (try runPdftotextDocument(allocator, path, password)) orelse return null;
+    errdefer allocator.free(fallback);
+
+    const fallback_controls = selectedPageDisallowedControlCount(fallback, pages);
+    var native_controls: usize = 0;
+    var compared_pages: usize = 0;
+    var all_compared_text_equal = true;
+    for (pages) |page_num| {
+        const fallback_page = documentTextPage(fallback, page_num) orelse {
+            all_compared_text_equal = false;
+            continue;
+        };
+        const native_text = doc.extractTextStructured(page_num, allocator) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            all_compared_text_equal = false;
+            continue;
+        };
+        native_controls += disallowedControlCount(native_text);
+        all_compared_text_equal = all_compared_text_equal and normalizedWhitespaceEqual(native_text, fallback_page);
+        allocator.free(native_text);
+        compared_pages += 1;
+    }
+
+    const native_preserves_equivalent_text = compared_pages == pages.len and all_compared_text_equal;
+    if (native_preserves_equivalent_text or (compared_pages > 0 and native_controls < fallback_controls)) {
+        allocator.free(fallback);
+        return null;
+    }
+    return fallback;
+}
+
+fn selectedPageDisallowedControlCount(document_text: []const u8, pages: []const usize) usize {
+    var count: usize = 0;
+    for (pages) |page_num| {
+        const page_text = documentTextPage(document_text, page_num) orelse continue;
+        count += disallowedControlCount(page_text);
+    }
+    return count;
+}
+
+fn disallowedControlCount(text: []const u8) usize {
+    var count: usize = 0;
+    for (text) |byte| {
+        if (byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r' and byte != '\x0c') {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+fn normalizedWhitespaceEqual(left: []const u8, right: []const u8) bool {
+    var left_index: usize = 0;
+    var right_index: usize = 0;
+    while (true) {
+        while (left_index < left.len and std.ascii.isWhitespace(left[left_index])) left_index += 1;
+        while (right_index < right.len and std.ascii.isWhitespace(right[right_index])) right_index += 1;
+        if (left_index == left.len or right_index == right.len) return left_index == left.len and right_index == right.len;
+
+        const left_start = left_index;
+        const right_start = right_index;
+        while (left_index < left.len and !std.ascii.isWhitespace(left[left_index])) left_index += 1;
+        while (right_index < right.len and !std.ascii.isWhitespace(right[right_index])) right_index += 1;
+        if (!std.mem.eql(u8, left[left_start..left_index], right[right_start..right_index])) return false;
+    }
 }
 
 fn documentTextPage(document_text: []const u8, wanted_page: usize) ?[]const u8 {
@@ -616,6 +732,10 @@ fn doExtract(doc: *zpdf.Document, pages: []const usize, output_format: OutputFor
                         },
                     .raw_recall => doc.extractTextRawRecall(page_num, allocator) catch |err| {
                         std.debug.print("Error extracting raw recall page {}: {}\n", .{ page_num + 1, err });
+                        continue;
+                    },
+                    .fast => doc.extractTextFast(page_num, allocator) catch |err| {
+                        std.debug.print("Error extracting fast page {}: {}\n", .{ page_num + 1, err });
                         continue;
                     },
                     .visual => extractPageReadingOrder(doc, page_num, allocator) catch |err| {
@@ -1045,7 +1165,7 @@ fn runExtractAdaptive(allocator: std.mem.Allocator, args: []const []const u8) !v
     var fallback_document_text: ?[]u8 = null;
     defer if (fallback_document_text) |text_value| allocator.free(text_value);
     if (try nativeReadableQualityFails(doc, pages, allocator)) {
-        fallback_document_text = runPdftotextDocument(allocator, path) catch |err| blk: {
+        fallback_document_text = runVerifiedPdftotextDocument(doc, pages, allocator, path, password_input.value) catch |err| blk: {
             std.debug.print("Warning: readable quality gate failed and pdftotext fallback was unavailable: {}\n", .{err});
             break :blk null;
         };
@@ -2198,6 +2318,17 @@ test "extract CLI includes AcroForm field values in text and structured JSON" {
     try std.testing.expect(std.mem.indexOf(u8, text_output, "country USA") != null);
     try std.testing.expect(std.mem.indexOf(u8, text_output, "ok_button") == null);
 
+    var fast_text_buf: [112]u8 = undefined;
+    const fast_text_path = try std.fmt.bufPrint(&fast_text_buf, "pdf-parser-form-cli-{x}-fast.txt", .{std.testing.random_seed});
+    runtime.deleteFileCwd(fast_text_path);
+    defer runtime.deleteFileCwd(fast_text_path);
+    try runExtract(allocator, &.{ "--fast", "-o", fast_text_path, input_path });
+    const fast_text_output = try runtime.readFileAllocAlignedCwd(allocator, fast_text_path, .fromByteUnits(1));
+    defer allocator.free(fast_text_output);
+    try std.testing.expect(std.mem.indexOf(u8, fast_text_output, "All Fields") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fast_text_output, "email user@example.com") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fast_text_output, "country USA") != null);
+
     var json_buf: [96]u8 = undefined;
     const json_path = try std.fmt.bufPrint(&json_buf, "pdf-parser-form-cli-{x}.json", .{std.testing.random_seed});
     runtime.deleteFileCwd(json_path);
@@ -2822,4 +2953,49 @@ fn parsePageRange(allocator: std.mem.Allocator, range_str: ?[]const u8, total_pa
     }
 
     return pages[0..idx];
+}
+
+test "pdftotext fallback forwards an authenticated password" {
+    var storage: [5][]const u8 = undefined;
+    const argv = pdftotextArgv(&storage, "encrypted.pdf", "correct horse");
+
+    try std.testing.expectEqual(@as(usize, 5), argv.len);
+    try std.testing.expectEqualStrings("pdftotext", argv[0]);
+    try std.testing.expectEqualStrings("-upw", argv[1]);
+    try std.testing.expectEqualStrings("correct horse", argv[2]);
+    try std.testing.expectEqualStrings("encrypted.pdf", argv[3]);
+    try std.testing.expectEqualStrings("-", argv[4]);
+}
+
+test "pdftotext fallback omits password flags for plain PDFs" {
+    var storage: [5][]const u8 = undefined;
+    const argv = pdftotextArgv(&storage, "plain.pdf", null);
+
+    try std.testing.expectEqual(@as(usize, 3), argv.len);
+    try std.testing.expectEqualStrings("pdftotext", argv[0]);
+    try std.testing.expectEqualStrings("plain.pdf", argv[1]);
+    try std.testing.expectEqualStrings("-", argv[2]);
+}
+
+test "readable fallback quality permits layout whitespace but counts semantic controls" {
+    try std.testing.expectEqual(@as(usize, 0), disallowedControlCount("first\tsecond\npage\x0c"));
+    try std.testing.expectEqual(@as(usize, 2), disallowedControlCount("BMI \x1d30 IRP \x1f upper"));
+}
+
+test "readable fallback quality only scores selected pages" {
+    const document_text = "clean page\x0cbad \x1d page\x0c";
+    try std.testing.expectEqual(@as(usize, 0), selectedPageDisallowedControlCount(document_text, &.{0}));
+    try std.testing.expectEqual(@as(usize, 1), selectedPageDisallowedControlCount(document_text, &.{1}));
+}
+
+test "readable fallback preserves native provenance for whitespace-equivalent text" {
+    try std.testing.expect(normalizedWhitespaceEqual("Correct  ActualText\nreplacement", " Correct ActualText replacement\x0c"));
+    try std.testing.expect(!normalizedWhitespaceEqual("native mapping", "fallback mapping"));
+}
+
+test "fast CLI lane rejects structured output" {
+    try std.testing.expectError(
+        error.InvalidArguments,
+        runExtract(std.testing.allocator, &.{ "--fast", "--format", "json", "unused.pdf" }),
+    );
 }

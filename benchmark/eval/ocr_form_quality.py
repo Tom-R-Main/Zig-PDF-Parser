@@ -28,10 +28,17 @@ def parse_args() -> argparse.Namespace:
         default="benchmark/eval/ground_truth/ocr_forms/scanned_financial_forms/expenditure-form.json",
     )
     parser.add_argument("--output")
+    parser.add_argument("--ocr-executable", default="tesseract")
+    parser.add_argument("--ocr-rasterizer", default="pdftoppm")
     return parser.parse_args()
 
 
-def read_artifacts(parser_path: Path, pdf_path: Path) -> list[dict[str, Any]]:
+def read_artifacts(
+    parser_path: Path,
+    pdf_path: Path,
+    ocr_executable: str = "tesseract",
+    ocr_rasterizer: str = "pdftoppm",
+) -> list[dict[str, Any]]:
     completed = subprocess.run(
         [
             str(parser_path),
@@ -42,6 +49,10 @@ def read_artifacts(parser_path: Path, pdf_path: Path) -> list[dict[str, Any]]:
             "ocr-form-quality",
             "--format",
             "artifact-jsonl",
+            "--ocr-executable",
+            ocr_executable,
+            "--ocr-rasterizer",
+            ocr_rasterizer,
         ],
         check=False,
         capture_output=True,
@@ -56,12 +67,19 @@ def read_artifacts(parser_path: Path, pdf_path: Path) -> list[dict[str, Any]]:
 
 
 def token_recall(expected: str, actual: str) -> float:
+    return token_metrics(expected, actual)["recall"]
+
+
+def token_metrics(expected: str, actual: str) -> dict[str, float]:
     expected_tokens = Counter(token.upper() for token in TOKEN_PATTERN.findall(expected))
-    if not expected_tokens:
-        return 1.0
     actual_tokens = Counter(token.upper() for token in TOKEN_PATTERN.findall(actual))
     matched = sum(min(count, actual_tokens[token]) for token, count in expected_tokens.items())
-    return matched / sum(expected_tokens.values())
+    expected_count = sum(expected_tokens.values())
+    actual_count = sum(actual_tokens.values())
+    recall = matched / expected_count if expected_count else 1.0
+    precision = matched / actual_count if actual_count else 1.0 if expected_count == 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {"recall": recall, "precision": precision, "f1": f1}
 
 
 def exact_recall(expected: list[str], actual: list[str]) -> float:
@@ -128,8 +146,11 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
         if record.get("record_type") == "span"
     )
     expected_total = str(truth["total"])
+    tokens = token_metrics(str(truth["text"]), span_text)
     metrics = {
-        "token_recall": token_recall(str(truth["text"]), span_text),
+        "token_recall": tokens["recall"],
+        "token_precision": tokens["precision"],
+        "token_f1": tokens["f1"],
         "row_count_exact": 1.0 if len(actual_rows) == len(expected_rows) else 0.0,
         "date_exact_recall": exact_recall(expected_dates, actual_dates),
         "vendor_exact_recall": exact_recall(expected_vendors, actual_vendors),
@@ -159,7 +180,7 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
         if record.get("record_type") == "specialist_attempt"
     ]
     return {
-        "benchmark_schema_version": "0.2.0",
+        "benchmark_schema_version": "0.3.0",
         "record_type": "ocr_form_quality",
         "doc_id": truth["doc_id"],
         "status": "pass" if not failures else "fail",
@@ -177,7 +198,10 @@ def main() -> int:
     args = parse_args()
     truth = json.loads(Path(args.truth).read_text(encoding="utf-8"))
     try:
-        report = evaluate(read_artifacts(Path(args.parser), Path(args.pdf)), truth)
+        report = evaluate(
+            read_artifacts(Path(args.parser), Path(args.pdf), args.ocr_executable, args.ocr_rasterizer),
+            truth,
+        )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"OCR form quality gate failed to run: {error}", file=sys.stderr)
         return 2

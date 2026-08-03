@@ -10,7 +10,7 @@ const eval = @import("eval.zig");
 const eval_runner = @import("eval_runner.zig");
 const schema = @import("schema.zig");
 
-pub const benchmark_schema_version = "0.2.0";
+pub const benchmark_schema_version = "0.3.0";
 
 const MetricName = enum {
     cer,
@@ -46,6 +46,8 @@ const MetricSpec = struct {
     direction: MetricDirection,
     max_regression: f64,
     required: bool = false,
+    minimum: ?f64 = null,
+    maximum: ?f64 = null,
 };
 
 const default_specs = [_]MetricSpec{
@@ -156,6 +158,7 @@ const DocumentResult = struct {
 const Regression = struct {
     doc_id: []u8,
     category: []u8,
+    tool_id: []u8,
     metric: MetricName,
     baseline_value: ?f64,
     candidate_value: ?f64,
@@ -167,6 +170,7 @@ const Regression = struct {
     fn deinit(self: *Regression, allocator: std.mem.Allocator) void {
         allocator.free(self.doc_id);
         allocator.free(self.category);
+        allocator.free(self.tool_id);
     }
 };
 
@@ -775,8 +779,24 @@ fn loadMetricSpecs(allocator: std.mem.Allocator, thresholds_path: ?[]const u8) !
         if (metric_object.get("required")) |required_value| {
             if (required_value == .bool) specs.items[index].required = required_value.bool;
         }
+        specs.items[index].minimum = jsonFloat(metric_object.get("minimum"));
+        specs.items[index].maximum = jsonFloat(metric_object.get("maximum"));
+        try validateMetricSpec(specs.items[index]);
     }
     return specs;
+}
+
+fn validateMetricSpec(spec: MetricSpec) !void {
+    if (!std.math.isFinite(spec.max_regression) or spec.max_regression < 0) return error.InvalidMetricThreshold;
+    if (spec.minimum) |minimum| {
+        if (!std.math.isFinite(minimum)) return error.InvalidMetricThreshold;
+    }
+    if (spec.maximum) |maximum| {
+        if (!std.math.isFinite(maximum)) return error.InvalidMetricThreshold;
+    }
+    if (spec.minimum != null and spec.maximum != null and spec.minimum.? > spec.maximum.?) {
+        return error.InvalidMetricThreshold;
+    }
 }
 
 fn findSpecIndex(specs: []const MetricSpec, metric: MetricName) ?usize {
@@ -793,55 +813,71 @@ fn appendRegressions(
     specs: []const MetricSpec,
 ) !void {
     for (results) |candidate| {
-        if (!std.mem.eql(u8, candidate.tool_id, "candidate") or !std.mem.eql(u8, candidate.status, "ok")) continue;
-        const baseline = findResult(results, "baseline", candidate.doc_id) orelse continue;
-        if (!std.mem.eql(u8, baseline.status, "ok")) continue;
+        if (!std.mem.eql(u8, candidate.status, "ok") or std.mem.eql(u8, candidate.tool_id, "baseline")) continue;
         for (specs) |spec| {
             const candidate_value = metricValue(candidate.metrics, spec.name);
-            const baseline_value = metricValue(baseline.metrics, spec.name);
-            if (candidate_value == null or baseline_value == null) {
-                if (spec.required) {
-                    try regressions.ensureUnusedCapacity(allocator, 1);
-                    const doc_id = try allocator.dupe(u8, candidate.doc_id);
-                    errdefer allocator.free(doc_id);
-                    const category = try allocator.dupe(u8, candidate.category);
-                    regressions.appendAssumeCapacity(.{
-                        .doc_id = doc_id,
-                        .category = category,
-                        .metric = spec.name,
-                        .baseline_value = baseline_value,
-                        .candidate_value = candidate_value,
-                        .delta = null,
-                        .threshold = spec.max_regression,
-                        .direction = spec.direction,
-                        .status = "missing_required_metric",
-                    });
-                }
+            if (candidate_value == null) {
+                if (spec.required) try appendRegression(allocator, regressions, candidate, spec, null, null, null, spec.max_regression, spec.direction, "missing_required_metric");
                 continue;
             }
-            const delta = candidate_value.? - baseline_value.?;
+
+            if (spec.minimum) |minimum| {
+                if (candidate_value.? < minimum) {
+                    try appendRegression(allocator, regressions, candidate, spec, null, candidate_value, candidate_value.? - minimum, minimum, .higher, "below_minimum");
+                }
+            }
+            if (spec.maximum) |maximum| {
+                if (candidate_value.? > maximum) {
+                    try appendRegression(allocator, regressions, candidate, spec, null, candidate_value, candidate_value.? - maximum, maximum, .lower, "above_maximum");
+                }
+            }
+
+            if (!std.mem.eql(u8, candidate.tool_id, "candidate")) continue;
+            const baseline = findResult(results, "baseline", candidate.doc_id);
+            const baseline_result = baseline orelse continue;
+            if (!std.mem.eql(u8, baseline_result.status, "ok")) continue;
+            const baseline_value = metricValue(baseline_result.metrics, spec.name) orelse continue;
+            const delta = candidate_value.? - baseline_value;
             const regressed = switch (spec.direction) {
                 .lower => delta > spec.max_regression,
                 .higher => delta < -spec.max_regression,
             };
             if (!regressed) continue;
-            try regressions.ensureUnusedCapacity(allocator, 1);
-            const doc_id = try allocator.dupe(u8, candidate.doc_id);
-            errdefer allocator.free(doc_id);
-            const category = try allocator.dupe(u8, candidate.category);
-            regressions.appendAssumeCapacity(.{
-                .doc_id = doc_id,
-                .category = category,
-                .metric = spec.name,
-                .baseline_value = baseline_value,
-                .candidate_value = candidate_value,
-                .delta = delta,
-                .threshold = spec.max_regression,
-                .direction = spec.direction,
-                .status = "regressed",
-            });
+            try appendRegression(allocator, regressions, candidate, spec, baseline_value, candidate_value, delta, spec.max_regression, spec.direction, "regressed");
         }
     }
+}
+
+fn appendRegression(
+    allocator: std.mem.Allocator,
+    regressions: *std.ArrayList(Regression),
+    candidate: DocumentResult,
+    spec: MetricSpec,
+    baseline_value: ?f64,
+    candidate_value: ?f64,
+    delta: ?f64,
+    threshold: f64,
+    direction: MetricDirection,
+    status: []const u8,
+) !void {
+    try regressions.ensureUnusedCapacity(allocator, 1);
+    const doc_id = try allocator.dupe(u8, candidate.doc_id);
+    errdefer allocator.free(doc_id);
+    const category = try allocator.dupe(u8, candidate.category);
+    errdefer allocator.free(category);
+    const tool_id = try allocator.dupe(u8, candidate.tool_id);
+    regressions.appendAssumeCapacity(.{
+        .doc_id = doc_id,
+        .category = category,
+        .tool_id = tool_id,
+        .metric = spec.name,
+        .baseline_value = baseline_value,
+        .candidate_value = candidate_value,
+        .delta = delta,
+        .threshold = threshold,
+        .direction = direction,
+        .status = status,
+    });
 }
 
 fn findResult(results: []const DocumentResult, tool_id: []const u8, doc_id: []const u8) ?DocumentResult {
@@ -1018,7 +1054,7 @@ fn writeCategorySummaries(writer: anytype, ctx: RenderContext, jsonl: bool) !voi
 
 fn writeRegressionRecord(writer: anytype, ctx: RenderContext, regression: Regression) !void {
     try writer.writeByte('{');
-    try writeRecordCommon(writer, "benchmark_regression", ctx, "candidate", regression.category);
+    try writeRecordCommon(writer, "benchmark_regression", ctx, regression.tool_id, regression.category);
     try writer.writeAll(",\"doc_id\":\"");
     try writeJsonEscaped(writer, regression.doc_id);
     try writer.print("\",\"metric\":\"{s}\",\"status\":\"{s}\",\"direction\":\"{s}\",\"threshold\":{d:.6}", .{
@@ -1124,12 +1160,16 @@ fn writeMetricAggregate(writer: anytype, results: []const DocumentResult, tool_i
 }
 
 fn writeMetricSpec(writer: anytype, spec: MetricSpec) !void {
-    try writer.print("{{\"metric\":\"{s}\",\"direction\":\"{s}\",\"max_regression\":{d:.6},\"required\":{s}}}", .{
+    try writer.print("{{\"metric\":\"{s}\",\"direction\":\"{s}\",\"max_regression\":{d:.6},\"required\":{s},\"minimum\":", .{
         @tagName(spec.name),
         @tagName(spec.direction),
         spec.max_regression,
         if (spec.required) "true" else "false",
     });
+    try writeOptionalFloat(writer, spec.minimum);
+    try writer.writeAll(",\"maximum\":");
+    try writeOptionalFloat(writer, spec.maximum);
+    try writer.writeByte('}');
 }
 
 fn metricValue(metrics: Metrics, metric: MetricName) ?f64 {
@@ -1354,6 +1394,66 @@ test "benchmark threshold regression directions" {
     try std.testing.expectEqual(@as(usize, 2), regressions.items.len);
 }
 
+test "benchmark absolute floors apply to first-party lanes without a baseline" {
+    var regressions: std.ArrayList(Regression) = .empty;
+    defer {
+        for (regressions.items) |*regression| regression.deinit(std.testing.allocator);
+        regressions.deinit(std.testing.allocator);
+    }
+    const results = [_]DocumentResult{.{
+        .doc_id = @constCast("doc"),
+        .category = @constCast("clean_born_digital"),
+        .tool_id = @constCast("pdf-parser:native"),
+        .status = "ok",
+        .metrics = .{ .token_f1 = 0.70, .cer = 0.20 },
+    }};
+    try appendRegressions(std.testing.allocator, &regressions, &results, &.{
+        .{ .name = .token_f1, .direction = .higher, .max_regression = 0.02, .minimum = 0.90 },
+        .{ .name = .cer, .direction = .lower, .max_regression = 0.02, .maximum = 0.10 },
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), regressions.items.len);
+    try std.testing.expectEqualStrings("below_minimum", regressions.items[0].status);
+    try std.testing.expectEqualStrings("above_maximum", regressions.items[1].status);
+}
+
+test "benchmark required candidate metric does not require a baseline lane" {
+    var regressions: std.ArrayList(Regression) = .empty;
+    defer {
+        for (regressions.items) |*regression| regression.deinit(std.testing.allocator);
+        regressions.deinit(std.testing.allocator);
+    }
+    const results = [_]DocumentResult{.{
+        .doc_id = @constCast("doc"),
+        .category = @constCast("financial_tables"),
+        .tool_id = @constCast("pdf-parser:adaptive"),
+        .status = "ok",
+        .metrics = .{},
+    }};
+    try appendRegressions(std.testing.allocator, &regressions, &results, &.{
+        .{ .name = .table_cell_accuracy, .direction = .higher, .max_regression = 0.03, .required = true },
+    });
+
+    try std.testing.expectEqual(@as(usize, 1), regressions.items.len);
+    try std.testing.expectEqualStrings("missing_required_metric", regressions.items[0].status);
+}
+
+test "benchmark absolute threshold bounds must be coherent" {
+    try validateMetricSpec(.{ .name = .token_f1, .direction = .higher, .max_regression = 0.02, .minimum = 0.9, .maximum = 1.0 });
+    try std.testing.expectError(error.InvalidMetricThreshold, validateMetricSpec(.{
+        .name = .token_f1,
+        .direction = .higher,
+        .max_regression = 0.02,
+        .minimum = 1.0,
+        .maximum = 0.9,
+    }));
+    try std.testing.expectError(error.InvalidMetricThreshold, validateMetricSpec(.{
+        .name = .cer,
+        .direction = .lower,
+        .max_regression = -0.01,
+    }));
+}
+
 test "benchmark command argv replaces pdf token" {
     const argv = try buildCommandArgv(std.testing.allocator, "tool --input {pdf}", "fixture.pdf");
     defer freeStringList(std.testing.allocator, argv);
@@ -1499,11 +1599,22 @@ test "benchmark runner compares baseline and candidate command lanes" {
     try runtime.writeAllFile(manifest_file, manifest);
     runtime.closeFile(manifest_file);
 
+    var thresholds_buf: [96]u8 = undefined;
+    const thresholds_path = try std.fmt.bufPrint(&thresholds_buf, "pdf-parser-benchmark-command-{x}.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(thresholds_path);
+    defer runtime.deleteFileCwd(thresholds_path);
+    const thresholds_file = try runtime.createFileCwd(thresholds_path);
+    try runtime.writeAllFile(thresholds_file,
+        \\{"metrics":{"latency_ms":{"max_regression":1000000},"peak_rss_mb":{"max_regression":1000000}}}
+    );
+    runtime.closeFile(thresholds_file);
+
     var result = try runBenchmark(allocator, .{
         .manifest_path = manifest_path,
         .suite_id = "command-suite",
         .baseline_command = "/bin/echo same output",
         .candidate_command = "/bin/echo same output",
+        .thresholds_path = thresholds_path,
     });
     defer result.deinit(allocator);
 

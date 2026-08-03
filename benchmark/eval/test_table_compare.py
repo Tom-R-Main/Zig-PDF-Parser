@@ -112,6 +112,62 @@ class TableCompareTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             table_compare.parse_quality_floors({"pdf-parser": {"cell_text_accuracy": math.nan}})
 
+    def test_spanned_grid_placeholders_do_not_shift_semantic_cells(self) -> None:
+        predicted = [
+            {
+                "rows": [
+                    {"cells": [
+                        {"text": "Vendor", "column": 0, "rowspan": 2},
+                        {"text": "Labor", "column": 1, "colspan": 2},
+                        {"text": "", "column": 2},
+                    ]},
+                    {"cells": [
+                        {"text": "", "column": 0},
+                        {"text": "Cost", "column": 1},
+                        {"text": "Fees", "column": 2},
+                    ]},
+                ]
+            }
+        ]
+        truth = [
+            {
+                "rows": [
+                    [
+                        {"text": "Vendor", "rowspan": 2},
+                        {"text": "Labor", "colspan": 2},
+                    ],
+                    [{"text": "Cost"}, {"text": "Fees"}],
+                ]
+            }
+        ]
+
+        metrics = table_compare.table_metrics(predicted, truth)
+
+        self.assertEqual(1.0, metrics["cell_text_accuracy"])
+
+    def test_uncovered_empty_data_cell_remains_semantic(self) -> None:
+        tables = [{"rows": [[{"text": "Debit"}, {"text": ""}, {"text": "Balance"}]]}]
+
+        self.assertEqual(
+            ["Debit", "", "Balance"],
+            [cell["text"] for cell in table_compare.flatten_cells(tables)],
+        )
+
+    def test_ragged_row_ignores_leading_grid_padding(self) -> None:
+        tables = [
+            {"rows": [{"cells": [
+                {"text": "", "column": 0},
+                {"text": "", "column": 1},
+                {"text": "Subtotal", "column": 2},
+                {"text": "3,350", "column": 3},
+            ]}]}
+        ]
+
+        self.assertEqual(
+            ["Subtotal", "3,350"],
+            [cell["text"] for cell in table_compare.flatten_cells(tables)],
+        )
+
     def test_known_unsupported_result_is_visible_but_non_blocking(self) -> None:
         entry = table_compare.Entry(
             category="financial_table_stress",

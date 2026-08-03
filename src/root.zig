@@ -1401,7 +1401,7 @@ pub const Document = struct {
         defer page_layout.deinit();
 
         if (page_layout.tables.len == 0) return null;
-        const table_text = try page_layout.getReconstructedText(allocator);
+        const table_text = try page_layout.getCompleteReconstructedText(allocator);
         return table_text;
     }
 
@@ -1450,6 +1450,11 @@ pub const Document = struct {
 
         try self.extractTextStreamOrderFromContentInto(page_num, scratch_allocator, content, runtime.arrayListWriter(&output, allocator));
         return output.toOwnedSlice(allocator);
+    }
+
+    /// Extract one page through the cheaper stream-order lane.
+    pub fn extractTextFast(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
+        return self.withPageFormFields(page_num, allocator, try self.extractTextStreamOrder(page_num, allocator));
     }
 
     fn extractTextStreamOrderFromContent(self: *Document, page_num: usize, allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, content: []const u8) ![]u8 {

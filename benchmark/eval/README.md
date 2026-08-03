@@ -63,11 +63,13 @@ family-scoped MathematicalPi-One private names:
   --output /tmp/pdf-parser-font-diff.jsonl
 ```
 
-The font comparator runs `pdf-parser extract-adaptive --format artifact-jsonl
---debug-assets-dir ...`, reads `page-*.glyph-trace.jsonl`, and compares the
+The font comparator scores `pdf-parser extract --format text` for native
+Unicode accuracy and separately runs `extract-adaptive --format artifact-jsonl
+--debug-assets-dir ...` to read `page-*.glyph-trace.jsonl`. It compares the
 same PDFs with Poppler `pdftotext`, PyMuPDF, and pypdfium2 when those optional
-tools are present. A font truth sidecar can set `require_exact_text` to make
-Unicode differences fail instead of merely reporting CER/WER metrics.
+tools are present. Every checked-in font truth sidecar requires exact text.
+Declared ActualText, Unicode-map, writing-mode, and glyph-trace expectations
+are blocking checks rather than observational annotations.
 Use `--require-baselines` when missing Python baselines should fail the run.
 This is a differential accuracy harness: the sidecar truth defines the expected
 behavior, while MuPDF/PDFium-backed tools provide useful contrast rather than an
@@ -135,13 +137,14 @@ records unless `--require-baselines` is supplied. Truth sidecars preserve the
 simple `rows/cells` shape and may add `bbox`, `page`, `role`, `rowspan`,
 `colspan`, `numeric`, continuation ids, and source-span requirements.
 
-Table comparator records use schema `0.2.0`. Per-document
+Table comparator records use schema `0.3.0`. Sequence metrics ignore empty
+grid placeholders covered by row/column spans and leading or trailing padding
+in ragged rows, while preserving semantic empty cells between populated cells.
+Per-document
 `table_quality_floors` in `table_stress/metadata.jsonl` are enforced for the
 named tool; the checked-in floors gate `pdf-parser`, while optional baseline
-tools remain observational. The `legal-schedule-out-of-order` fixture records
-`pdf-parser` in `table_known_unsupported_tools`: its result is emitted with
-`status: known_unsupported` and does not block the suite. This keeps the gap
-visible without representing it as a quality pass.
+tools remain observational. The checked-in suite gates ruled, borderless,
+wrapped-cell, nested-header, continuation, and out-of-content-order cases.
 
 Large performance manifests live under `benchmark/eval/large/`. Those manifests
 point at `benchmark/eval/raw_cache/large/` and are intended for timing, memory,
@@ -279,7 +282,7 @@ pdf-parser benchmark \
   --jsonl benchmark/eval/outputs/scorecards/tiny-corpus.records.jsonl
 ```
 
-The full JSON scorecard and JSONL stream use benchmark schema `0.2.0`, separate
+The full JSON scorecard and JSONL stream use benchmark schema `0.3.0`, separate
 from adaptive extraction schemas. Benchmark versions follow the public output
 schema policy: compatible additive metrics use a MINOR bump. Records include
 `benchmark_run`,
@@ -318,7 +321,41 @@ distance, latency, and RSS may increase only by their configured
 `max_regression`. Higher-is-better metrics such as token F1, reading order,
 table structure, formula structure, and form accuracy may decrease only by
 their configured `max_regression`. Metrics that are `null` do not fail unless
-marked `required`.
+marked `required`. Schema `0.3.0` also accepts optional `minimum` and `maximum`
+values. Those absolute bounds apply to every document in a `candidate` lane and
+do not require a baseline executable, preventing two equally degraded versions
+from passing a relative-only comparison.
+
+For a standalone candidate gate, select a capability-specific manifest and set
+only the metrics that every document in that manifest must produce:
+
+```json
+{
+  "benchmark_schema_version": "0.3.0",
+  "metrics": {
+    "token_f1": {
+      "direction": "higher",
+      "max_regression": 0.02,
+      "required": true,
+      "minimum": 0.95
+    }
+  }
+}
+```
+
+```sh
+pdf-parser benchmark \
+  --manifest private/hard-fonts.tsv \
+  --candidate-command ./zig-out/bin/pdf-parser \
+  --thresholds private/hard-fonts-thresholds.json \
+  --fail-on-regression
+```
+
+Checked-in homogeneous gates live under `benchmark/eval/gates/`. CI runs the
+born-digital and hard-font gates alongside the broad tiny-corpus scorecard;
+table, OCR, render, and encrypted-twin checks retain their specialist
+comparators because their success contracts include structure, routing, pixels,
+or twin equivalence rather than text metrics alone.
 
 For Siftable or another ingestion pipeline, map the scorecard JSONL directly:
 `benchmark_run` to the processing run, `benchmark_document_result` to per-source
@@ -409,6 +446,10 @@ full-book OCR run from dominating a routine baseline. OCR profiling defaults to
 `--ocr-dpi 200` with grayscale rasterization; use `--ocr-dpi 300` when
 comparing against older high-resolution runs or validating harder low-quality
 scans, and `--ocr-color` to preserve the older RGB raster path for an A/B run.
+Pass `--ocr-rasterizer benchmark/eval/pdfium-rasterizer` to exercise the same
+OCR lane through PDFium instead of Poppler. The adapter intentionally implements
+only the single-page PNG subset invoked by the parser and remains an optional
+host-side compatibility component.
 Use `--hash-output` for optimization validation runs where byte-for-byte output
 stability matters. The hash is computed after each timed subprocess completes,
 so it does not change `wall_ms`, but it can add total profiler runtime on very

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-FONT_COMPARE_SCHEMA_VERSION = "0.2.0"
+FONT_COMPARE_SCHEMA_VERSION = "0.3.0"
 DEFAULT_TOOLS = ("pdf-parser", "pdftotext", "pymupdf", "pypdfium2")
 REQUIRED_TRUTH_KEYS = {
     "expected_text",
@@ -215,13 +215,14 @@ def run_tool(
     expectations = expectation_results(tool, truth, result)
     exact_text_ok = exact_text_matches(result["text"], truth["expected_text"])
     expectations["exact_text_ok"] = exact_text_ok if truth.get("require_exact_text") else None
+    expectations_ok = all(value is not False for value in expectations.values())
     return {
         "record_type": "font_compare_result",
         "font_compare_schema_version": FONT_COMPARE_SCHEMA_VERSION,
         "category": entry.category,
         "doc_id": entry.doc_id,
         "tool": tool,
-        "status": "failed" if truth.get("require_exact_text") and not exact_text_ok else "ok",
+        "status": "ok" if expectations_ok else "failed",
         "font_case_tags": list(entry.font_case_tags),
         "wall_ms": round(wall_ms, 3),
         "text": result["text"],
@@ -254,15 +255,24 @@ def extract_pdf_parser(repo_root: Path, parser_command: Path, entry: Entry) -> d
         proc = subprocess.run(cmd, cwd=repo_root, text=True, capture_output=True, check=False)
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "pdf-parser failed")
+        text_proc = subprocess.run(
+            [str(parser_command), "extract", "--format", "text", str(entry.pdf_path)],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if text_proc.returncode != 0:
+            raise RuntimeError(text_proc.stderr.strip() or text_proc.stdout.strip() or "pdf-parser text extraction failed")
         artifacts = read_jsonl(output_path)
         spans = [row for row in artifacts if row.get("record_type") == "span"]
         glyph_traces = read_glyph_traces(repo_root, artifacts)
         return {
-            "text": "\n".join(str(span.get("text", "")) for span in spans if span.get("text")),
+            "text": text_proc.stdout.rstrip("\n\f"),
             "char_count": sum(len(str(span.get("text", ""))) for span in spans),
             "bbox_count": len(glyph_traces),
             "glyph_traces": glyph_traces,
-            "notes": [],
+            "notes": ["native structured text scored; adaptive artifacts used for glyph diagnostics"],
         }
 
 

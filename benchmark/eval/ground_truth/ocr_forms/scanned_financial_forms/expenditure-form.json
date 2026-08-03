@@ -10,6 +10,8 @@
   "total": "4445.75",
   "floors": {
     "token_recall": 0.75,
+    "token_precision": 0.8,
+    "token_f1": 0.85,
     "row_count_exact": 1.0,
     "date_exact_recall": 0.5,
     "vendor_exact_recall": 1.0,

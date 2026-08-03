@@ -2241,6 +2241,45 @@ test "ruled multiline table keeps wrapped label in one cell" {
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"-25\"") != null);
 }
 
+test "ruled invoice assigns wrapped cells and footer lines semantically" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateInvoiceStressPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"A-1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Implementation services\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Subtotal\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "Subtotal Tax Total") == null);
+}
+
+test "ruled nested header preserves parent and child spans" {
+    const allocator = std.testing.allocator;
+
+    const pdf_data = try testpdf.generateProcurementStressPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    try doc.writePageTablesJson(0, allocator, runtime.arrayListWriter(&json, allocator));
+
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Labor\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"colspan\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Cost\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"text\":\"Fees\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"rowspan\":2") != null);
+}
+
 test "merged ruled header reports colspan" {
     const allocator = std.testing.allocator;
 

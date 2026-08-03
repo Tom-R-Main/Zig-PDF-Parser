@@ -122,6 +122,8 @@ pdf-parser benchmark \
 .venv/bin/python benchmark/eval/table_compare.py \
   --manifest benchmark/eval/table_stress/manifest.tsv \
   --output /tmp/pdf-parser-table-stress.jsonl
+python3 benchmark/eval/ocr_form_quality.py \
+  --output /tmp/pdf-parser-ocr-form-quality.json
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
 .venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
@@ -144,7 +146,9 @@ corrupt/adversarial PDFs.
 `pdf-parser`, PyMuPDF, and pypdfium2; use it as differential accuracy evidence,
 not as a claim that the Python tools are universal ground truth. The Sleisenger
 reductions cover standard Symbol glyph names and family-scoped MathematicalPi
-private names with exact Unicode expectations. Financial
+private names with exact Unicode expectations. The `benchmark-eval` build step
+also requires exact native text across every checked-in hard-font fixture.
+Financial
 table truth can assert cell text plus `rowspan`, `colspan`, `role`, `page`, and
 bbox-aware provenance. Form truth asserts field name/type/value sequences.
 Formula truth can assert both text and simple structure records.
@@ -159,6 +163,22 @@ optional pypdfium2 and `mutool draw` lanes, and `--materialize-dir` to write
 rendered pages or low-coverage crops for review. Generated PNGs and crops are
 local artifacts only; they should not be committed.
 
+`benchmark/eval/pdfium-rasterizer` is an optional PDFium-backed adapter for the
+same one-page `pdftoppm` subprocess contract used by OCR. It uses the local
+virtual environment when present and otherwise requires `pypdfium2` in the
+active Python environment:
+
+```bash
+pdf-parser extract --adaptive --format artifact-jsonl \
+  --ocr-executable tesseract \
+  --ocr-rasterizer benchmark/eval/pdfium-rasterizer \
+  scanned.pdf
+```
+
+This keeps native extraction deterministic while delegating JBIG2, JPX/JPEG2000,
+Type3, and other render-completeness cases to PDFium when a raster-backed route
+is explicitly selected. It does not make PDFium a text-extraction authority.
+
 `benchmark/eval/table_stress` is a separate checked-in financial table stress
 pack. It contains small synthetic reductions for SEC statement continuations,
 borderless bank statements, wrapped invoice totals, procurement nested headers,
@@ -168,6 +188,9 @@ optional pdfplumber lanes. The stress runner reports cell text, role, bbox IoU,
 numeric, continuation, and source-span coverage metrics where the truth sidecar
 provides labels. Larger source PDFs and redistribution-unclear page reductions
 belong under ignored benchmark cache paths, not git.
+The OCR form quality gate reports token precision and F1 as well as recall, so
+duplicate layout/OCR layers cannot pass by repeating all expected tokens. It
+also gates row count and exact date, vendor, amount, and total recovery.
 
 `pdf-parser benchmark` is the product-facing corpus runner. It emits a full
 scorecard JSON plus optional record-oriented JSONL with `benchmark_run`,
@@ -177,6 +200,10 @@ neutral: use `pdf-parser:native`, `pdf-parser:adaptive`, or
 `command:<id>=<command template with {pdf}>`. `--candidate-command` and
 `--baseline-command` compare two pdf-parser-compatible executables and
 `--fail-on-regression` makes the scorecard usable as a CI ingestion gate.
+Benchmark schema `0.3.0` adds absolute `minimum` and `maximum` thresholds for
+homogeneous capability manifests, so a standalone candidate or two equally
+degraded versions cannot pass on relative comparison alone. Checked-in examples
+live under `benchmark/eval/gates/`.
 
 For structural parser hardening, use the qpdf differential lane:
 
@@ -261,6 +288,7 @@ pub fn main(init: std.process.Init) !void {
 pdf-parser extract document.pdf              # Extract all pages (uses structure tree for reading order)
 pdf-parser extract -p 1-10 document.pdf      # Extract pages 1-10
 pdf-parser extract -o out.txt document.pdf   # Output to file
+pdf-parser extract --fast document.pdf       # Cheaper stream-order native lane
 pdf-parser extract --raw-recall document.pdf # Loss-minimizing search/diagnostic channel
 pdf-parser extract --adaptive -f json doc.pdf
 pdf-parser extract --adaptive -f jsonl doc.pdf
@@ -284,6 +312,11 @@ pdf-parser bench document.pdf                # Run benchmark
 pdf-parser benchmark --manifest benchmark/eval/corpus/manifest.tsv \
   --tools pdf-parser:adaptive --output /tmp/pdf-parser-scorecard.json
 ```
+
+`--fast` skips structure-tree, layout/table reconstruction, and the readable
+Poppler fallback while retaining native decoding and AcroForm text. Use it for
+throughput-sensitive text ingestion where content-stream order is acceptable;
+the default accuracy lane remains the quality contract.
 
 ### Search semantics
 

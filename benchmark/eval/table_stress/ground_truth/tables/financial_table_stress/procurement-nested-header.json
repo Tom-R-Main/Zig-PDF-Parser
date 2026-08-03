@@ -2,10 +2,14 @@
   {
     "rows": [
       [
-        { "text": "Vendor", "role": "header" },
-        { "text": "Materials", "role": "header" },
+        { "text": "Vendor", "role": "header", "rowspan": 2 },
+        { "text": "Materials", "role": "header", "rowspan": 2 },
         { "text": "Labor", "role": "header", "colspan": 2 },
-        { "text": "Total", "role": "header" }
+        { "text": "Total", "role": "header", "rowspan": 2 }
+      ],
+      [
+        { "text": "Cost", "role": "header" },
+        { "text": "Fees", "role": "header" }
       ],
       [
         { "text": "Northwind", "role": "row_header" },

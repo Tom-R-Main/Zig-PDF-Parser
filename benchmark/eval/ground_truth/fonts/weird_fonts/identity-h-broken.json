@@ -1,5 +1,6 @@
 {
   "expected_text": "Broken identity",
+  "require_exact_text": true,
   "expect_actual_text": false,
   "expect_unicode_map_error": true,
   "expected_writing_mode": 0,

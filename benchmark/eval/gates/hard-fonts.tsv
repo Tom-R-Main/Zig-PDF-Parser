@@ -1,0 +1,13 @@
+# category	doc_id	pdf_path	truth_text_path
+weird_fonts	actualtext-repair	benchmark/eval/corpus/weird_fonts/actualtext-repair.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/actualtext-repair.txt
+weird_fonts	sleisenger-symbol-names	benchmark/eval/corpus/weird_fonts/sleisenger-symbol-names.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/sleisenger-symbol-names.txt
+weird_fonts	sleisenger-mathematical-pi	benchmark/eval/corpus/weird_fonts/sleisenger-mathematical-pi.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/sleisenger-mathematical-pi.txt
+weird_fonts	type3-simple	benchmark/eval/corpus/weird_fonts/type3-simple.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-simple.txt
+weird_fonts	type3-tounicode	benchmark/eval/corpus/weird_fonts/type3-tounicode.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/type3-tounicode.txt
+weird_fonts	identity-h-broken	benchmark/eval/corpus/weird_fonts/identity-h-broken.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-h-broken.txt
+weird_fonts	identity-v-vertical-cjk	benchmark/eval/corpus/weird_fonts/identity-v-vertical-cjk.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/identity-v-vertical-cjk.txt
+weird_fonts	predefined-japan1	benchmark/eval/corpus/weird_fonts/predefined-japan1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-japan1.txt
+weird_fonts	predefined-japan1-vertical	benchmark/eval/corpus/weird_fonts/predefined-japan1-vertical.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-japan1-vertical.txt
+weird_fonts	predefined-gb1	benchmark/eval/corpus/weird_fonts/predefined-gb1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-gb1.txt
+weird_fonts	predefined-cns1	benchmark/eval/corpus/weird_fonts/predefined-cns1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-cns1.txt
+weird_fonts	predefined-korea1	benchmark/eval/corpus/weird_fonts/predefined-korea1.pdf	benchmark/eval/ground_truth/page_text/weird_fonts/predefined-korea1.txt

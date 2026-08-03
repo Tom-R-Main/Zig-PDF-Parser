@@ -546,6 +546,7 @@ const fixtures = [_]Fixture{
         .font_truth =
         \\{
         \\  "expected_text": "Correct ActualText replacement",
+        \\  "require_exact_text": true,
         \\  "expect_actual_text": true,
         \\  "expect_unicode_map_error": false,
         \\  "expected_writing_mode": 0,
@@ -614,6 +615,7 @@ const fixtures = [_]Fixture{
         .font_truth =
         \\{
         \\  "expected_text": "Type3 simple text",
+        \\  "require_exact_text": true,
         \\  "expect_actual_text": false,
         \\  "expect_unicode_map_error": false,
         \\  "expected_writing_mode": 0,
@@ -636,6 +638,7 @@ const fixtures = [_]Fixture{
         .font_truth =
         \\{
         \\  "expected_text": "XYZ",
+        \\  "require_exact_text": true,
         \\  "expect_actual_text": false,
         \\  "expect_unicode_map_error": false,
         \\  "expected_writing_mode": 0,
@@ -658,6 +661,7 @@ const fixtures = [_]Fixture{
         .font_truth =
         \\{
         \\  "expected_text": "Broken identity",
+        \\  "require_exact_text": true,
         \\  "expect_actual_text": false,
         \\  "expect_unicode_map_error": true,
         \\  "expected_writing_mode": 0,
@@ -680,6 +684,7 @@ const fixtures = [_]Fixture{
         .font_truth =
         \\{
         \\  "expected_text": "日本",
+        \\  "require_exact_text": true,
         \\  "expect_actual_text": false,
         \\  "expect_unicode_map_error": false,
         \\  "expected_writing_mode": 1,
@@ -1021,7 +1026,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "sec_statement", "continuation", "nested_header", "footnotes", "accounting_notation" },
-        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"bbox_iou\":0.9,\"cell_text_accuracy\":0.4,\"continuation_accuracy\":1.0,\"numeric_accuracy\":0.5,\"role_accuracy\":0.45}}",
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"bbox_iou\":0.9,\"cell_text_accuracy\":1.0,\"continuation_accuracy\":1.0,\"numeric_accuracy\":1.0,\"role_accuracy\":0.75}}",
         .generate = testpdf.generateSecStatementStressPdf,
     },
     .{
@@ -1077,7 +1082,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "bank_statement", "borderless", "accounting_notation", "multi_span_cell" },
-        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.95,\"numeric_accuracy\":0.95,\"role_accuracy\":0.95}}",
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":1.0,\"numeric_accuracy\":1.0,\"role_accuracy\":1.0}}",
         .generate = testpdf.generateBankStatementStressPdf,
     },
     .{
@@ -1140,7 +1145,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "invoice", "multi_span_cell", "footnotes", "accounting_notation" },
-        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.5,\"numeric_accuracy\":0.65,\"role_accuracy\":0.7}}",
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":1.0,\"numeric_accuracy\":1.0,\"role_accuracy\":0.8}}",
         .generate = testpdf.generateInvoiceStressPdf,
     },
     .{
@@ -1153,6 +1158,7 @@ const table_stress_fixtures = [_]Fixture{
         .truth =
         \\Procurement Schedule
         \\Vendor Materials Labor Total
+        \\Cost Fees
         \\Northwind 10 hrs 500 900 1,400
         \\Contoso 8 hrs 450 840 1,290
         \\
@@ -1162,10 +1168,14 @@ const table_stress_fixtures = [_]Fixture{
         \\  {
         \\    "rows": [
         \\      [
-        \\        { "text": "Vendor", "role": "header" },
-        \\        { "text": "Materials", "role": "header" },
+        \\        { "text": "Vendor", "role": "header", "rowspan": 2 },
+        \\        { "text": "Materials", "role": "header", "rowspan": 2 },
         \\        { "text": "Labor", "role": "header", "colspan": 2 },
-        \\        { "text": "Total", "role": "header" }
+        \\        { "text": "Total", "role": "header", "rowspan": 2 }
+        \\      ],
+        \\      [
+        \\        { "text": "Cost", "role": "header" },
+        \\        { "text": "Fees", "role": "header" }
         \\      ],
         \\      [
         \\        { "text": "Northwind", "role": "row_header" },
@@ -1187,7 +1197,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "procurement", "nested_header", "sparse_ruled", "accounting_notation" },
-        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":0.19,\"numeric_accuracy\":0.0,\"role_accuracy\":0.7}}",
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":1.0,\"numeric_accuracy\":1.0,\"role_accuracy\":1.0}}",
         .generate = testpdf.generateProcurementStressPdf,
     },
     .{
@@ -1239,7 +1249,7 @@ const table_stress_fixtures = [_]Fixture{
         \\
         ,
         .table_case_tags = &.{ "legal_schedule", "borderless", "multi_span_cell", "accounting_notation" },
-        .table_metadata_suffix = ",\"table_known_unsupported_tools\":[\"pdf-parser\"]",
+        .table_metadata_suffix = ",\"table_quality_floors\":{\"pdf-parser\":{\"cell_text_accuracy\":1.0,\"numeric_accuracy\":1.0,\"role_accuracy\":1.0}}",
         .generate = testpdf.generateLegalScheduleStressPdf,
     },
 };

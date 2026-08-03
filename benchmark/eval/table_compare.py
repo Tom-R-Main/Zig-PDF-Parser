@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 
-TABLE_COMPARE_SCHEMA_VERSION = "0.2.0"
+TABLE_COMPARE_SCHEMA_VERSION = "0.3.0"
 DEFAULT_TOOLS = ("pdf-parser", "pymupdf-find-tables", "pdfplumber")
 
 
@@ -391,16 +391,58 @@ def table_metrics(predicted: list[dict[str, Any]], truth: list[dict[str, Any]]) 
 def flatten_cells(tables: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
     for table in tables:
-        for row in table.get("rows", []):
+        covered: set[tuple[int, int]] = set()
+        for row_index, row in enumerate(table.get("rows", [])):
             row_cells = row.get("cells", []) if isinstance(row, dict) else row
             if not isinstance(row_cells, list):
                 continue
-            for cell in row_cells:
-                if isinstance(cell, dict):
-                    cells.append(cell)
+            normalized_row = [
+                cell if isinstance(cell, dict) else {"text": "" if cell is None else str(cell)}
+                for cell in row_cells
+            ]
+            nonempty_indexes = [
+                index
+                for index, cell in enumerate(normalized_row)
+                if normalize_cell(cell.get("text", "")) != ""
+            ]
+            if not nonempty_indexes:
+                continue
+            first_semantic = nonempty_indexes[0]
+            last_semantic = nonempty_indexes[-1]
+            next_column = 0
+            for cell_index, normalized in enumerate(normalized_row):
+                explicit_column = normalized.get("column")
+                if isinstance(explicit_column, int):
+                    column_index = explicit_column
                 else:
-                    cells.append({"text": "" if cell is None else str(cell)})
+                    while (row_index, next_column) in covered:
+                        next_column += 1
+                    column_index = next_column
+
+                # Artifact grids may materialize empty cells that are already
+                # occupied by a preceding rowspan/colspan. They are structural
+                # placeholders, not semantic cells and should not shift every
+                # subsequent sequence metric. Uncovered empty cells remain.
+                if (row_index, column_index) in covered and normalize_cell(normalized.get("text", "")) == "":
+                    next_column = max(next_column, column_index + 1)
+                    continue
+                if cell_index < first_semantic or cell_index > last_semantic:
+                    next_column = max(next_column, column_index + 1)
+                    continue
+
+                cells.append(normalized)
+                rowspan = positive_span(normalized.get("rowspan"))
+                colspan = positive_span(normalized.get("colspan"))
+                for covered_row in range(row_index, row_index + rowspan):
+                    for covered_column in range(column_index, column_index + colspan):
+                        if covered_row != row_index or covered_column != column_index:
+                            covered.add((covered_row, covered_column))
+                next_column = max(next_column, column_index + colspan)
     return cells
+
+
+def positive_span(value: Any) -> int:
+    return value if isinstance(value, int) and value > 0 else 1
 
 
 def normalize_cell(value: Any) -> str:

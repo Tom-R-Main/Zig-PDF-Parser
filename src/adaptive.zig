@@ -232,6 +232,7 @@ pub const FormField = struct {
 pub const Result = struct {
     allocator: std.mem.Allocator,
     reconciled: ReconciledDocument,
+    native_pages: [][]layout.TextSpan,
     layout_blocks: []LayoutBlockSummary,
     page_routes: []PageRoute,
     region_routes: []RegionRoute,
@@ -242,6 +243,7 @@ pub const Result = struct {
 
     pub fn deinit(self: *Result) void {
         self.reconciled.deinit();
+        freeTextSpanPages(self.allocator, self.native_pages);
         self.allocator.free(self.layout_blocks);
         self.allocator.free(self.page_routes);
         self.allocator.free(self.region_routes);
@@ -304,6 +306,12 @@ pub fn extractDocument(
     defer {
         for (ocr_pages.items) |spans| ocr.freeSpans(allocator, spans);
         ocr_pages.deinit(allocator);
+    }
+
+    var ocr_layer_views: std.ArrayList([]layout.TextSpan) = .empty;
+    defer {
+        for (ocr_layer_views.items) |view| allocator.free(view);
+        ocr_layer_views.deinit(allocator);
     }
 
     var layout_pages: std.ArrayList([]layout.TextSpan) = .empty;
@@ -584,6 +592,7 @@ pub fn extractDocument(
             tables.appendAssumeCapacity(try copyTableGrid(allocator, table));
         }
 
+        var filtered_ocr_layer_added = false;
         if (page_layout.tables.len > 0 and page_view_quality_pass) {
             try layout_pages.ensureUnusedCapacity(allocator, 1);
             const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
@@ -593,6 +602,22 @@ pub fn extractDocument(
                     .spans = layout_spans,
                     .trust = 1.0,
                 });
+                if (page_ocr_spans) |ocr_spans| {
+                    const residual_spans = residual: {
+                        const view = try filterSubsumedOcrSpanView(allocator, ocr_spans, layout_spans);
+                        errdefer allocator.free(view);
+                        try ocr_layer_views.append(allocator, view);
+                        break :residual view;
+                    };
+                    if (residual_spans.len > 0) {
+                        try layers.append(allocator, .{
+                            .source = .fresh_ocr,
+                            .spans = residual_spans,
+                            .trust = 0.82,
+                        });
+                    }
+                    filtered_ocr_layer_added = true;
+                }
             } else {
                 freeTextSpans(allocator, layout_spans);
                 try layers.append(allocator, .{
@@ -608,13 +633,15 @@ pub fn extractDocument(
             });
         }
 
-        if (page_ocr_spans) |ocr_spans| {
-            if (ocr_spans.len > 0) {
-                try layers.append(allocator, .{
-                    .source = .fresh_ocr,
-                    .spans = ocr_spans,
-                    .trust = 0.82,
-                });
+        if (!filtered_ocr_layer_added) {
+            if (page_ocr_spans) |ocr_spans| {
+                if (ocr_spans.len > 0) {
+                    try layers.append(allocator, .{
+                        .source = .fresh_ocr,
+                        .spans = ocr_spans,
+                        .trust = 0.82,
+                    });
+                }
             }
         }
 
@@ -717,6 +744,8 @@ pub fn extractDocument(
 
     const owned_layout_blocks = try layout_blocks.toOwnedSlice(allocator);
     errdefer allocator.free(owned_layout_blocks);
+    const owned_native_pages = try native_pages.toOwnedSlice(allocator);
+    errdefer freeTextSpanPages(allocator, owned_native_pages);
     const owned_page_routes = try page_routes.toOwnedSlice(allocator);
     errdefer allocator.free(owned_page_routes);
     const owned_region_routes = try region_routes.toOwnedSlice(allocator);
@@ -732,6 +761,7 @@ pub fn extractDocument(
     return .{
         .allocator = allocator,
         .reconciled = reconciled,
+        .native_pages = owned_native_pages,
         .layout_blocks = owned_layout_blocks,
         .page_routes = owned_page_routes,
         .region_routes = owned_region_routes,
@@ -740,6 +770,11 @@ pub fn extractDocument(
         .form_fields = form_fields,
         .tables = owned_tables,
     };
+}
+
+fn freeTextSpanPages(allocator: std.mem.Allocator, pages: [][]layout.TextSpan) void {
+    for (pages) |spans| freeTextSpans(allocator, spans);
+    allocator.free(pages);
 }
 
 fn suppressLayoutSpecialists(route: *RouteDecision, mask: *RouteReasonMask) void {
@@ -1003,6 +1038,40 @@ fn buildPageSpanView(
     @memcpy(merged[0..native_spans.len], native_spans);
     @memcpy(merged[native_spans.len..], ocr_spans);
     return merged;
+}
+
+fn filterSubsumedOcrSpanView(
+    allocator: std.mem.Allocator,
+    ocr_spans: []const layout.TextSpan,
+    represented_spans: []const layout.TextSpan,
+) ![]layout.TextSpan {
+    var kept = try std.ArrayList(layout.TextSpan).initCapacity(allocator, ocr_spans.len);
+    errdefer kept.deinit(allocator);
+    for (ocr_spans) |ocr_span| {
+        var represented = false;
+        for (represented_spans) |candidate| {
+            if (spanSubsumesOcr(candidate, ocr_span)) {
+                represented = true;
+                break;
+            }
+        }
+        if (!represented) kept.appendAssumeCapacity(ocr_span);
+    }
+    return kept.toOwnedSlice(allocator);
+}
+
+fn spanSubsumesOcr(represented: layout.TextSpan, ocr_span: layout.TextSpan) bool {
+    if (represented.page_index != ocr_span.page_index) return false;
+    const ocr_area = width(ocr_span.bbox) * height(ocr_span.bbox);
+    if (ocr_area <= 0 or overlapArea(represented.bbox, ocr_span.bbox) / ocr_area < 0.65) return false;
+
+    const needle = std.mem.trim(u8, ocr_span.text, " \t\r\n");
+    if (needle.len == 0 or represented.text.len < needle.len) return false;
+    const offset = std.ascii.indexOfIgnoreCase(represented.text, needle) orelse return false;
+    const before_ok = offset == 0 or std.ascii.isWhitespace(represented.text[offset - 1]);
+    const after = offset + needle.len;
+    const after_ok = after == represented.text.len or std.ascii.isWhitespace(represented.text[after]);
+    return before_ok and after_ok;
 }
 
 fn selectedOcrPageQualityPass(attempts: []const OcrAttempt, page_index: u32) bool {
@@ -1901,6 +1970,7 @@ test "debug svg marks low-confidence review regions" {
     const result = Result{
         .allocator = std.testing.allocator,
         .reconciled = doc,
+        .native_pages = &.{},
         .layout_blocks = &layout_blocks,
         .page_routes = &page_routes,
         .region_routes = &region_routes,
@@ -1956,6 +2026,43 @@ test "mixed native OCR filter keeps image OCR and drops page furniture OCR" {
 
     try std.testing.expectEqual(@as(usize, 1), filtered.len);
     try std.testing.expectEqualStrings("scan text", filtered[0].text);
+}
+
+test "table layout layer suppresses represented OCR words but keeps residual totals" {
+    const represented = [_]layout.TextSpan{
+        layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = .{ .x0 = 20, .y0 = 560, .x1 = 500, .y1 = 590 },
+            .text = "03/21/2026 ALPHA SUPPLY 1250.00",
+            .source = .table_model,
+        }),
+    };
+    const ocr_spans = [_]layout.TextSpan{
+        layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = .{ .x0 = 220, .y0 = 565, .x1 = 280, .y1 = 585 },
+            .text = "ALPHA",
+            .source = .fresh_ocr,
+        }),
+        layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = .{ .x0 = 20, .y0 = 560, .x1 = 500, .y1 = 590 },
+            .text = "03/21/2026 ALPHA SUPPLY 1250.00",
+            .source = .fresh_ocr,
+        }),
+        layout.TextSpan.init(.{
+            .page_index = 0,
+            .bbox = .{ .x0 = 350, .y0 = 300, .x1 = 410, .y1 = 320 },
+            .text = "TOTAL",
+            .source = .fresh_ocr,
+        }),
+    };
+
+    const residual = try filterSubsumedOcrSpanView(std.testing.allocator, &ocr_spans, &represented);
+    defer std.testing.allocator.free(residual);
+
+    try std.testing.expectEqual(@as(usize, 1), residual.len);
+    try std.testing.expectEqualStrings("TOTAL", residual[0].text);
 }
 
 fn adaptiveOwnedListCleanupAllocationProbe(allocator: std.mem.Allocator) !void {

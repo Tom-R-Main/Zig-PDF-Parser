@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 PROFILE_SCHEMA_VERSION = "0.3.0"
-DEFAULT_LANES = ("native-text", "adaptive-artifact-jsonl", "adaptive-stream-jsonl", "ocr-routed")
+DEFAULT_LANES = ("native-text", "native-fast", "adaptive-artifact-jsonl", "adaptive-stream-jsonl", "ocr-routed")
 
 
 @dataclass(frozen=True)
@@ -308,6 +308,8 @@ def build_lane_command(
     base = [str(parser_command)]
     if lane == "native-text":
         cmd = base + ["extract", "-f", "text", "-o", str(output_path), str(entry.pdf_path)]
+    elif lane == "native-fast":
+        cmd = base + ["extract", "--fast", "-f", "text", "-o", str(output_path), str(entry.pdf_path)]
     elif lane == "adaptive-artifact-jsonl":
         cmd = base + [
             "extract-adaptive",
