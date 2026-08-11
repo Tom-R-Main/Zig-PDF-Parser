@@ -381,16 +381,22 @@ typed `span`, `block`, `table`, `form_field`, `route_trace`,
 `specialist_request`, `specialist_response`, `specialist_result`, `rag_chunk`,
 and `debug_asset` records. `artifact-jsonl` emits the same contract as a
 manifest-first batch JSONL stream for host applications and ingestion
-pipelines. Schema `0.11.0` adds one `specialist_attempt` record per OCR
+pipelines. Schema `0.11.0` added one `specialist_attempt` record per OCR
 invocation, including configuration, bounded diagnostics, quality signals, and
-the selected attempt. `stream-jsonl` emits page-by-page lifecycle events and artifacts as
+the selected attempt. Schema `0.12.0` adds document-global specialist request
+identity across batch/streaming output and the first optional, bounded formula
+JSONL subprocess lifecycle. The formula adapter currently receives native
+span/block context with `crop_image_path:null`; `formula_recognition` therefore
+remains false until visual crop integration and quality proof land.
+`stream-jsonl` emits page-by-page lifecycle events and artifacts as
 soon as each page is processed: `document_manifest`, `page_started`, route
 traces, specialist requests/results, page artifacts, `page_finished`, optional
 debug assets, then `document_finished`. `jsonl` remains a compatibility span
 stream, and `rag-jsonl` remains chunk-only. The schema is documented in
 [docs/output-schema.md](docs/output-schema.md).
 
-Visual review assets remain formal `debug_asset` records in schema `0.11.0`. By
+Visual review assets remain formal `debug_asset` records (introduced in schema
+`0.11.0`). By
 default they are references with `path:null`, `uri:null`, and null hashes. Add
 `--debug-assets-dir DIR` to materialize deterministic sidecar files such as
 `page-0001.table-grid.svg`, `page-0001.ocr-routes.svg`,
@@ -636,7 +642,8 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.11.0`. Every emitted record carries a `provenance` envelope with document and
+`0.12.0`, with parser build identity `0.4.0-dev` after the `v0.3.0` release.
+Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.
 This makes parser outputs usable as reviewable evidence in host pipelines

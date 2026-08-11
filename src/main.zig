@@ -867,16 +867,30 @@ fn doAdaptiveExtract(
         .debug_assets_dir = debug_assets_dir,
         .specialist_config_path = specialist_config_file,
     };
+    var owned_formula_config: ?zpdf.specialists.OwnedSpecialistConfig = null;
+    defer if (owned_formula_config) |*config| config.deinit();
+    if (specialist_config_file) |path| {
+        owned_formula_config = try zpdf.specialists.loadFormulaConfig(allocator, path);
+    }
+    var adaptive_options = zpdf.AdaptiveOptions{
+        .page_start = window.start,
+        .page_end = window.end,
+        .enable_ocr = enable_ocr,
+        .ocr_config = ocr_config,
+        .fallback_document_text = fallback_document_text,
+        .specialist_context = .{
+            .document_id = schema_options.document_id,
+            .source_id = schema_options.source_id,
+            .input_sha256 = schema_options.input_sha256,
+        },
+    };
+    if (owned_formula_config) |*config| adaptive_options.formula_specialist = config.borrowed();
 
     if (!trace and output_format == .stream_jsonl) {
         if (specialist_requests_file) |requests_path| {
-            var request_result = doc.extractAdaptive(allocator, .{
-                .page_start = window.start,
-                .page_end = window.end,
-                .enable_ocr = enable_ocr,
-                .ocr_config = ocr_config,
-                .fallback_document_text = fallback_document_text,
-            }) catch |err| {
+            var request_options = adaptive_options;
+            request_options.formula_specialist = null;
+            var request_result = doc.extractAdaptive(allocator, request_options) catch |err| {
                 std.debug.print("Error generating specialist requests: {}\n", .{err});
                 return err;
             };
@@ -892,13 +906,7 @@ fn doAdaptiveExtract(
             const writer = &file_writer.interface;
             defer writer.flush() catch {};
             const summary = doc.extractAdaptiveStreaming(allocator, writer, .{
-                .adaptive_options = .{
-                    .page_start = window.start,
-                    .page_end = window.end,
-                    .enable_ocr = enable_ocr,
-                    .ocr_config = ocr_config,
-                    .fallback_document_text = fallback_document_text,
-                },
+                .adaptive_options = adaptive_options,
                 .schema_options = schema_options,
             }) catch |err| {
                 std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
@@ -910,13 +918,7 @@ fn doAdaptiveExtract(
             const writer = &stdout_writer.interface;
             defer writer.flush() catch {};
             const summary = doc.extractAdaptiveStreaming(allocator, writer, .{
-                .adaptive_options = .{
-                    .page_start = window.start,
-                    .page_end = window.end,
-                    .enable_ocr = enable_ocr,
-                    .ocr_config = ocr_config,
-                    .fallback_document_text = fallback_document_text,
-                },
+                .adaptive_options = adaptive_options,
                 .schema_options = schema_options,
             }) catch |err| {
                 std.debug.print("Error during streaming adaptive extraction: {}\n", .{err});
@@ -927,13 +929,7 @@ fn doAdaptiveExtract(
         return;
     }
 
-    var result = doc.extractAdaptive(allocator, .{
-        .page_start = window.start,
-        .page_end = window.end,
-        .enable_ocr = enable_ocr,
-        .ocr_config = ocr_config,
-        .fallback_document_text = fallback_document_text,
-    }) catch |err| {
+    var result = doc.extractAdaptive(allocator, adaptive_options) catch |err| {
         std.debug.print("Error during adaptive extraction: {}\n", .{err});
         return err;
     };
@@ -1893,6 +1889,14 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
     try runtime.writeAllFile(input_file, pdf_data);
     runtime.closeFile(input_file);
 
+    var config_buf: [112]u8 = undefined;
+    const config_path = try std.fmt.bufPrint(&config_buf, "pdf-parser-cli-specialist-{x}.json", .{std.testing.random_seed});
+    runtime.deleteFileCwd(config_path);
+    defer runtime.deleteFileCwd(config_path);
+    const config_file = try runtime.createFileCwd(config_path);
+    try runtime.writeAllFile(config_file, "{\"formula\":{\"enabled\":false}}");
+    runtime.closeFile(config_file);
+
     const cases = [_]struct {
         suffix: []const u8,
         legacy: bool,
@@ -1922,7 +1926,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
                 "--emit-specialist-requests",
                 requests_path,
                 "--specialist-config",
-                "specialists.json",
+                config_path,
                 "-o",
                 output_path,
                 input_path,
@@ -1938,7 +1942,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
                 "--emit-specialist-requests",
                 requests_path,
                 "--specialist-config",
-                "specialists.json",
+                config_path,
                 "--output",
                 output_path,
             });
@@ -1947,7 +1951,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
         const requests = try runtime.readFileAllocAlignedCwd(allocator, requests_path, .fromByteUnits(1));
         defer allocator.free(requests);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"record_type\":\"specialist_request\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.11.0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.12.0\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"source_id\":\"external-specialist-cli\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_kind\":\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_outputs\"") != null);

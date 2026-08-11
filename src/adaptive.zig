@@ -11,6 +11,7 @@ const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
 const runtime = @import("runtime.zig");
 const schema = @import("schema.zig");
+const specialist_protocol = @import("specialist_protocol.zig");
 const specialists = @import("specialists.zig");
 
 pub const BBox = layout.BBox;
@@ -34,6 +35,13 @@ pub const ExtractOptions = struct {
     /// use this to share one linear scan across page-scoped extractions.
     fallback_page_index: ?*const DocumentTextPageIndex = null,
     reconcile_options: ReconcileOptions = .{},
+    /// Optional formula adapter configuration borrowed for this extraction
+    /// call only. `Result` retains only owned lifecycle records.
+    formula_specialist: ?specialists.SpecialistConfig = null,
+    specialist_context: specialist_protocol.RenderContext = .{},
+    /// Keeps region request identities document-global when streaming one page
+    /// at a time. Batch callers leave this at zero.
+    region_index_base: u32 = 0,
 };
 
 pub const OutputFormat = enum {
@@ -196,13 +204,16 @@ pub const RegionRoute = struct {
             if (table_confidence >= formula_confidence) {
                 route.needs_table_model = true;
                 route.needs_formula_model = false;
+                mask &= ~(reasonBit(.formula_density) | reasonBit(.formula_route_stub));
             } else {
                 route.needs_table_model = false;
                 route.needs_formula_model = true;
+                mask &= ~(reasonBit(.table_alignment) | reasonBit(.table_route_stub));
             }
             // A table/formula specialist already receives the region geometry;
             // a second generic layout request for the same block is redundant.
             route.needs_layout_model = false;
+            mask &= ~(reasonBit(.low_reading_order_confidence) | reasonBit(.layout_route_stub));
         }
         return .{
             .page_index = args.score.page_index,
@@ -229,6 +240,38 @@ pub const FormField = struct {
     rect: ?[4]f64,
 };
 
+pub const FormulaStatus = enum {
+    completed,
+    empty,
+    unavailable,
+    failed,
+    timeout,
+    invalid_output,
+};
+
+pub const FormulaAttempt = struct {
+    request_id: []u8,
+    page_index: u32,
+    region_index: u32,
+    status: FormulaStatus,
+    specialist_id: []u8,
+    duration_ms: u64 = 0,
+    exit_code: ?u8 = null,
+    diagnostic_code: ?[]u8 = null,
+    stderr_excerpt: []u8,
+};
+
+pub const FormulaArtifact = struct {
+    request_id: []u8,
+    formula_id: []u8,
+    page_index: u32,
+    region_index: u32,
+    text: []u8,
+    format: []u8,
+    confidence: f32,
+    specialist_id: []u8,
+};
+
 pub const Result = struct {
     allocator: std.mem.Allocator,
     reconciled: ReconciledDocument,
@@ -238,6 +281,8 @@ pub const Result = struct {
     region_routes: []RegionRoute,
     trace_records: []TraceRecord,
     ocr_attempts: []OcrAttempt,
+    formula_attempts: []FormulaAttempt,
+    formula_artifacts: []FormulaArtifact,
     form_fields: []FormField,
     tables: []layout.TableGrid,
 
@@ -249,6 +294,8 @@ pub const Result = struct {
         self.allocator.free(self.region_routes);
         self.allocator.free(self.trace_records);
         freeOcrAttempts(self.allocator, self.ocr_attempts);
+        freeFormulaAttempts(self.allocator, self.formula_attempts);
+        freeFormulaArtifacts(self.allocator, self.formula_artifacts);
         freeFormFields(self.allocator, self.form_fields);
         freeOwnedTables(self.allocator, self.tables);
     }
@@ -264,6 +311,12 @@ pub const Result = struct {
 
     pub fn hasSpecialistFailures(self: *const Result) bool {
         for (self.ocr_attempts) |attempt| {
+            switch (attempt.status) {
+                .unavailable, .failed, .timeout, .invalid_output => return true,
+                else => {},
+            }
+        }
+        for (self.formula_attempts) |attempt| {
             switch (attempt.status) {
                 .unavailable, .failed, .timeout, .invalid_output => return true,
                 else => {},
@@ -351,7 +404,7 @@ pub fn extractDocument(
     errdefer freeFormFields(allocator, form_fields);
 
     const has_structure_tree = document.hasStructureTree();
-    var region_index: u32 = 0;
+    var region_index: u32 = options.region_index_base;
 
     for (page_start..page_end) |page_idx| {
         const page = document.pages.items[page_idx];
@@ -757,8 +810,12 @@ pub fn extractDocument(
     linkLogicalTables(tables.items);
     const owned_tables = try tables.toOwnedSlice(allocator);
     errdefer freeOwnedTables(allocator, owned_tables);
+    const empty_formula_attempts = try allocator.alloc(FormulaAttempt, 0);
+    errdefer allocator.free(empty_formula_attempts);
+    const empty_formula_artifacts = try allocator.alloc(FormulaArtifact, 0);
+    errdefer allocator.free(empty_formula_artifacts);
 
-    return .{
+    var result = Result{
         .allocator = allocator,
         .reconciled = reconciled,
         .native_pages = owned_native_pages,
@@ -767,9 +824,135 @@ pub fn extractDocument(
         .region_routes = owned_region_routes,
         .trace_records = owned_trace_records,
         .ocr_attempts = owned_ocr_attempts,
+        .formula_attempts = empty_formula_attempts,
+        .formula_artifacts = empty_formula_artifacts,
         .form_fields = form_fields,
         .tables = owned_tables,
     };
+    if (options.formula_specialist) |config| {
+        try executeFormulaSpecialists(allocator, &result, config, options.specialist_context);
+    }
+    return result;
+}
+
+fn freeFormulaAttempts(allocator: std.mem.Allocator, attempts: []FormulaAttempt) void {
+    freeFormulaAttemptItems(allocator, attempts);
+    allocator.free(attempts);
+}
+
+fn freeFormulaAttemptItems(allocator: std.mem.Allocator, attempts: []FormulaAttempt) void {
+    for (attempts) |attempt| {
+        allocator.free(attempt.request_id);
+        allocator.free(attempt.specialist_id);
+        if (attempt.diagnostic_code) |code| allocator.free(code);
+        allocator.free(attempt.stderr_excerpt);
+    }
+}
+
+fn freeFormulaArtifacts(allocator: std.mem.Allocator, artifacts: []FormulaArtifact) void {
+    freeFormulaArtifactItems(allocator, artifacts);
+    allocator.free(artifacts);
+}
+
+fn freeFormulaArtifactItems(allocator: std.mem.Allocator, artifacts: []FormulaArtifact) void {
+    for (artifacts) |artifact| {
+        allocator.free(artifact.request_id);
+        allocator.free(artifact.formula_id);
+        allocator.free(artifact.text);
+        allocator.free(artifact.format);
+        allocator.free(artifact.specialist_id);
+    }
+}
+
+fn executeFormulaSpecialists(
+    allocator: std.mem.Allocator,
+    result: *Result,
+    config: specialists.SpecialistConfig,
+    context: specialist_protocol.RenderContext,
+) !void {
+    var attempts: std.ArrayList(FormulaAttempt) = .empty;
+    errdefer {
+        freeFormulaAttemptItems(allocator, attempts.items);
+        attempts.deinit(allocator);
+    }
+    var artifacts: std.ArrayList(FormulaArtifact) = .empty;
+    errdefer {
+        freeFormulaArtifactItems(allocator, artifacts.items);
+        artifacts.deinit(allocator);
+    }
+
+    for (result.region_routes, 0..) |route, route_index| {
+        if (!route.route.needs_formula_model) continue;
+        const request_id = try specialist_protocol.allocRequestId(allocator, .formula, route.page_index, route.region_index);
+        errdefer allocator.free(request_id);
+        const request_jsonl = try specialist_protocol.renderRegionRequestJsonl(allocator, result, context, route_index);
+        defer allocator.free(request_jsonl);
+
+        var execution = try specialists.runFormulaJsonl(
+            allocator,
+            request_jsonl,
+            request_id,
+            specialist_protocol.schema_version,
+            config,
+        );
+        defer execution.deinit(allocator);
+
+        for (execution.artifacts, 0..) |artifact, artifact_index| {
+            const artifact_request_id = try allocator.dupe(u8, request_id);
+            errdefer allocator.free(artifact_request_id);
+            const formula_id = try std.fmt.allocPrint(allocator, "formula-region-{d}-{d}", .{ route.region_index, artifact_index });
+            errdefer allocator.free(formula_id);
+            const text = try allocator.dupe(u8, artifact.text);
+            errdefer allocator.free(text);
+            const format = try allocator.dupe(u8, artifact.format);
+            errdefer allocator.free(format);
+            const artifact_specialist_id = try allocator.dupe(u8, execution.specialist_id);
+            errdefer allocator.free(artifact_specialist_id);
+            try artifacts.append(allocator, .{
+                .request_id = artifact_request_id,
+                .formula_id = formula_id,
+                .page_index = route.page_index,
+                .region_index = route.region_index,
+                .text = text,
+                .format = format,
+                .confidence = artifact.confidence,
+                .specialist_id = artifact_specialist_id,
+            });
+        }
+
+        const specialist_id = try allocator.dupe(u8, execution.specialist_id);
+        errdefer allocator.free(specialist_id);
+        const diagnostic_code = if (execution.diagnostic_code) |code| try allocator.dupe(u8, code) else null;
+        errdefer if (diagnostic_code) |code| allocator.free(code);
+        const stderr_excerpt = try allocator.dupe(u8, execution.stderr_excerpt);
+        errdefer allocator.free(stderr_excerpt);
+        try attempts.append(allocator, .{
+            .request_id = request_id,
+            .page_index = route.page_index,
+            .region_index = route.region_index,
+            .status = switch (execution.status) {
+                .completed => .completed,
+                .empty => .empty,
+                .unavailable => .unavailable,
+                .failed => .failed,
+                .timeout => .timeout,
+                .invalid_output => .invalid_output,
+            },
+            .specialist_id = specialist_id,
+            .duration_ms = execution.duration_ms,
+            .exit_code = execution.exit_code,
+            .diagnostic_code = diagnostic_code,
+            .stderr_excerpt = stderr_excerpt,
+        });
+    }
+
+    const owned_attempts = try attempts.toOwnedSlice(allocator);
+    errdefer freeFormulaAttempts(allocator, owned_attempts);
+    const owned_artifacts = try artifacts.toOwnedSlice(allocator);
+    allocator.free(result.formula_attempts);
+    allocator.free(result.formula_artifacts);
+    result.formula_attempts = owned_attempts;
+    result.formula_artifacts = owned_artifacts;
 }
 
 fn freeTextSpanPages(allocator: std.mem.Allocator, pages: [][]layout.TextSpan) void {
@@ -1976,6 +2159,8 @@ test "debug svg marks low-confidence review regions" {
         .region_routes = &region_routes,
         .trace_records = &trace_records,
         .ocr_attempts = &.{},
+        .formula_attempts = &.{},
+        .formula_artifacts = &.{},
         .form_fields = &.{},
         .tables = &.{},
     };

@@ -12,7 +12,7 @@ const specialist_protocol = @import("specialist_protocol.zig");
 const visual_assets = @import("visual_assets.zig");
 
 pub const schema_version = specialist_protocol.schema_version;
-pub const parser_version = "0.3.0";
+pub const parser_version = "0.4.0-dev";
 
 pub const RenderOptions = struct {
     document_id: []const u8 = "document",
@@ -467,6 +467,12 @@ fn hasSpecialistFailures(result: anytype) bool {
             else => {},
         }
     }
+    for (result.formula_attempts) |attempt| {
+        switch (attempt.status) {
+            .unavailable, .failed, .timeout, .invalid_output => return true,
+            else => {},
+        }
+    }
     return false;
 }
 
@@ -837,6 +843,10 @@ fn hashSpecialistProtocol(hasher: anytype, result: anytype, kind: SpecialistHash
             for (result.page_routes) |route| {
                 if (route.route.needs_ocr) hashPrint(hasher, "ocr-response|{d};", .{route.page_index});
             }
+            for (result.formula_attempts) |attempt| {
+                hashPrint(hasher, "formula-response|{d}|{d}|{s}|", .{ attempt.page_index, attempt.region_index, @tagName(attempt.status) });
+                hashText(hasher, attempt.request_id);
+            }
         },
         .results => {
             for (result.reconciled.spans) |span| {
@@ -844,6 +854,13 @@ fn hashSpecialistProtocol(hasher: anytype, result: anytype, kind: SpecialistHash
                     hashPrint(hasher, "ocr-result|{d}|", .{span.span.page_index});
                     hashText(hasher, span.span.text);
                 }
+            }
+            for (result.formula_artifacts) |artifact| {
+                hashPrint(hasher, "formula-result|{d}|{d}|{d:.3}|", .{ artifact.page_index, artifact.region_index, artifact.confidence });
+                hashText(hasher, artifact.request_id);
+                hashText(hasher, artifact.formula_id);
+                hashText(hasher, artifact.format);
+                hashText(hasher, artifact.text);
             }
         },
     }
@@ -865,6 +882,12 @@ fn hashOcrAttempts(hasher: anytype, result: anytype) void {
             attempt.selected,
         });
         if (attempt.diagnostic_code) |code| hashText(hasher, @tagName(code));
+    }
+    for (result.formula_attempts) |attempt| {
+        hashPrint(hasher, "formula|{d}|{d}|{s}|", .{ attempt.page_index, attempt.region_index, @tagName(attempt.status) });
+        hashText(hasher, attempt.request_id);
+        hashText(hasher, attempt.specialist_id);
+        if (attempt.diagnostic_code) |code| hashText(hasher, code);
     }
 }
 

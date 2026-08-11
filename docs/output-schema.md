@@ -6,7 +6,11 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.11.0`
+Current schema version: `0.12.0`
+
+Current parser build identity: `0.4.0-dev`. The `v0.3.0` release emitted schema
+`0.11.0`; the development suffix keeps post-release schema `0.12.0` artifacts
+distinguishable until the next release is tagged.
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
 Every fixture-tested schema change should still update the schema version.
@@ -30,7 +34,21 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.11.0` adds `specialist_attempt` records, manifest-level
+Schema `0.12.0` makes specialist request identity document-global across batch
+and streaming output, guarantees each route-trace request id resolves to exactly
+one request record, and adds the first configured formula subprocess lifecycle.
+Formula requests are sent as bounded JSONL over stdin and accept exactly one
+strictly linked response line. Formula attempts preserve completed, empty,
+unavailable, failed, timeout, and invalid-output outcomes; completed formula
+artifacts retain owned text, format, confidence, request identity, and
+provenance. Formula requests currently carry native span/block context and
+`crop_image_path:null`, so capability coverage continues to report
+`formula_recognition:false` until deterministic visual crop integration lands.
+Only `completed` and `empty` are accepted from an exit-zero child response.
+Unavailable, failed, timeout, output-limit, and invalid-output statuses are
+derived locally from spawn, process, timeout, bound, and validation outcomes.
+
+Schema `0.11.0` added `specialist_attempt` records, manifest-level
 `has_specialist_failures`, and attempt-linked OCR responses/results. OCR
 outcomes now preserve `not_invoked`, `unavailable`, `failed`, `timeout`,
 `invalid_output`, `empty`, and `completed` instead of collapsing failures into
@@ -118,8 +136,9 @@ open before page artifacts exist, so they include the same artifact slots with
 such as native text, span modeling, layout reconstruction, complexity routing,
 reconciliation, table reconstruction, form fields, OCR adapter support, formula
 routing, specialist protocol support, debug assets, and streaming. Formula
-recognition is currently marked false because formulas are routed but not yet
-recognized by a specialist in the default path.
+recognition remains false because the configured formula adapter currently
+operates on native span/block context without a rendered visual crop. It is a
+protocol and lifecycle integration, not yet evidence of visual formula quality.
 
 ### `span`
 
@@ -163,8 +182,10 @@ available. Route traces include `specialist_request_ids` and
 
 Request record for a swappable local specialist. The parser emits these records
 when routing says a page or region would benefit from OCR, table, formula,
-layout, or entity handling. Default extraction emits requests but does not
-invoke table/formula/layout/entity specialists.
+layout, or entity handling. Default extraction remains request-only for
+table/formula/layout/entity routes. Supplying an enabled `formula` entry through
+`--specialist-config` invokes only formula requests; table, layout, and entity
+routes remain request-only.
 
 Stable fields include `request_id`, `document_id`, optional `source_id`,
 optional `input_sha256`, `page_index`, optional `region_index`, page-aware
@@ -174,6 +195,9 @@ native `blocks`, `ruling_lines`, optional `crop_image_path`,
 `debug_asset_ids`, and provenance with `source_kind:"lifecycle"`.
 
 `requested_kind` is one of `ocr`, `table`, `formula`, `layout`, or `entity`.
+Region request ids use a document-global region index in both batch and
+page-scoped streaming output. A route trace lists only its primary request, and
+every listed request id resolves exactly once in the same output lifecycle.
 
 ### `specialist_attempt`
 
@@ -185,6 +209,11 @@ provenance. OCR config records DPI, PSM, language, grayscale mode, and timeout;
 execution records duration, exit code, and raster dimensions; quality records
 span/character counts, mean confidence, and text coverage.
 
+Formula attempt config records `crop_image_path:null` in this first contract
+slice. Execution records duration and exit code; quality records the formula
+artifact count. Formula attempts are selected only when the response is
+completed and contains at least one valid formula artifact.
+
 `attempt_status` is `not_invoked`, `completed`, `empty`, `unavailable`,
 `failed`, `timeout`, or `invalid_output`. A bounded OCR policy may emit a
 200-DPI/PSM-6 attempt followed by a 300-DPI/PSM-11 attempt. Exactly one
@@ -194,20 +223,25 @@ coverage, character count, then lower DPI and attempt index.
 ### `specialist_response`
 
 Response record from a specialist boundary. Existing Tesseract OCR output is
-represented this way when OCR runs. Future subprocess specialists should return
-one response JSON object per request through JSONL-over-stdin/stdout.
+represented this way when OCR runs. The configured formula subprocess receives
+one request JSON object plus newline on stdin and must return exactly one JSON
+object plus optional surrounding whitespace on stdout. Empty output, malformed
+JSON, a mismatched schema/request/kind, or an extra line is `invalid_output`.
 
 Stable fields include `request_id`, `response_id`, `specialist_id`,
 `specialist_kind`, `status`, `confidence`, returned `spans`, `tables`, `blocks`,
 `formulas`, `entities`, `debug_assets`, `warnings`, `errors`, and provenance.
-OCR responses also carry `attempt_count` and `selected_attempt_id`.
+OCR responses also carry `attempt_count` and `selected_attempt_id`. Formula
+responses carry nested formula artifacts with `formula_id`, `text`, `format`,
+and confidence. Status remains one of `completed`, `empty`, `unavailable`,
+`failed`, `timeout`, or `invalid_output` without collapsing failures.
 
 ### `specialist_result`
 
 Compact result summary tying returned specialist artifacts back to their
-request. Current OCR results report fresh OCR span ids and counts. Future table,
-formula, layout, and entity specialists should use the same provenance-bearing
-artifact ids.
+request. OCR results report fresh OCR span ids and counts. Completed configured
+formula results report owned formula ids and counts. Table, layout, and entity
+specialists remain future protocol consumers.
 
 ### `rag_chunk`
 
@@ -373,9 +407,13 @@ Minimal specialist config shape:
 }
 ```
 
-The config format is intentionally small. In schema `0.9.0`, it is adapter
-plumbing for future local subprocess invocation; the kernel never depends on a
-specific Python package or hosted model.
+The config format is intentionally small and bounded to 256 KiB, 32 arguments,
+4 KiB per executable/argument, and a 1–120000 ms timeout. In schema `0.12.0`, an
+enabled `formula` entry is parsed and invoked. Its executable reads one
+`specialist_request` JSONL record from stdin and writes one
+`specialist_response` JSONL record to stdout. The parser remains model-neutral
+and does not depend on a specific Python package or hosted model. Other entries
+remain reserved adapter configuration.
 
 ## Host Packaging Modes
 

@@ -8,6 +8,7 @@ const adaptive = @import("adaptive.zig");
 const runtime = @import("runtime.zig");
 const schema = @import("schema.zig");
 const specialist_protocol = @import("specialist_protocol.zig");
+const specialists = @import("specialists.zig");
 const stream = @import("stream.zig");
 
 pub const AdaptiveAdapterFormat = enum {
@@ -76,15 +77,29 @@ pub fn extractAdaptive(
         .debug_assets_dir = options.debug_assets_dir,
         .specialist_config_path = options.specialist_config_path,
     };
+    var owned_formula_config: ?specialists.OwnedSpecialistConfig = null;
+    defer if (owned_formula_config) |*config| config.deinit();
+    if (options.specialist_config_path) |path| {
+        owned_formula_config = try specialists.loadFormulaConfig(allocator, path);
+    }
+    var adaptive_options = options.adaptive_options;
+    adaptive_options.specialist_context = .{
+        .document_id = render_options.document_id,
+        .source_id = render_options.source_id,
+        .input_sha256 = render_options.input_sha256,
+    };
+    if (owned_formula_config) |*config| adaptive_options.formula_specialist = config.borrowed();
 
     if (options.format == .stream_jsonl) {
         if (options.emit_specialist_requests_path) |requests_path| {
-            var request_result = try adaptive.extractDocument(allocator, document, options.adaptive_options);
+            var request_options = adaptive_options;
+            request_options.formula_specialist = null;
+            var request_result = try adaptive.extractDocument(allocator, document, request_options);
             defer request_result.deinit();
             try writeSpecialistRequestsFile(allocator, requests_path, &request_result, render_options);
         }
         const summary = try document.extractAdaptiveStreaming(allocator, writer, .{
-            .adaptive_options = options.adaptive_options,
+            .adaptive_options = adaptive_options,
             .schema_options = render_options,
             .include_debug_asset_refs = options.include_debug_asset_refs,
         });
@@ -96,7 +111,7 @@ pub fn extractAdaptive(
         };
     }
 
-    var result = try adaptive.extractDocument(allocator, document, options.adaptive_options);
+    var result = try adaptive.extractDocument(allocator, document, adaptive_options);
     defer result.deinit();
 
     if (options.emit_specialist_requests_path) |requests_path| {

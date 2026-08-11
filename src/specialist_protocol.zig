@@ -10,7 +10,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.11.0";
+pub const schema_version = "0.12.0";
 
 pub const SpecialistKind = enum {
     ocr,
@@ -186,9 +186,10 @@ pub fn countRequests(result: anytype) usize {
     for (result.region_routes) |route| {
         count += requestKindCount(route.route, route.reason_mask);
     }
-    for (result.trace_records) |record| {
-        if (primaryRequestKind(record.route, record.reason_mask)) |kind| {
+    for (result.trace_records, 0..) |record, trace_index| {
+        if (requestKindForScope(record.route, record.reason_mask, record.region_index)) |kind| {
             if (requestAlreadyCovered(result, kind, record.page_index, record.region_index)) continue;
+            if (traceRequestSeenEarlier(result, trace_index, kind, record.page_index, record.region_index)) continue;
             count += 1;
         }
     }
@@ -200,11 +201,12 @@ pub fn countResponses(result: anytype) usize {
     for (result.page_routes) |route| {
         if (route.route.needs_ocr) count += 1;
     }
+    count += result.formula_attempts.len;
     return count;
 }
 
 pub fn countAttempts(result: anytype) usize {
-    return result.ocr_attempts.len;
+    return result.ocr_attempts.len + result.formula_attempts.len;
 }
 
 pub fn countResults(result: anytype) usize {
@@ -215,6 +217,9 @@ pub fn countResults(result: anytype) usize {
             const attempt = result.ocr_attempts[attempt_index];
             if (attempt.status == .completed and countFreshOcrSpans(result, route.page_index, route.bbox, null) > 0) count += 1;
         }
+    }
+    for (result.formula_attempts) |attempt| {
+        if (attempt.status == .completed and formulaArtifactCount(result, attempt.request_id) > 0) count += 1;
     }
     return count;
 }
@@ -236,16 +241,19 @@ pub fn writeRequestsArray(writer: anytype, result: anytype, context: RenderConte
 pub fn writeResponsesArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
     try writeOcrResponses(writer, result, context, null, false, null, &wrote, null);
+    try writeFormulaResponses(writer, result, context, null, false, null, &wrote);
 }
 
 pub fn writeAttemptsArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
     try writeOcrAttempts(writer, result, context, null, false, null, &wrote);
+    try writeFormulaAttempts(writer, result, context, null, false, null, &wrote);
 }
 
 pub fn writeResultsArray(writer: anytype, result: anytype, context: RenderContext) !void {
     var wrote = false;
     try writeOcrResults(writer, result, context, null, false, null, &wrote, null);
+    try writeFormulaResults(writer, result, context, null, false, null, &wrote);
 }
 
 pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result: anytype, context: RenderContext) !Counts {
@@ -256,8 +264,11 @@ pub fn writeArtifactJsonl(allocator: std.mem.Allocator, writer: anytype, result:
     var wrote = false;
     try writeRequests(writer, result, context, null, true, null, &wrote, &span_lookup, &block_lookup);
     try writeOcrAttempts(writer, result, context, null, true, null, &wrote);
+    try writeFormulaAttempts(writer, result, context, null, true, null, &wrote);
     try writeOcrResponses(writer, result, context, null, true, null, &wrote, &span_lookup);
+    try writeFormulaResponses(writer, result, context, null, true, null, &wrote);
     try writeOcrResults(writer, result, context, null, true, null, &wrote, &span_lookup);
+    try writeFormulaResults(writer, result, context, null, true, null, &wrote);
     if (wrote) try writer.writeByte('\n');
     return counts(result);
 }
@@ -274,6 +285,49 @@ pub fn renderRequestsJsonl(allocator: std.mem.Allocator, result: anytype, contex
     try writeRequests(writer, result, context, null, true, null, &wrote, &span_lookup, &block_lookup);
     if (wrote) try writer.writeByte('\n');
     return output.toOwnedSlice(allocator);
+}
+
+pub fn renderRegionRequestJsonl(
+    allocator: std.mem.Allocator,
+    result: anytype,
+    context: RenderContext,
+    region_route_index: usize,
+) ![]u8 {
+    if (region_route_index >= result.region_routes.len) return error.InvalidRegionRoute;
+    const route = result.region_routes[region_route_index];
+    const kind = primaryRegionKind(route.route, route.reason_mask) orelse return error.RegionHasNoSpecialistRequest;
+    var output: std.ArrayList(u8) = .empty;
+    errdefer output.deinit(allocator);
+    const writer = runtime.arrayListWriter(&output, allocator);
+    var span_lookup = try SpanPageLookup.init(allocator, result);
+    defer span_lookup.deinit();
+    var block_lookup = try BlockPageLookup.init(allocator, result);
+    defer block_lookup.deinit();
+    try writeRequestRecord(
+        writer,
+        result,
+        context,
+        kind,
+        @intCast(region_route_index),
+        route.page_index,
+        route.region_index,
+        route.bbox,
+        route.route,
+        route.reason_mask,
+        route.signals,
+        null,
+        &span_lookup,
+        &block_lookup,
+    );
+    try writer.writeByte('\n');
+    return output.toOwnedSlice(allocator);
+}
+
+pub fn allocRequestId(allocator: std.mem.Allocator, kind: SpecialistKind, page_index: u32, region_index: ?u32) ![]u8 {
+    if (region_index) |region| {
+        return std.fmt.allocPrint(allocator, "specialist-request-{s}-region-{d}", .{ @tagName(kind), region });
+    }
+    return std.fmt.allocPrint(allocator, "specialist-request-{s}-page-{d}", .{ @tagName(kind), page_index });
 }
 
 pub fn writePageRequestsJsonl(
@@ -300,6 +354,7 @@ pub fn writePageResponsesJsonl(
     const before = event_index.*;
     var wrote = false;
     try writeOcrResponses(writer, result, context, page_index, true, event_index, &wrote, null);
+    try writeFormulaResponses(writer, result, context, page_index, true, event_index, &wrote);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -314,6 +369,7 @@ pub fn writePageAttemptsJsonl(
     const before = event_index.*;
     var wrote = false;
     try writeOcrAttempts(writer, result, context, page_index, true, event_index, &wrote);
+    try writeFormulaAttempts(writer, result, context, page_index, true, event_index, &wrote);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -328,6 +384,7 @@ pub fn writePageResultsJsonl(
     const before = event_index.*;
     var wrote = false;
     try writeOcrResults(writer, result, context, page_index, true, event_index, &wrote, null);
+    try writeFormulaResults(writer, result, context, page_index, true, event_index, &wrote);
     if (wrote) try writer.writeByte('\n');
     return @intCast(event_index.* - before);
 }
@@ -339,18 +396,8 @@ pub fn writeRouteTraceSpecialistFields(writer: anytype, route: anytype, page_ind
 pub fn writeRouteTraceSpecialistFieldsWithReason(writer: anytype, route: anytype, reason_mask: u32, page_index: u32, region_index: ?u32) !void {
     try writer.writeAll(",\"specialist_request_ids\":[");
     var first = true;
-    if (routeNeedsKindOrReason(route, .ocr, reason_mask)) {
-        try writeRequestIdValue(writer, .ocr, page_index, region_index, &first);
-    }
-    if (routeNeedsKindOrReason(route, .table, reason_mask)) {
-        try writeRequestIdValue(writer, .table, page_index, region_index, &first);
-    }
-    if (routeNeedsKindOrReason(route, .formula, reason_mask)) {
-        try writeRequestIdValue(writer, .formula, page_index, region_index, &first);
-    }
-    if (routeNeedsKindOrReason(route, .layout, reason_mask)) {
-        try writeRequestIdValue(writer, .layout, page_index, region_index, &first);
-    }
+    if (requestKindForScope(route, reason_mask, region_index)) |kind|
+        try writeRequestIdValue(writer, kind, page_index, region_index, &first);
     try writer.writeAll("],\"specialist_status\":\"");
     try writer.writeAll(if (first) "none" else "requested");
     try writer.writeByte('"');
@@ -404,16 +451,27 @@ fn writeRequests(
             request_index += 1;
         }
     }
-    for (result.trace_records) |record| {
+    for (result.trace_records, 0..) |record, trace_index| {
         if (!matchesPage(page_filter, record.page_index)) continue;
-        if (primaryRequestKind(record.route, record.reason_mask)) |kind| {
+        if (requestKindForScope(record.route, record.reason_mask, record.region_index)) |kind| {
             if (requestAlreadyCovered(result, kind, record.page_index, record.region_index)) continue;
+            if (traceRequestSeenEarlier(result, trace_index, kind, record.page_index, record.region_index)) continue;
             const bbox = traceBBox(result, record) orelse layout.BBox{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
             try writeRecordSeparator(writer, jsonl, wrote);
             try writeRequestRecord(writer, result, context, kind, request_index, record.page_index, record.region_index, bbox, record.route, record.reason_mask, zeroSignals(), event_index, span_lookup, block_lookup);
             request_index += 1;
         }
     }
+}
+
+fn traceRequestSeenEarlier(result: anytype, end_index: usize, kind: SpecialistKind, page_index: u32, region_index: ?u32) bool {
+    for (result.trace_records[0..end_index]) |record| {
+        if (record.page_index != page_index or record.region_index != region_index) continue;
+        if (requestKindForScope(record.route, record.reason_mask, record.region_index)) |prior_kind| {
+            if (prior_kind == kind and !requestAlreadyCovered(result, kind, page_index, region_index)) return true;
+        }
+    }
+    return false;
 }
 
 fn writeOcrAttempts(
@@ -468,6 +526,186 @@ fn writeOcrResults(
         try writeRecordSeparator(writer, jsonl, wrote);
         try writeOcrResultRecord(writer, result, context, @intCast(index), route, event_index, span_lookup);
     }
+}
+
+fn writeFormulaAttempts(
+    writer: anytype,
+    result: anytype,
+    context: RenderContext,
+    page_filter: ?u32,
+    jsonl: bool,
+    event_index: ?*u64,
+    wrote: *bool,
+) !void {
+    for (result.formula_attempts) |attempt| {
+        if (!matchesPage(page_filter, attempt.page_index)) continue;
+        try writeRecordSeparator(writer, jsonl, wrote);
+        try writeRecordHeader(writer, "specialist_attempt");
+        if (event_index) |index| {
+            try writeStreamFields(writer, "specialist_attempt", index.*, attempt.page_index);
+            index.* += 1;
+        }
+        try writeDocumentFields(writer, context);
+        try writer.print(",\"page_index\":{},\"attempt_id\":\"specialist-attempt-formula-region-{d}-0\",\"request_id\":\"", .{ attempt.page_index, attempt.region_index });
+        try writeJsonEscaped(writer, attempt.request_id);
+        try writer.writeAll("\",\"specialist_id\":\"");
+        try writeJsonEscaped(writer, attempt.specialist_id);
+        try writer.writeAll("\",\"specialist_kind\":\"formula\",\"attempt_index\":0,\"attempt_status\":\"");
+        try writer.writeAll(@tagName(attempt.status));
+        try writer.writeAll("\",\"failure_stage\":");
+        if (formulaStatusFailed(attempt.status)) try writer.writeAll("\"recognize\"") else try writer.writeAll("null");
+        try writer.writeAll(",\"selected\":");
+        try writer.print("{}", .{attempt.status == .completed});
+        try writer.print(",\"config\":{{\"crop_image_path\":null}},\"execution\":{{\"duration_ms\":{},\"exit_code\":", .{attempt.duration_ms});
+        if (attempt.exit_code) |code| try writer.print("{}", .{code}) else try writer.writeAll("null");
+        try writer.writeAll("},\"quality\":{\"formula_count\":");
+        try writer.print("{}", .{formulaArtifactCount(result, attempt.request_id)});
+        try writer.writeAll("},\"warnings\":[],\"errors\":[");
+        try writeFormulaAttemptDiagnostic(writer, attempt);
+        try writer.writeByte(']');
+        try writeProvenance(writer, context, "specialist-attempt-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "lifecycle", formulaAttemptConfidence(result, attempt.request_id));
+        try writer.writeByte('}');
+    }
+}
+
+fn writeFormulaResponses(
+    writer: anytype,
+    result: anytype,
+    context: RenderContext,
+    page_filter: ?u32,
+    jsonl: bool,
+    event_index: ?*u64,
+    wrote: *bool,
+) !void {
+    for (result.formula_attempts) |attempt| {
+        if (!matchesPage(page_filter, attempt.page_index)) continue;
+        try writeRecordSeparator(writer, jsonl, wrote);
+        try writeRecordHeader(writer, "specialist_response");
+        if (event_index) |index| {
+            try writeStreamFields(writer, "specialist_response", index.*, attempt.page_index);
+            index.* += 1;
+        }
+        try writeDocumentFields(writer, context);
+        try writer.print(",\"page_index\":{},\"response_id\":\"specialist-response-formula-region-{d}\",\"request_id\":\"", .{ attempt.page_index, attempt.region_index });
+        try writeJsonEscaped(writer, attempt.request_id);
+        try writer.writeAll("\",\"specialist_id\":\"");
+        try writeJsonEscaped(writer, attempt.specialist_id);
+        try writer.writeAll("\",\"specialist_kind\":\"formula\",\"status\":\"");
+        try writer.writeAll(@tagName(attempt.status));
+        try writer.print("\",\"confidence\":{d:.3},\"attempt_count\":1,\"selected_attempt_id\":", .{formulaAttemptConfidence(result, attempt.request_id)});
+        if (attempt.status == .completed) {
+            try writer.print("\"specialist-attempt-formula-region-{d}-0\"", .{attempt.region_index});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"spans\":[],\"tables\":[],\"blocks\":[],\"formulas\":");
+        try writeFormulaArtifactArray(writer, result, attempt.request_id);
+        try writer.writeAll(",\"entities\":[],\"debug_assets\":[],\"warnings\":[],\"errors\":[");
+        try writeFormulaAttemptDiagnostic(writer, attempt);
+        try writer.writeByte(']');
+        try writeProvenance(writer, context, "specialist-response-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula", formulaAttemptConfidence(result, attempt.request_id));
+        try writer.writeByte('}');
+    }
+}
+
+fn writeFormulaResults(
+    writer: anytype,
+    result: anytype,
+    context: RenderContext,
+    page_filter: ?u32,
+    jsonl: bool,
+    event_index: ?*u64,
+    wrote: *bool,
+) !void {
+    for (result.formula_attempts) |attempt| {
+        if (!matchesPage(page_filter, attempt.page_index) or attempt.status != .completed) continue;
+        const artifact_count = formulaArtifactCount(result, attempt.request_id);
+        if (artifact_count == 0) continue;
+        try writeRecordSeparator(writer, jsonl, wrote);
+        try writeRecordHeader(writer, "specialist_result");
+        if (event_index) |index| {
+            try writeStreamFields(writer, "specialist_result", index.*, attempt.page_index);
+            index.* += 1;
+        }
+        try writeDocumentFields(writer, context);
+        try writer.print(",\"page_index\":{},\"specialist_result_id\":\"specialist-result-formula-region-{d}\",\"request_id\":\"", .{ attempt.page_index, attempt.region_index });
+        try writeJsonEscaped(writer, attempt.request_id);
+        try writer.writeAll("\",\"specialist_id\":\"");
+        try writeJsonEscaped(writer, attempt.specialist_id);
+        try writer.print("\",\"specialist_kind\":\"formula\",\"status\":\"completed\",\"source_kind\":\"formula\",\"selected_attempt_id\":\"specialist-attempt-formula-region-{d}-0\",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":0,\"tables\":0,\"blocks\":0,\"formulas\":{},\"entities\":0}},\"span_ids\":[],\"table_ids\":[],\"block_ids\":[],\"formula_ids\":[", .{ attempt.region_index, formulaAttemptConfidence(result, attempt.request_id), artifact_count });
+        var first = true;
+        for (result.formula_artifacts) |artifact| {
+            if (!std.mem.eql(u8, artifact.request_id, attempt.request_id)) continue;
+            if (!first) try writer.writeByte(',');
+            try writer.writeByte('"');
+            try writeJsonEscaped(writer, artifact.formula_id);
+            try writer.writeByte('"');
+            first = false;
+        }
+        try writer.writeAll("],\"entity_ids\":[]");
+        try writeProvenance(writer, context, "specialist-result-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula", formulaAttemptConfidence(result, attempt.request_id));
+        try writer.writeByte('}');
+    }
+}
+
+fn writeFormulaArtifactArray(writer: anytype, result: anytype, request_id: []const u8) !void {
+    try writer.writeByte('[');
+    var first = true;
+    for (result.formula_artifacts) |artifact| {
+        if (!std.mem.eql(u8, artifact.request_id, request_id)) continue;
+        if (!first) try writer.writeByte(',');
+        try writer.writeAll("{\"formula_id\":\"");
+        try writeJsonEscaped(writer, artifact.formula_id);
+        try writer.writeAll("\",\"text\":\"");
+        try writeJsonEscaped(writer, artifact.text);
+        try writer.writeAll("\",\"format\":\"");
+        try writeJsonEscaped(writer, artifact.format);
+        try writer.print("\",\"confidence\":{d:.3}}}", .{artifact.confidence});
+        first = false;
+    }
+    try writer.writeByte(']');
+}
+
+fn formulaArtifactCount(result: anytype, request_id: []const u8) usize {
+    var count: usize = 0;
+    for (result.formula_artifacts) |artifact| {
+        if (std.mem.eql(u8, artifact.request_id, request_id)) count += 1;
+    }
+    return count;
+}
+
+fn formulaAttemptConfidence(result: anytype, request_id: []const u8) f32 {
+    var total: f32 = 0;
+    var count: usize = 0;
+    for (result.formula_artifacts) |artifact| {
+        if (!std.mem.eql(u8, artifact.request_id, request_id)) continue;
+        total += artifact.confidence;
+        count += 1;
+    }
+    return if (count == 0) 0 else total / @as(f32, @floatFromInt(count));
+}
+
+fn formulaAttemptBBox(result: anytype, attempt: anytype) ?layout.BBox {
+    for (result.region_routes) |route| {
+        if (route.page_index == attempt.page_index and route.region_index == attempt.region_index) return route.bbox;
+    }
+    return null;
+}
+
+fn formulaStatusFailed(status: anytype) bool {
+    return switch (status) {
+        .unavailable, .failed, .timeout, .invalid_output => true,
+        else => false,
+    };
+}
+
+fn writeFormulaAttemptDiagnostic(writer: anytype, attempt: anytype) !void {
+    const code = attempt.diagnostic_code orelse return;
+    try writer.writeAll("{\"code\":\"");
+    try writeJsonEscaped(writer, code);
+    try writer.writeAll("\",\"message\":\"Formula specialist did not produce a usable completed response\",\"stderr_excerpt\":\"");
+    try writeJsonEscaped(writer, attempt.stderr_excerpt);
+    try writer.writeAll("\"}");
 }
 
 fn writeRequestRecord(
@@ -733,6 +971,13 @@ fn primaryRequestKind(route: complexity.RouteDecision, reason_mask: u32) ?Specia
     return primaryRegionKind(route, reason_mask);
 }
 
+fn requestKindForScope(route: complexity.RouteDecision, reason_mask: u32, region_index: ?u32) ?SpecialistKind {
+    if (region_index == null) {
+        return if (routeNeedsKindOrReason(route, .ocr, reason_mask)) .ocr else null;
+    }
+    return primaryRequestKind(route, reason_mask);
+}
+
 fn primaryRegionKind(route: complexity.RouteDecision, reason_mask: u32) ?SpecialistKind {
     if (routeNeedsKindOrReason(route, .table, reason_mask)) return .table;
     if (routeNeedsKindOrReason(route, .formula, reason_mask)) return .formula;
@@ -779,6 +1024,10 @@ fn requestAlreadyCovered(result: anytype, kind: SpecialistKind, page_index: u32,
         }
         return false;
     }
+    // Page-route emission is deliberately OCR-only. Table/formula/layout page
+    // decisions are emitted from their trace fallback, so they are not covered
+    // merely because the page route carries the same bit.
+    if (kind != .ocr) return false;
     const route_index: usize = @intCast(page_index);
     if (route_index < result.page_routes.len) {
         const route = result.page_routes[route_index];
@@ -1158,7 +1407,7 @@ test "specialist route metadata records stable ids" {
         .needs_formula_model = true,
     }, 2, 7);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "specialist-request-table-region-7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "specialist-request-formula-region-7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "specialist-request-formula-region-7") == null);
 }
 
 test "entity request writer exposes entity protocol shape" {

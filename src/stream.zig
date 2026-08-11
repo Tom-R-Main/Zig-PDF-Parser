@@ -58,6 +58,7 @@ pub fn extractAdaptiveStreaming(
     var summary = StreamingSummary{ .page_count = page_end - page_start };
     var event_index: u64 = 0;
     var table_context = StreamTableContext{};
+    var region_index_base: u32 = 0;
 
     var owned_fallback_page_index: ?adaptive.DocumentTextPageIndex = null;
     if (options.adaptive_options.fallback_page_index == null) {
@@ -94,9 +95,11 @@ pub fn extractAdaptiveStreaming(
         page_options.page_start = page_idx;
         page_options.page_end = page_idx + 1;
         page_options.fallback_page_index = fallback_page_index;
+        page_options.region_index_base = region_index_base;
 
         var page_result = try adaptive.extractDocument(allocator, document, page_options);
         defer page_result.deinit();
+        region_index_base += @intCast(page_result.region_routes.len);
         if (page_result.hasSpecialistFailures()) summary.specialist_failure_count += 1;
 
         const page_counts = try writePageArtifacts(

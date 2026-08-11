@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Zig 0.16 runtime helpers shared by CLI tools, tests, and FFI entrypoints.
 pub const File = std.Io.File;
@@ -6,6 +7,7 @@ pub const File = std.Io.File;
 pub const large_output_buffer_size = 256 * 1024;
 
 var current_io: ?std.Io = null;
+var capture_input_sequence = std.atomic.Value(u64).init(0);
 
 pub fn debugAllocator() std.heap.DebugAllocator(.{}) {
     return .init;
@@ -215,6 +217,119 @@ pub fn runCapture(
     });
 }
 
+/// Run a bounded subprocess with deterministic bytes supplied on stdin.
+/// A short-lived file avoids pipe write/read deadlocks while stdout and stderr
+/// are drained concurrently by `std.process.run`.
+pub fn runCaptureWithInput(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    input: []const u8,
+    options: struct {
+        stdout_limit: usize = 1024 * 1024,
+        stderr_limit: usize = 64 * 1024,
+        timeout_ms: u32 = 30_000,
+    },
+) !std.process.RunResult {
+    const input_limit = 1024 * 1024;
+    if (input.len > input_limit) return error.InputTooLong;
+    const temp_dir: []const u8 = if (builtin.os.tag == .windows) "." else "/tmp";
+    const sequence = capture_input_sequence.fetchAdd(1, .monotonic);
+    const filename = try std.fmt.allocPrint(allocator, "pdf-parser-specialist-stdin-{x}-{x}.tmp", .{ nanoTimestamp(), sequence });
+    defer allocator.free(filename);
+    const path = try std.fs.path.join(allocator, &.{ temp_dir, filename });
+    defer allocator.free(path);
+    var path_exists = false;
+    defer if (path_exists) deleteFilePath(path);
+
+    const input_file = try createFilePath(path, .{
+        .exclusive = true,
+        .permissions = privateFilePermissions(),
+    });
+    path_exists = true;
+    writeAllFile(input_file, input) catch |err| {
+        input_file.close(currentIo());
+        return err;
+    };
+    input_file.close(currentIo());
+
+    const read_file = try openFilePath(path);
+    defer read_file.close(currentIo());
+    if (builtin.os.tag != .windows) {
+        // POSIX children only need the open handle. Remove the directory entry
+        // before spawning; keep deferred cleanup armed unless unlink succeeds.
+        try deleteFilePathChecked(path);
+        path_exists = false;
+    }
+
+    var child = try std.process.spawn(currentIo(), .{
+        .argv = argv,
+        .stdin = .{ .file = read_file },
+        .stdout = .pipe,
+        .stderr = .pipe,
+        .create_no_window = true,
+    });
+    defer child.kill(currentIo());
+
+    var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+    var multi_reader: std.Io.File.MultiReader = undefined;
+    multi_reader.init(allocator, currentIo(), multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi_reader.deinit();
+
+    const stdout_reader = multi_reader.reader(0);
+    const stderr_reader = multi_reader.reader(1);
+    const timeout: std.Io.Timeout = .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromMilliseconds(@intCast(options.timeout_ms)),
+    } };
+    while (multi_reader.fill(64, timeout)) |_| {
+        if (stdout_reader.buffered().len > options.stdout_limit or stderr_reader.buffered().len > options.stderr_limit)
+            return error.StreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
+        else => |e| return e,
+    }
+    try multi_reader.checkAnyError();
+
+    const term = try child.wait(currentIo());
+    const stdout = try multi_reader.toOwnedSlice(0);
+    errdefer allocator.free(stdout);
+    const stderr = try multi_reader.toOwnedSlice(1);
+    return .{ .term = term, .stdout = stdout, .stderr = stderr };
+}
+
+fn createFilePath(path: []const u8, options: std.Io.Dir.CreateFileOptions) !File {
+    return if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.createFileAbsolute(currentIo(), path, options)
+    else
+        std.Io.Dir.cwd().createFile(currentIo(), path, options);
+}
+
+fn openFilePath(path: []const u8) !File {
+    return if (std.fs.path.isAbsolute(path))
+        std.Io.Dir.openFileAbsolute(currentIo(), path, .{})
+    else
+        std.Io.Dir.cwd().openFile(currentIo(), path, .{});
+}
+
+fn deleteFilePath(path: []const u8) void {
+    deleteFilePathChecked(path) catch {};
+}
+
+fn deleteFilePathChecked(path: []const u8) !void {
+    if (std.fs.path.isAbsolute(path)) {
+        try std.Io.Dir.deleteFileAbsolute(currentIo(), path);
+    } else {
+        try std.Io.Dir.cwd().deleteFile(currentIo(), path);
+    }
+}
+
+fn privateFilePermissions() std.Io.File.Permissions {
+    return if (builtin.os.tag == .windows)
+        .default_file
+    else
+        .fromMode(0o600);
+}
+
 test "runtime ArrayList writer" {
     var list: std.ArrayList(u8) = .empty;
     defer list.deinit(std.testing.allocator);
@@ -248,6 +363,20 @@ test "runtime cwd file helpers" {
     const data = try readFileAllocAlignedCwd(std.testing.allocator, path, .fromByteUnits(1));
     defer std.testing.allocator.free(data);
     try std.testing.expectEqualStrings("abc123", data);
+}
+
+test "runtime subprocess stdin rejects oversized input before spawn" {
+    var threaded: std.Io.Threaded = .init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    setIo(threaded.io());
+    const input = try std.testing.allocator.alloc(u8, 1024 * 1024 + 1);
+    defer std.testing.allocator.free(input);
+    try std.testing.expectError(error.InputTooLong, runCaptureWithInput(
+        std.testing.allocator,
+        &.{"definitely-not-spawned"},
+        input,
+        .{},
+    ));
 }
 
 test "runtime nano timestamp returns a value" {

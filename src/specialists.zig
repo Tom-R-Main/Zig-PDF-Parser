@@ -144,6 +144,290 @@ pub const SpecialistConfig = struct {
     stderr_limit: usize = 1024 * 1024,
 };
 
+pub const OwnedSpecialistConfig = struct {
+    allocator: std.mem.Allocator,
+    executable: []u8,
+    extra_args: [][]u8,
+    timeout_ms: u32,
+
+    pub fn deinit(self: *OwnedSpecialistConfig) void {
+        self.allocator.free(self.executable);
+        for (self.extra_args) |arg| self.allocator.free(arg);
+        self.allocator.free(self.extra_args);
+        self.* = undefined;
+    }
+
+    pub fn borrowed(self: *const OwnedSpecialistConfig) SpecialistConfig {
+        return .{
+            .executable = self.executable,
+            .extra_args = self.extra_args,
+            .timeout_ms = self.timeout_ms,
+            .stdout_limit = 1024 * 1024,
+            .stderr_limit = 64 * 1024,
+        };
+    }
+};
+
+pub const FormulaExecutionStatus = enum {
+    completed,
+    empty,
+    unavailable,
+    failed,
+    timeout,
+    invalid_output,
+};
+
+pub const FormulaExecutionArtifact = struct {
+    text: []u8,
+    format: []u8,
+    confidence: f32,
+};
+
+pub const FormulaExecution = struct {
+    status: FormulaExecutionStatus,
+    specialist_id: []u8,
+    artifacts: []FormulaExecutionArtifact,
+    duration_ms: u64,
+    exit_code: ?u8 = null,
+    diagnostic_code: ?[]u8 = null,
+    stderr_excerpt: []u8,
+
+    pub fn deinit(self: *FormulaExecution, allocator: std.mem.Allocator) void {
+        allocator.free(self.specialist_id);
+        for (self.artifacts) |artifact| {
+            allocator.free(artifact.text);
+            allocator.free(artifact.format);
+        }
+        allocator.free(self.artifacts);
+        if (self.diagnostic_code) |code| allocator.free(code);
+        allocator.free(self.stderr_excerpt);
+        self.* = undefined;
+    }
+};
+
+const max_config_bytes = 256 * 1024;
+const max_specialist_args = 32;
+const max_config_string_bytes = 4096;
+const max_formula_artifacts = 32;
+
+pub fn loadFormulaConfig(allocator: std.mem.Allocator, path: []const u8) !?OwnedSpecialistConfig {
+    if (try runtime.fileSizeCwd(path) > max_config_bytes) return error.SpecialistConfigTooLarge;
+    const bytes = try runtime.readFileAllocAlignedCwd(allocator, path, .fromByteUnits(1));
+    defer allocator.free(bytes);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return error.InvalidSpecialistConfig;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidSpecialistConfig;
+    const formula_value = parsed.value.object.get("formula") orelse return null;
+    if (formula_value != .object) return error.InvalidSpecialistConfig;
+    const enabled_value = formula_value.object.get("enabled") orelse return null;
+    if (enabled_value != .bool) return error.InvalidSpecialistConfig;
+    if (!enabled_value.bool) return null;
+    const executable_value = formula_value.object.get("executable") orelse return error.InvalidSpecialistConfig;
+    if (executable_value != .string or executable_value.string.len == 0 or executable_value.string.len > max_config_string_bytes)
+        return error.InvalidSpecialistConfig;
+
+    const executable = try allocator.dupe(u8, executable_value.string);
+    errdefer allocator.free(executable);
+    var args: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (args.items) |arg| allocator.free(arg);
+        args.deinit(allocator);
+    }
+    if (formula_value.object.get("args")) |args_value| {
+        if (args_value != .array or args_value.array.items.len > max_specialist_args) return error.InvalidSpecialistConfig;
+        for (args_value.array.items) |arg_value| {
+            if (arg_value != .string or arg_value.string.len > max_config_string_bytes) return error.InvalidSpecialistConfig;
+            const arg = try allocator.dupe(u8, arg_value.string);
+            errdefer allocator.free(arg);
+            try args.append(allocator, arg);
+        }
+    }
+    var timeout_ms: u32 = 30_000;
+    if (formula_value.object.get("timeout_ms")) |timeout_value| {
+        if (timeout_value != .integer or timeout_value.integer < 1 or timeout_value.integer > 120_000)
+            return error.InvalidSpecialistConfig;
+        timeout_ms = @intCast(timeout_value.integer);
+    }
+    return .{
+        .allocator = allocator,
+        .executable = executable,
+        .extra_args = try args.toOwnedSlice(allocator),
+        .timeout_ms = timeout_ms,
+    };
+}
+
+pub fn runFormulaJsonl(
+    allocator: std.mem.Allocator,
+    request_jsonl: []const u8,
+    expected_request_id: []const u8,
+    expected_schema_version: []const u8,
+    config: SpecialistConfig,
+) !FormulaExecution {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.append(allocator, config.executable);
+    try argv.appendSlice(allocator, config.extra_args);
+
+    const started_ns = runtime.nanoTimestamp();
+    const process_result = runtime.runCaptureWithInput(allocator, argv.items, request_jsonl, .{
+        .stdout_limit = config.stdout_limit,
+        .stderr_limit = config.stderr_limit,
+        .timeout_ms = config.timeout_ms,
+    }) catch |err| switch (err) {
+        error.FileNotFound => return emptyFormulaExecution(allocator, .unavailable, elapsedMs(started_ns), "specialist_unavailable"),
+        error.Timeout => return emptyFormulaExecution(allocator, .timeout, elapsedMs(started_ns), "specialist_timeout"),
+        error.InputTooLong => return emptyFormulaExecution(allocator, .invalid_output, elapsedMs(started_ns), "specialist_input_limit"),
+        error.StreamTooLong => return emptyFormulaExecution(allocator, .invalid_output, elapsedMs(started_ns), "specialist_output_limit"),
+        else => return err,
+    };
+    defer allocator.free(process_result.stdout);
+    defer allocator.free(process_result.stderr);
+
+    const exit_code: ?u8 = switch (process_result.term) {
+        .exited => |code| code,
+        else => null,
+    };
+    if (exit_code == null or exit_code.? != 0) {
+        var outcome = try emptyFormulaExecution(allocator, .failed, elapsedMs(started_ns), "specialist_failed");
+        errdefer outcome.deinit(allocator);
+        outcome.exit_code = exit_code;
+        allocator.free(outcome.stderr_excerpt);
+        outcome.stderr_excerpt = try boundedDupe(allocator, process_result.stderr, 4096);
+        return outcome;
+    }
+
+    return parseFormulaResponse(
+        allocator,
+        process_result.stdout,
+        process_result.stderr,
+        expected_request_id,
+        expected_schema_version,
+        elapsedMs(started_ns),
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return emptyFormulaExecution(allocator, .invalid_output, elapsedMs(started_ns), "invalid_specialist_output"),
+    };
+}
+
+fn parseFormulaResponse(
+    allocator: std.mem.Allocator,
+    stdout: []const u8,
+    stderr: []const u8,
+    expected_request_id: []const u8,
+    expected_schema_version: []const u8,
+    duration_ms: u64,
+) !FormulaExecution {
+    const line = std.mem.trim(u8, stdout, " \t\r\n");
+    if (line.len == 0 or std.mem.indexOfAny(u8, line, "\r\n") != null) return error.InvalidSpecialistOutput;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return error.InvalidSpecialistOutput;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidSpecialistOutput;
+    const object = parsed.value.object;
+    try expectJsonString(object, "schema_version", expected_schema_version);
+    try expectJsonString(object, "record_type", "specialist_response");
+    try expectJsonString(object, "request_id", expected_request_id);
+    try expectJsonString(object, "specialist_kind", "formula");
+    const specialist_id_value = object.get("specialist_id") orelse return error.InvalidSpecialistOutput;
+    if (specialist_id_value != .string or specialist_id_value.string.len == 0 or specialist_id_value.string.len > 128)
+        return error.InvalidSpecialistOutput;
+    const status_value = object.get("status") orelse return error.InvalidSpecialistOutput;
+    if (status_value != .string) return error.InvalidSpecialistOutput;
+    const status: FormulaExecutionStatus = if (std.mem.eql(u8, status_value.string, "completed"))
+        .completed
+    else if (std.mem.eql(u8, status_value.string, "empty"))
+        .empty
+    else
+        return error.InvalidSpecialistOutput;
+
+    const specialist_id = try allocator.dupe(u8, specialist_id_value.string);
+    errdefer allocator.free(specialist_id);
+    const stderr_excerpt = try boundedDupe(allocator, stderr, 4096);
+    errdefer allocator.free(stderr_excerpt);
+    const diagnostic_code = if (status == .completed or status == .empty)
+        null
+    else
+        try std.fmt.allocPrint(allocator, "specialist_{s}", .{@tagName(status)});
+    errdefer if (diagnostic_code) |code| allocator.free(code);
+
+    var artifacts: std.ArrayList(FormulaExecutionArtifact) = .empty;
+    errdefer {
+        for (artifacts.items) |artifact| {
+            allocator.free(artifact.text);
+            allocator.free(artifact.format);
+        }
+        artifacts.deinit(allocator);
+    }
+    const formulas_value = object.get("formulas") orelse return error.InvalidSpecialistOutput;
+    if (formulas_value != .array or formulas_value.array.items.len > max_formula_artifacts) return error.InvalidSpecialistOutput;
+    if (status == .completed and formulas_value.array.items.len == 0) return error.InvalidSpecialistOutput;
+    if (status != .completed and formulas_value.array.items.len != 0) return error.InvalidSpecialistOutput;
+    for (formulas_value.array.items) |formula_value| {
+        if (formula_value != .object) return error.InvalidSpecialistOutput;
+        const text_value = formula_value.object.get("text") orelse return error.InvalidSpecialistOutput;
+        const format_value = formula_value.object.get("format") orelse return error.InvalidSpecialistOutput;
+        const confidence_value = formula_value.object.get("confidence") orelse return error.InvalidSpecialistOutput;
+        if (text_value != .string or text_value.string.len == 0 or text_value.string.len > 64 * 1024) return error.InvalidSpecialistOutput;
+        if (format_value != .string or format_value.string.len == 0 or format_value.string.len > 32) return error.InvalidSpecialistOutput;
+        const confidence: f32 = switch (confidence_value) {
+            .float => |value| @floatCast(value),
+            .integer => |value| @floatFromInt(value),
+            else => return error.InvalidSpecialistOutput,
+        };
+        if (!std.math.isFinite(confidence) or confidence < 0 or confidence > 1) return error.InvalidSpecialistOutput;
+        const text = try allocator.dupe(u8, text_value.string);
+        const format = allocator.dupe(u8, format_value.string) catch |err| {
+            allocator.free(text);
+            return err;
+        };
+        artifacts.append(allocator, .{ .text = text, .format = format, .confidence = confidence }) catch |err| {
+            allocator.free(text);
+            allocator.free(format);
+            return err;
+        };
+    }
+
+    return .{
+        .status = status,
+        .specialist_id = specialist_id,
+        .artifacts = try artifacts.toOwnedSlice(allocator),
+        .duration_ms = duration_ms,
+        .diagnostic_code = diagnostic_code,
+        .stderr_excerpt = stderr_excerpt,
+    };
+}
+
+fn expectJsonString(object: std.json.ObjectMap, name: []const u8, expected: []const u8) !void {
+    const value = object.get(name) orelse return error.InvalidSpecialistOutput;
+    if (value != .string or !std.mem.eql(u8, value.string, expected)) return error.InvalidSpecialistOutput;
+}
+
+fn emptyFormulaExecution(allocator: std.mem.Allocator, status: FormulaExecutionStatus, duration_ms: u64, code: []const u8) !FormulaExecution {
+    const specialist_id = try allocator.dupe(u8, "formula-subprocess");
+    errdefer allocator.free(specialist_id);
+    const artifacts = try allocator.alloc(FormulaExecutionArtifact, 0);
+    errdefer allocator.free(artifacts);
+    const diagnostic_code = try allocator.dupe(u8, code);
+    errdefer allocator.free(diagnostic_code);
+    const stderr_excerpt = try allocator.alloc(u8, 0);
+    return .{
+        .status = status,
+        .specialist_id = specialist_id,
+        .artifacts = artifacts,
+        .duration_ms = duration_ms,
+        .diagnostic_code = diagnostic_code,
+        .stderr_excerpt = stderr_excerpt,
+    };
+}
+
+fn boundedDupe(allocator: std.mem.Allocator, input: []const u8, limit: usize) ![]u8 {
+    return allocator.dupe(u8, input[0..@min(input.len, limit)]);
+}
+
+fn elapsedMs(started_ns: i128) u64 {
+    const elapsed_ns = runtime.nanoTimestamp() - started_ns;
+    return if (elapsed_ns > 0) @intCast(@divTrunc(elapsed_ns, 1_000_000)) else 0;
+}
+
 pub const SpecialistOutput = struct {
     text: []u8,
     source: layout.SourceKind,
@@ -684,4 +968,137 @@ test "specialist adapters require a crop image path before spawning" {
 
     try std.testing.expectError(error.MissingCropImage, runTableSpecialist(std.testing.allocator, crop, .tatr, config));
     try std.testing.expectError(error.MissingCropImage, runFormulaSpecialist(std.testing.allocator, crop, .pix2tex, config));
+}
+
+test "formula JSONL adapter accepts exactly one linked completed response" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const path = try fakeSpecialistScript("success",
+        \\#!/bin/sh
+        \\printf '%s\n' '{"schema_version":"0.12.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-7","specialist_id":"fake-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.97}]}'
+        \\
+    );
+    defer {
+        runtime.deleteFileCwd(path);
+        allocator.free(path);
+    }
+    var executable_buf: [160]u8 = undefined;
+    const executable = try std.fmt.bufPrint(&executable_buf, "./{s}", .{path});
+    var result = try runFormulaJsonl(allocator, "{\"request_id\":\"specialist-request-formula-region-7\"}\n", "specialist-request-formula-region-7", "0.12.0", .{ .executable = executable });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(FormulaExecutionStatus.completed, result.status);
+    try std.testing.expectEqualStrings("fake-formula", result.specialist_id);
+    try std.testing.expectEqual(@as(usize, 1), result.artifacts.len);
+    try std.testing.expectEqualStrings("x^2+y^2=z^2", result.artifacts[0].text);
+}
+
+test "formula JSONL adapter distinguishes empty unavailable failed and timeout" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+    const request_id = "specialist-request-formula-region-3";
+
+    const empty_path = try fakeSpecialistScript("empty",
+        \\#!/bin/sh
+        \\printf '%s\n' '{"schema_version":"0.12.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-3","specialist_id":"fake-formula","specialist_kind":"formula","status":"empty","formulas":[]}'
+        \\
+    );
+    defer {
+        runtime.deleteFileCwd(empty_path);
+        allocator.free(empty_path);
+    }
+    var empty_exec_buf: [160]u8 = undefined;
+    const empty_exec = try std.fmt.bufPrint(&empty_exec_buf, "./{s}", .{empty_path});
+    var empty = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = empty_exec });
+    defer empty.deinit(allocator);
+    try std.testing.expectEqual(FormulaExecutionStatus.empty, empty.status);
+
+    var unavailable = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = "./definitely-missing-formula-specialist" });
+    defer unavailable.deinit(allocator);
+    try std.testing.expectEqual(FormulaExecutionStatus.unavailable, unavailable.status);
+
+    const failed_path = try fakeSpecialistScript("failed", "#!/bin/sh\necho failed >&2\nexit 9\n");
+    defer {
+        runtime.deleteFileCwd(failed_path);
+        allocator.free(failed_path);
+    }
+    var failed_exec_buf: [160]u8 = undefined;
+    const failed_exec = try std.fmt.bufPrint(&failed_exec_buf, "./{s}", .{failed_path});
+    var failed = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = failed_exec });
+    defer failed.deinit(allocator);
+    try std.testing.expectEqual(FormulaExecutionStatus.failed, failed.status);
+    try std.testing.expectEqual(@as(?u8, 9), failed.exit_code);
+
+    const timeout_path = try fakeSpecialistScript("timeout", "#!/bin/sh\nsleep 1\n");
+    defer {
+        runtime.deleteFileCwd(timeout_path);
+        allocator.free(timeout_path);
+    }
+    var timeout_exec_buf: [160]u8 = undefined;
+    const timeout_exec = try std.fmt.bufPrint(&timeout_exec_buf, "./{s}", .{timeout_path});
+    var timeout = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = timeout_exec, .timeout_ms = 10 });
+    defer timeout.deinit(allocator);
+    try std.testing.expectEqual(FormulaExecutionStatus.timeout, timeout.status);
+}
+
+test "formula JSONL adapter rejects malformed wrong-id and extra-line output" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+    const cases = [_]struct { name: []const u8, body: []const u8 }{
+        .{ .name = "malformed", .body = "#!/bin/sh\nprintf '%s\\n' '{bad json}'\n" },
+        .{ .name = "wrong-id", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"wrong\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}'\n" },
+        .{ .name = "extra-line", .body = "#!/bin/sh\nprintf '%s\\n%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}' '{}'\n" },
+        .{ .name = "child-status", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"timeout\",\"formulas\":[]}'\n" },
+    };
+    for (cases) |case| {
+        const path = try fakeSpecialistScript(case.name, case.body);
+        defer {
+            runtime.deleteFileCwd(path);
+            allocator.free(path);
+        }
+        var executable_buf: [160]u8 = undefined;
+        const executable = try std.fmt.bufPrint(&executable_buf, "./{s}", .{path});
+        var result = try runFormulaJsonl(allocator, "{}\n", "specialist-request-formula-region-4", "0.12.0", .{ .executable = executable });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(FormulaExecutionStatus.invalid_output, result.status);
+    }
+}
+
+test "formula specialist config parser is bounded and owned" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "pdf-parser-formula-config-{x}.json", .{runtime.nanoTimestamp()});
+    defer runtime.deleteFileCwd(path);
+    const file = try runtime.createFileCwd(path);
+    try runtime.writeAllFile(file, "{\"formula\":{\"enabled\":true,\"executable\":\"fake\",\"args\":[\"--jsonl\"],\"timeout_ms\":1234}}");
+    runtime.closeFile(file);
+    var config = (try loadFormulaConfig(allocator, path)).?;
+    defer config.deinit();
+    try std.testing.expectEqualStrings("fake", config.executable);
+    try std.testing.expectEqualStrings("--jsonl", config.extra_args[0]);
+    try std.testing.expectEqual(@as(u32, 1234), config.timeout_ms);
+}
+
+fn fakeSpecialistScript(suffix: []const u8, contents: []const u8) ![]u8 {
+    var path_buf: [160]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "pdf-parser-formula-{s}-{x}.sh", .{ suffix, runtime.nanoTimestamp() });
+    runtime.deleteFileCwd(path);
+    const file = try runtime.createFileCwd(path);
+    try runtime.writeAllFile(file, contents);
+    runtime.closeFile(file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", path }));
+    return try std.testing.allocator.dupe(u8, path);
 }
