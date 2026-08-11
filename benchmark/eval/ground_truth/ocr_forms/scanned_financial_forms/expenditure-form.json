@@ -13,6 +13,7 @@
     "token_precision": 0.8,
     "token_f1": 0.85,
     "row_count_exact": 1.0,
+    "row_tuple_exact_recall": 1.0,
     "date_exact_recall": 0.5,
     "vendor_exact_recall": 1.0,
     "amount_exact_recall": 1.0,

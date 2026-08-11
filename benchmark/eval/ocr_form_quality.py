@@ -14,6 +14,10 @@ from typing import Any
 
 
 TOKEN_PATTERN = re.compile(r"[A-Z0-9]+(?:[./-][A-Z0-9]+)*", re.IGNORECASE)
+OCR_DATE_PATTERN = re.compile(
+    r"(?<![A-Z0-9])O?\d{2}[^A-Z0-9]?\d{2}/\d{4}(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output")
     parser.add_argument("--ocr-executable", default="tesseract")
     parser.add_argument("--ocr-rasterizer", default="pdftoppm")
+    parser.add_argument("--expected-ocr-version")
+    parser.add_argument("--expected-rasterizer-version")
     return parser.parse_args()
 
 
@@ -71,8 +77,8 @@ def token_recall(expected: str, actual: str) -> float:
 
 
 def token_metrics(expected: str, actual: str) -> dict[str, float]:
-    expected_tokens = Counter(token.upper() for token in TOKEN_PATTERN.findall(expected))
-    actual_tokens = Counter(token.upper() for token in TOKEN_PATTERN.findall(actual))
+    expected_tokens = Counter(token.upper() for token in semantic_tokens(expected))
+    actual_tokens = Counter(token.upper() for token in semantic_tokens(actual))
     matched = sum(min(count, actual_tokens[token]) for token, count in expected_tokens.items())
     expected_count = sum(expected_tokens.values())
     actual_count = sum(actual_tokens.values())
@@ -80,6 +86,11 @@ def token_metrics(expected: str, actual: str) -> dict[str, float]:
     precision = matched / actual_count if actual_count else 1.0 if expected_count == 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return {"recall": recall, "precision": precision, "f1": f1}
+
+
+def semantic_tokens(value: str) -> list[str]:
+    normalized = OCR_DATE_PATTERN.sub(lambda match: normalize_ocr_date(match.group()), value)
+    return TOKEN_PATTERN.findall(normalized)
 
 
 def exact_recall(expected: list[str], actual: list[str]) -> float:
@@ -105,6 +116,43 @@ def normalize_ocr_date(value: str) -> str:
     if not (1 <= month <= 12 and 1 <= day <= 31):
         return value.strip()
     return f"{digits[:2]}/{digits[2:4]}/{digits[4:]}"
+
+
+def normalized_row_tuples(rows: list[list[str]]) -> list[str]:
+    return [
+        "\x1f".join((normalize_ocr_date(row[0]), row[1].strip(), row[2].strip()))
+        for row in rows
+        if len(row) >= 3
+    ]
+
+
+def expected_row_tuples(rows: list[dict[str, Any]]) -> list[str]:
+    return [
+        "\x1f".join((str(row["date"]), str(row["vendor"]).strip(), str(row["amount"])))
+        for row in rows
+    ]
+
+
+def tool_version(executable: str, version_arg: str) -> dict[str, str]:
+    completed = subprocess.run(
+        [executable, version_arg],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    output = "\n".join(part for part in (completed.stdout.strip(), completed.stderr.strip()) if part)
+    first_line = next((line.strip() for line in output.splitlines() if line.strip()), "")
+    if completed.returncode != 0 or not first_line:
+        detail = first_line or f"exit {completed.returncode} with no version output"
+        raise RuntimeError(f"could not determine version for {executable}: {detail}")
+    return {"executable": executable, "version": first_line}
+
+
+def collect_toolchain(ocr_executable: str, ocr_rasterizer: str) -> dict[str, dict[str, str]]:
+    return {
+        "ocr": tool_version(ocr_executable, "--version"),
+        "rasterizer": tool_version(ocr_rasterizer, "-v"),
+    }
 
 
 def table_rows(artifacts: list[dict[str, Any]]) -> list[list[str]]:
@@ -139,6 +187,8 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
     actual_dates = [normalize_ocr_date(row[0]) for row in actual_rows if len(row) >= 3]
     actual_vendors = [row[1] for row in actual_rows if len(row) >= 3]
     actual_amounts = [row[2] for row in actual_rows if len(row) >= 3]
+    expected_tuples = expected_row_tuples(expected_rows)
+    actual_tuples = normalized_row_tuples(actual_rows)
 
     span_text = "\n".join(
         str(record.get("text", ""))
@@ -152,6 +202,7 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
         "token_precision": tokens["precision"],
         "token_f1": tokens["f1"],
         "row_count_exact": 1.0 if len(actual_rows) == len(expected_rows) else 0.0,
+        "row_tuple_exact_recall": exact_recall(expected_tuples, actual_tuples),
         "date_exact_recall": exact_recall(expected_dates, actual_dates),
         "vendor_exact_recall": exact_recall(expected_vendors, actual_vendors),
         "amount_exact_recall": exact_recall(expected_amounts, actual_amounts),
@@ -194,13 +245,41 @@ def evaluate(artifacts: list[dict[str, Any]], truth: dict[str, Any]) -> dict[str
     }
 
 
+def enforce_toolchain_versions(
+    report: dict[str, Any],
+    toolchain: dict[str, dict[str, str]],
+    expected_ocr_version: str | None,
+    expected_rasterizer_version: str | None,
+) -> None:
+    report["toolchain"] = toolchain
+    expectations = (
+        ("ocr_version", expected_ocr_version, toolchain["ocr"]["version"]),
+        (
+            "rasterizer_version",
+            expected_rasterizer_version,
+            toolchain["rasterizer"]["version"],
+        ),
+    )
+    for metric, expected, actual in expectations:
+        if expected is not None and actual != expected:
+            report["failures"].append({"metric": metric, "actual": actual, "expected": expected})
+    report["status"] = "pass" if not report["failures"] else "fail"
+
+
 def main() -> int:
     args = parse_args()
     truth = json.loads(Path(args.truth).read_text(encoding="utf-8"))
     try:
+        toolchain = collect_toolchain(args.ocr_executable, args.ocr_rasterizer)
         report = evaluate(
             read_artifacts(Path(args.parser), Path(args.pdf), args.ocr_executable, args.ocr_rasterizer),
             truth,
+        )
+        enforce_toolchain_versions(
+            report,
+            toolchain,
+            args.expected_ocr_version,
+            args.expected_rasterizer_version,
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:
         print(f"OCR form quality gate failed to run: {error}", file=sys.stderr)

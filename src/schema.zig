@@ -12,7 +12,7 @@ const specialist_protocol = @import("specialist_protocol.zig");
 const visual_assets = @import("visual_assets.zig");
 
 pub const schema_version = specialist_protocol.schema_version;
-pub const parser_version = "0.1.0-alpha";
+pub const parser_version = "0.3.0";
 
 pub const RenderOptions = struct {
     document_id: []const u8 = "document",

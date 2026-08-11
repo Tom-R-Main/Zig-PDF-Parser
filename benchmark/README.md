@@ -44,9 +44,10 @@ python3 benchmark/eval/ocr_form_quality.py \
 
 `benchmark/eval/corpus` is the small checked-in correctness corpus.
 The raster-only expenditure form has exact row, date, vendor, amount, and total
-truth. `ocr_form_quality.py` applies absolute token-recall and numeric
-exact-match floors and fails when OCR tools are unavailable; CI installs
-Poppler and Tesseract specifically for this lane.
+truth. `ocr_form_quality.py` records OCR/rasterizer versions, applies absolute
+semantic-token, exact row-tuple, and numeric-match floors, and fails when OCR
+tools are unavailable. CI pins its Ubuntu runner and exact Poppler, Tesseract,
+and English trained-data package versions specifically for this canonical lane.
 `benchmark/eval/large` describes ignored local performance fixtures for
 100-page, 1k-page, image-heavy, object-stream-heavy, encrypted, and table-heavy
 PDFs.

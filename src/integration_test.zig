@@ -569,6 +569,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
     try std.testing.expectEqualStrings("0.11.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.3.0", parsed.value.object.get("parser_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
     try expectProvenanceObject(parsed.value);

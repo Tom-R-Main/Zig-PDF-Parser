@@ -121,6 +121,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
                 "token_precision": 1.0,
                 "token_f1": 1.0,
                 "row_count_exact": 1.0,
+                "row_tuple_exact_recall": 1.0,
                 "date_exact_recall": 1.0,
                 "vendor_exact_recall": 1.0,
                 "amount_exact_recall": 1.0,
@@ -135,6 +136,25 @@ class BenchmarkHygieneTests(unittest.TestCase):
         failing = ocr_form_quality.evaluate(artifacts, truth)
         self.assertEqual("fail", failing["status"])
         self.assertIn("numeric_exact_match", [item["metric"] for item in failing["failures"]])
+        self.assertIn("row_tuple_exact_recall", [item["metric"] for item in failing["failures"]])
+
+    def test_ocr_form_quality_row_tuple_gate_catches_column_preserving_swaps(self) -> None:
+        expected = [
+            {"date": "03/01/2026", "vendor": "ALPHA SUPPLY", "amount": "10.00"},
+            {"date": "03/02/2026", "vendor": "BETA MEDIA", "amount": "20.00"},
+        ]
+        actual = [
+            ["03/01/2026", "ALPHA SUPPLY", "20.00"],
+            ["03/02/2026", "BETA MEDIA", "10.00"],
+        ]
+
+        self.assertEqual(
+            0.0,
+            ocr_form_quality.exact_recall(
+                ocr_form_quality.expected_row_tuples(expected),
+                ocr_form_quality.normalized_row_tuples(actual),
+            ),
+        )
 
     def test_ocr_form_quality_token_f1_penalizes_duplicate_output(self) -> None:
         metrics = ocr_form_quality.token_metrics("ALPHA SUPPLY 10.00", "ALPHA SUPPLY 10.00 ALPHA SUPPLY 10.00")
@@ -142,6 +162,32 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual(1.0, metrics["recall"])
         self.assertEqual(0.5, metrics["precision"])
         self.assertAlmostEqual(2.0 / 3.0, metrics["f1"])
+
+    def test_ocr_form_quality_token_metrics_normalize_ocr_date_separators(self) -> None:
+        metrics = ocr_form_quality.token_metrics(
+            "03/21/2026 03/22/2026 03/24/2026",
+            "0321/2026 O03\u00b022/2026 0324/2026",
+        )
+
+        self.assertEqual({"recall": 1.0, "precision": 1.0, "f1": 1.0}, metrics)
+
+    def test_ocr_form_quality_toolchain_version_mismatch_is_a_failure(self) -> None:
+        report = {"failures": [], "status": "pass"}
+        toolchain = {
+            "ocr": {"executable": "tesseract", "version": "tesseract 5.3.4"},
+            "rasterizer": {"executable": "pdftoppm", "version": "pdftoppm version 24.02.0"},
+        }
+
+        ocr_form_quality.enforce_toolchain_versions(
+            report,
+            toolchain,
+            "tesseract 5.5.2",
+            "pdftoppm version 24.02.0",
+        )
+
+        self.assertEqual("fail", report["status"])
+        self.assertEqual(["ocr_version"], [failure["metric"] for failure in report["failures"]])
+        self.assertEqual(toolchain, report["toolchain"])
 
     def test_ocr_form_quality_normalizes_separator_glyph_loss_in_dates(self) -> None:
         self.assertEqual("03/21/2026", ocr_form_quality.normalize_ocr_date("0321/2026"))

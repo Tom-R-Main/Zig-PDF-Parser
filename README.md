@@ -188,9 +188,11 @@ optional pdfplumber lanes. The stress runner reports cell text, role, bbox IoU,
 numeric, continuation, and source-span coverage metrics where the truth sidecar
 provides labels. Larger source PDFs and redistribution-unclear page reductions
 belong under ignored benchmark cache paths, not git.
-The OCR form quality gate reports token precision and F1 as well as recall, so
-duplicate layout/OCR layers cannot pass by repeating all expected tokens. It
-also gates row count and exact date, vendor, amount, and total recovery.
+The OCR form quality gate records the exact OCR and rasterizer versions and
+reports token precision and F1 as well as recall, so duplicate layout/OCR
+layers cannot pass by repeating all expected tokens. Date separator glyph loss
+is normalized before semantic token scoring. The gate also requires exact
+date/vendor/amount row tuples, row count, individual columns, and total recovery.
 
 `pdf-parser benchmark` is the product-facing corpus runner. It emits a full
 scorecard JSON plus optional record-oriented JSONL with `benchmark_run`,
