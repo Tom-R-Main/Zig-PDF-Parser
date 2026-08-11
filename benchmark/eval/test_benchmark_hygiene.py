@@ -35,6 +35,9 @@ font_compare = load_module("font_compare", EVAL_DIR / "font_compare.py")
 render_oracle = load_module("render_oracle", EVAL_DIR / "render_oracle.py")
 table_compare = load_module("table_compare", EVAL_DIR / "table_compare.py")
 ocr_form_quality = load_module("ocr_form_quality", EVAL_DIR / "ocr_form_quality.py")
+ocr_hard_document_quality = load_module(
+    "ocr_hard_document_quality", EVAL_DIR / "ocr_hard_document_quality.py"
+)
 encrypted_twin_quality = load_module("encrypted_twin_quality", EVAL_DIR / "encrypted_twin_quality.py")
 pdfium_rasterizer = load_module("pdfium_rasterizer", EVAL_DIR / "pdfium_rasterizer.py")
 
@@ -193,6 +196,79 @@ class BenchmarkHygieneTests(unittest.TestCase):
         self.assertEqual("03/21/2026", ocr_form_quality.normalize_ocr_date("0321/2026"))
         self.assertEqual("03/22/2026", ocr_form_quality.normalize_ocr_date("03°22/2026"))
         self.assertEqual("not-a-date", ocr_form_quality.normalize_ocr_date("not-a-date"))
+
+    def test_ocr_hard_document_quality_requires_real_filter_and_semantic_phrases(self) -> None:
+        artifacts = [
+            {
+                "record_type": "document_manifest",
+                "source_id": "real-scan",
+                "page_count": 1,
+                "input_sha256": hashlib.sha256(b"/JBIG2Decode").hexdigest(),
+                "has_specialist_failures": False,
+                "route_counts": {"native_pages": 0},
+            },
+            {
+                "record_type": "specialist_attempt",
+                "attempt_id": "attempt-0",
+                "attempt_status": "completed",
+                "selected": True,
+            },
+            {
+                "record_type": "span",
+                "text": "Harvard University and the United States Forest Service",
+                "provenance": {"source_kind": "fresh_ocr"},
+            },
+        ]
+        truth = {
+            "doc_id": "real-scan",
+            "fixture_sha256": hashlib.sha256(b"/JBIG2Decode").hexdigest(),
+            "required_pdf_filters": ["/JBIG2Decode"],
+            "text": "Harvard University and the United States Forest Service",
+            "required_phrases": ["Harvard University", "United States Forest Service"],
+            "expected_page_count": 1,
+            "floors": {
+                "fixture_sha256_exact": 1.0,
+                "manifest_input_sha256_exact": 1.0,
+                "source_id_exact": 1.0,
+                "required_pdf_filter_recall": 1.0,
+                "page_count_exact": 1.0,
+                "native_page_count_exact": 1.0,
+                "ocr_attempt_completed": 1.0,
+                "fresh_ocr_span_fraction": 1.0,
+                "required_phrase_recall": 1.0,
+                "token_precision": 1.0,
+                "token_recall": 1.0,
+                "token_f1": 1.0,
+            },
+        }
+
+        passing = ocr_hard_document_quality.evaluate(artifacts, truth, b"/JBIG2Decode")
+        self.assertEqual("pass", passing["status"])
+        artifacts[2]["text"] = "Harvard University"
+        failing = ocr_hard_document_quality.evaluate(artifacts, truth, b"not the filter")
+        self.assertEqual("fail", failing["status"])
+        self.assertIn(
+            "required_pdf_filter_recall",
+            [failure["metric"] for failure in failing["failures"]],
+        )
+        self.assertIn(
+            "required_phrase_recall",
+            [failure["metric"] for failure in failing["failures"]],
+        )
+
+    def test_ocr_hard_document_phrase_matching_ignores_punctuation_only(self) -> None:
+        self.assertTrue(
+            ocr_hard_document_quality.contains_token_sequence(
+                "Graves’s “Forest Mensuration.”",
+                "Forest Mensuration",
+            )
+        )
+        self.assertFalse(
+            ocr_hard_document_quality.contains_token_sequence(
+                "Forest measurement",
+                "Forest Mensuration",
+            )
+        )
 
     def test_compare_ensure_releasefast_rebuilds_even_when_binary_exists(self) -> None:
         calls: list[list[str]] = []

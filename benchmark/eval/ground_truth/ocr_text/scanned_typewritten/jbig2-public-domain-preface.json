@@ -1,0 +1,30 @@
+{
+  "doc_id": "jbig2-public-domain-preface",
+  "fixture_sha256": "5c90a9b52139d85133e40b36626837c40dcf2135da26651c2ef49214602f9013",
+  "required_pdf_filters": [
+    "/JBIG2Decode"
+  ],
+  "text": "PREFACE\n\nThe publication of this work was suggested to the author some years ago by his own experience as a woodsman. The opportunity to complete it in its present form came through his connection with Harvard University.\n\nPart I deals for the most part with a well worn subject. In putting the material together the author has drawn from the text-books on surveying of Johnson and of Breed and Hosmer, but especially from that admirable work for field men, Hodgman's Land Surveying. The subject matter of Part III has for the most part been treated—and far more elaborately—in Graves's Forest Mensuration. For Parts II and IV much less printed material was available, and the sections on the practice of map making and of timber estimating are derived in the main from personal experience and observation and from correspondence. To all who have assisted the author cordial thanks are returned.\n\nSpecial indebtedness is acknowledged to the United States Forest Service, its publications and individual members.\n\nIf, as is hoped, this work proves useful to woodsmen, they will do the author a great service by pointing out defects and possible improvements, so that later editions, if they are called for, may be enlarged and rendered more serviceable.\n\nA. C.",
+  "required_phrases": [
+    "Harvard University",
+    "Land Surveying",
+    "Forest Mensuration",
+    "United States Forest Service",
+    "sections on the practice of map making"
+  ],
+  "expected_page_count": 1,
+  "floors": {
+    "fixture_sha256_exact": 1.0,
+    "manifest_input_sha256_exact": 1.0,
+    "source_id_exact": 1.0,
+    "required_pdf_filter_recall": 1.0,
+    "page_count_exact": 1.0,
+    "native_page_count_exact": 1.0,
+    "ocr_attempt_completed": 1.0,
+    "fresh_ocr_span_fraction": 1.0,
+    "required_phrase_recall": 1.0,
+    "token_precision": 0.9,
+    "token_recall": 0.9,
+    "token_f1": 0.9
+  }
+}

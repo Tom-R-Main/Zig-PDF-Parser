@@ -124,10 +124,19 @@ jobs:
             --expected-rasterizer-version "$OCR_POPPLER_VERSION" \
             --output /tmp/ocr-form-quality.json
 
+      - name: Enforce real JBIG2 scan quality
+        run: |
+          python3 benchmark/eval/ocr_hard_document_quality.py \
+            --expected-ocr-version "$OCR_TESSERACT_VERSION" \
+            --expected-rasterizer-version "$OCR_POPPLER_VERSION" \
+            --output /tmp/ocr-hard-document-quality.json
+
       - name: Upload OCR quality report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ocr-form-quality
-          path: /tmp/ocr-form-quality.json
+          name: ocr-quality
+          path: |
+            /tmp/ocr-form-quality.json
+            /tmp/ocr-hard-document-quality.json
           if-no-files-found: ignore

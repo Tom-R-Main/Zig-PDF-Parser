@@ -44,6 +44,7 @@ def read_artifacts(
     pdf_path: Path,
     ocr_executable: str = "tesseract",
     ocr_rasterizer: str = "pdftoppm",
+    source_id: str = "ocr-form-quality",
 ) -> list[dict[str, Any]]:
     completed = subprocess.run(
         [
@@ -52,7 +53,7 @@ def read_artifacts(
             "--input",
             str(pdf_path),
             "--source-id",
-            "ocr-form-quality",
+            source_id,
             "--format",
             "artifact-jsonl",
             "--ocr-executable",

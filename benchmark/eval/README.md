@@ -32,8 +32,9 @@ zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
 
 That command emits one JSONL record for each current fixture category:
 clean born-digital text, academic two-column layout, scientific math notation,
-scanned/typewritten image-only input, financial tables, forms, weird-font
-fixtures, visual truth fixtures, and adversarial page-tree recovery.
+scanned/typewritten image-only input, a real public-domain JBIG2 scan, financial
+tables, forms, weird-font fixtures, visual truth fixtures, and adversarial
+page-tree recovery.
 
 `benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
 checked-in corpus. Each row records the fixture id, source note, redistribution
@@ -41,11 +42,36 @@ status, PDF SHA256, and expected OCR/table/formula route counts. Manifest eval
 loads this sidecar automatically when it sits next to `manifest.tsv` and fails
 if the adaptive counters differ from those expectations. Large or raw third-party
 corpora should live under `benchmark/eval/raw_cache/`, which is ignored by git;
-checked-in PDFs should stay small, redistributable reductions.
+checked-in PDFs should stay small and redistributable. The
+`jbig2-public-domain-preface` fixture is a deterministic page-10 derivative of
+Austin Cary's public-domain 1909 manual: it preserves the original 600-DPI
+JBIG2 image stream in a roughly 40 KB one-page PDF. Reproduce it from the
+ignored large-corpus source with:
+
+```sh
+qpdf --deterministic-id --object-streams=disable \
+  benchmark/eval/raw_cache/large/image-heavy-scan.pdf \
+  --pages . 10 -- \
+  benchmark/eval/corpus/scanned_typewritten/jbig2-public-domain-preface.pdf
+```
+
+The large-corpus source inventory pins the 295-page input SHA256 as well as the
+one-page derivative SHA256, so the recipe cannot silently accept replacement
+source bytes.
+
+The blocking real-scan gate verifies the fixture hash and JBIG2 filter before
+checking OCR provenance, a completed selected attempt, absolute token floors,
+and exact semantic phrase recall:
+
+```sh
+python3 benchmark/eval/ocr_hard_document_quality.py \
+  --output /tmp/pdf-parser-ocr-hard-document-quality.json
+```
 
 The ignored large corpus explicitly inventories a real technical reference with
-CID Identity/no-ToUnicode cases and a public-domain scan containing JBIG2 and
-JPX images. These exercise honest fallback and routed OCR behavior; real
+CID Identity/no-ToUnicode cases and the full public-domain scan containing
+JBIG2 and JPX images. These exercise honest fallback and routed OCR behavior;
+one JBIG2 page is now promoted into the checked-in blocking corpus, while real
 predefined-collection CJK and Type3 PDFs remain acquisition targets rather than
 being represented by synthetic fixtures alone.
 
