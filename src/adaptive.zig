@@ -10,6 +10,7 @@ const complexity = @import("complexity.zig");
 const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
 const runtime = @import("runtime.zig");
+const reading_order_graph = @import("reading_order_graph.zig");
 const schema = @import("schema.zig");
 const specialist_protocol = @import("specialist_protocol.zig");
 const specialists = @import("specialists.zig");
@@ -42,7 +43,23 @@ pub const ExtractOptions = struct {
     /// Keeps region request identities document-global when streaming one page
     /// at a time. Batch callers leave this at zero.
     region_index_base: u32 = 0,
+    /// Internal experiment control. Public JSON/JSONL schemas never expose the
+    /// graph or this switch.
+    reading_order_mode: ReadingOrderMode = .legacy,
+    /// Enables the tagged-PDF MCID ablation without requiring another binary.
+    reading_order_include_structure: bool = true,
+    /// Structure order begins as a hard constraint; the evaluator can rerun it
+    /// as high-priority soft evidence when tagged holdouts falsify that policy.
+    reading_order_structure_hard: bool = true,
 };
+
+pub const ReadingOrderMode = enum {
+    legacy,
+    diagnostic,
+    graph,
+};
+
+pub const ReadingOrderRelation = reading_order_graph.Relation;
 
 pub const OutputFormat = enum {
     text,
@@ -277,6 +294,33 @@ pub const FormulaArtifact = struct {
     specialist_id: []u8,
 };
 
+pub const ReadingOrderApplication = enum {
+    diagnostic_only,
+    applied,
+    invalid_graph,
+    native_quality_failed,
+    ocr_selected,
+    unsupported_writing_mode,
+    span_mapping_incomplete,
+    formula_specialist_enabled,
+};
+
+pub const PageReadingOrder = struct {
+    page_index: u32,
+    graph: reading_order_graph.PageReadingOrderGraph,
+    node_texts: [][]u8,
+    application: ReadingOrderApplication,
+    structure_enabled: bool,
+    eligible: bool,
+
+    pub fn deinit(self: *PageReadingOrder) void {
+        for (self.node_texts) |text| self.graph.allocator.free(text);
+        self.graph.allocator.free(self.node_texts);
+        self.graph.deinit();
+        self.* = undefined;
+    }
+};
+
 pub const Result = struct {
     allocator: std.mem.Allocator,
     reconciled: ReconciledDocument,
@@ -290,6 +334,7 @@ pub const Result = struct {
     formula_artifacts: []FormulaArtifact,
     form_fields: []FormField,
     tables: []layout.TableGrid,
+    reading_order_pages: []PageReadingOrder,
 
     pub fn deinit(self: *Result) void {
         self.reconciled.deinit();
@@ -303,6 +348,7 @@ pub const Result = struct {
         freeFormulaArtifacts(self.allocator, self.formula_artifacts);
         freeFormFields(self.allocator, self.form_fields);
         freeOwnedTables(self.allocator, self.tables);
+        freeReadingOrderPages(self.allocator, self.reading_order_pages);
     }
 
     pub fn render(self: *const Result, allocator: std.mem.Allocator, format: OutputFormat) ![]u8 {
@@ -403,6 +449,12 @@ pub fn extractDocument(
     defer {
         freeOwnedTableItems(allocator, tables.items);
         tables.deinit(allocator);
+    }
+
+    var reading_order_pages: std.ArrayList(PageReadingOrder) = .empty;
+    defer {
+        freeReadingOrderPageItems(reading_order_pages.items);
+        reading_order_pages.deinit(allocator);
     }
 
     const form_fields = try collectFormFields(allocator, document);
@@ -645,6 +697,94 @@ pub fn extractDocument(
         defer page_layout.deinit();
         if (page_ocr_spans == null) reorderSpansToLayoutOrder(spans, page_layout.spans);
 
+        var applied_projected_order: ?[]const u32 = null;
+        if (options.reading_order_mode != .legacy) {
+            var structure_mcids: std.ArrayList(i32) = .empty;
+            defer structure_mcids.deinit(allocator);
+            if (options.reading_order_include_structure) {
+                if (document.pageMarkedContentOrder(page_idx)) |marked_order| {
+                    for (marked_order) |marked| {
+                        if (marked.stream_ref != null) continue;
+                        try structure_mcids.append(allocator, marked.mcid);
+                    }
+                }
+            }
+
+            var page_graph = try reading_order_graph.build(allocator, page_index, &page_layout, .{
+                .structure_mcid_order = structure_mcids.items,
+                .include_structure = options.reading_order_include_structure,
+                .structure_is_hard = options.reading_order_structure_hard,
+            });
+            var graph_transferred = false;
+            defer if (!graph_transferred) page_graph.deinit();
+            const node_texts = try copyGraphNodeTexts(allocator, &page_layout, &page_graph);
+            var node_texts_transferred = false;
+            defer if (!node_texts_transferred) freeOwnedStrings(allocator, node_texts);
+
+            const base_eligible = page_graph.validity and
+                native_result.quality.quality_pass and
+                page_ocr_spans == null and
+                options.formula_specialist == null and
+                horizontalLeftToRight(readable_spans);
+            var mapping_complete = false;
+            if (base_eligible) {
+                const readable_mapping_complete = try reorderSpansByGraph(
+                    allocator,
+                    readable_spans,
+                    &page_layout,
+                    &page_graph,
+                    false,
+                );
+                const native_mapping_complete = try reorderSpansByGraph(
+                    allocator,
+                    spans,
+                    &page_layout,
+                    &page_graph,
+                    false,
+                );
+                mapping_complete = readable_mapping_complete and native_mapping_complete;
+                if (mapping_complete and options.reading_order_mode == .graph) {
+                    if (!try reorderSpansByGraph(allocator, readable_spans, &page_layout, &page_graph, true)) {
+                        return error.InvalidReadingOrderProjection;
+                    }
+                    if (!try reorderSpansByGraph(allocator, spans, &page_layout, &page_graph, true)) {
+                        return error.InvalidReadingOrderProjection;
+                    }
+                }
+            }
+            const graph_eligible = base_eligible and mapping_complete;
+
+            var application: ReadingOrderApplication = .diagnostic_only;
+            if (options.reading_order_mode == .graph) {
+                application = if (!page_graph.validity)
+                    .invalid_graph
+                else if (!native_result.quality.quality_pass)
+                    .native_quality_failed
+                else if (page_ocr_spans != null)
+                    .ocr_selected
+                else if (options.formula_specialist != null)
+                    .formula_specialist_enabled
+                else if (!horizontalLeftToRight(readable_spans))
+                    .unsupported_writing_mode
+                else if (mapping_complete)
+                    .applied
+                else
+                    .span_mapping_incomplete;
+                if (application == .applied) applied_projected_order = page_graph.projected_block_order;
+            }
+
+            try reading_order_pages.append(allocator, .{
+                .page_index = page_index,
+                .graph = page_graph,
+                .node_texts = node_texts,
+                .application = application,
+                .structure_enabled = options.reading_order_include_structure,
+                .eligible = graph_eligible,
+            });
+            graph_transferred = true;
+            node_texts_transferred = true;
+        }
+
         for (page_layout.tables) |table| {
             try tables.ensureUnusedCapacity(allocator, 1);
             tables.appendAssumeCapacity(try copyTableGrid(allocator, table));
@@ -653,7 +793,7 @@ pub fn extractDocument(
         var filtered_ocr_layer_added = false;
         if (page_layout.tables.len > 0 and page_view_quality_pass) {
             try layout_pages.ensureUnusedCapacity(allocator, 1);
-            const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout);
+            const layout_spans = try buildLayoutLayerSpans(allocator, &page_layout, applied_projected_order);
             if (layout_spans.len > 0) {
                 layout_pages.appendAssumeCapacity(layout_spans);
                 try layers.append(allocator, .{
@@ -815,6 +955,8 @@ pub fn extractDocument(
     linkLogicalTables(tables.items);
     const owned_tables = try tables.toOwnedSlice(allocator);
     errdefer freeOwnedTables(allocator, owned_tables);
+    const owned_reading_order_pages = try reading_order_pages.toOwnedSlice(allocator);
+    errdefer freeReadingOrderPages(allocator, owned_reading_order_pages);
     const empty_formula_attempts = try allocator.alloc(FormulaAttempt, 0);
     errdefer allocator.free(empty_formula_attempts);
     const empty_formula_artifacts = try allocator.alloc(FormulaArtifact, 0);
@@ -833,6 +975,7 @@ pub fn extractDocument(
         .formula_artifacts = empty_formula_artifacts,
         .form_fields = form_fields,
         .tables = owned_tables,
+        .reading_order_pages = owned_reading_order_pages,
     };
     if (options.formula_specialist) |config| {
         try executeFormulaSpecialists(allocator, document, &result, config, options.specialist_context, options.reconcile_options);
@@ -857,6 +1000,15 @@ fn freeFormulaAttemptItems(allocator: std.mem.Allocator, attempts: []FormulaAtte
 fn freeFormulaArtifacts(allocator: std.mem.Allocator, artifacts: []FormulaArtifact) void {
     freeFormulaArtifactItems(allocator, artifacts);
     allocator.free(artifacts);
+}
+
+fn freeReadingOrderPages(allocator: std.mem.Allocator, pages: []PageReadingOrder) void {
+    freeReadingOrderPageItems(pages);
+    allocator.free(pages);
+}
+
+fn freeReadingOrderPageItems(pages: []PageReadingOrder) void {
+    for (pages) |*page| page.deinit();
 }
 
 fn freeFormulaArtifactItems(allocator: std.mem.Allocator, artifacts: []FormulaArtifact) void {
@@ -1318,53 +1470,225 @@ fn reorderSpansToLayoutOrder(spans: []layout.TextSpan, ordered: []const layout.T
     @memcpy(spans, ordered);
 }
 
-fn buildLayoutLayerSpans(allocator: std.mem.Allocator, page_layout: *const layout.LayoutResult) ![]layout.TextSpan {
+const RankedReadableSpan = struct {
+    span: layout.TextSpan,
+    block_rank: usize,
+    original_index: usize,
+};
+
+fn copyGraphNodeTexts(
+    allocator: std.mem.Allocator,
+    page_layout: *const layout.LayoutResult,
+    graph: *const reading_order_graph.PageReadingOrderGraph,
+) ![][]u8 {
+    const texts = try allocator.alloc([]u8, graph.nodes.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (texts[0..initialized]) |text| allocator.free(text);
+        allocator.free(texts);
+    }
+
+    for (graph.nodes, 0..) |node, node_index| {
+        if (node.original_block_index >= page_layout.blocks.len) return error.InvalidReadingOrderProjection;
+        const block = page_layout.blocks[node.original_block_index];
+        var text: std.ArrayList(u8) = .empty;
+        errdefer text.deinit(allocator);
+        for (block.lines, 0..) |line, line_index| {
+            const owned_line = try lineTextOwned(allocator, &line);
+            defer allocator.free(owned_line);
+            if (owned_line.len == 0) continue;
+            if (line_index > 0 and text.items.len > 0) try text.append(allocator, ' ');
+            try text.appendSlice(allocator, owned_line);
+        }
+        texts[node_index] = try text.toOwnedSlice(allocator);
+        initialized += 1;
+    }
+    return texts;
+}
+
+fn freeOwnedStrings(allocator: std.mem.Allocator, strings: [][]u8) void {
+    for (strings) |string| allocator.free(string);
+    allocator.free(strings);
+}
+
+fn horizontalLeftToRight(spans: []const layout.TextSpan) bool {
+    for (spans) |span| {
+        if (span.writing_mode != 0) return false;
+        var offset: usize = 0;
+        while (offset < span.text.len) {
+            const sequence_len = std.unicode.utf8ByteSequenceLength(span.text[offset]) catch return false;
+            const length: usize = @intCast(sequence_len);
+            if (offset + length > span.text.len) return false;
+            const codepoint = std.unicode.utf8Decode(span.text[offset .. offset + length]) catch return false;
+            if ((codepoint >= 0x0590 and codepoint <= 0x08ff) or
+                (codepoint >= 0xfb1d and codepoint <= 0xfdff) or
+                (codepoint >= 0xfe70 and codepoint <= 0xfeff))
+            {
+                return false;
+            }
+            offset += length;
+        }
+    }
+    return true;
+}
+
+fn reorderSpansByGraph(
+    allocator: std.mem.Allocator,
+    readable_spans: []layout.TextSpan,
+    page_layout: *const layout.LayoutResult,
+    graph: *const reading_order_graph.PageReadingOrderGraph,
+    apply_projection: bool,
+) !bool {
+    if (readable_spans.len == 0) return graph.nodes.len == 0;
+    if (graph.projected_block_order.len != graph.nodes.len) return false;
+
+    const no_rank = std.math.maxInt(usize);
+    const block_ranks = try allocator.alloc(usize, page_layout.blocks.len);
+    defer allocator.free(block_ranks);
+    @memset(block_ranks, no_rank);
+    for (graph.projected_block_order, 0..) |block_index, rank| {
+        if (block_index >= block_ranks.len or block_ranks[block_index] != no_rank) return false;
+        block_ranks[block_index] = rank;
+    }
+
+    const mapped_blocks = try allocator.alloc(usize, readable_spans.len);
+    defer allocator.free(mapped_blocks);
+    for (readable_spans, 0..) |span, span_index| {
+        const span_area = overlapArea(span.bbox, span.bbox);
+        if (span_area <= 0) return false;
+        const center_x = (span.bbox.x0 + span.bbox.x1) / 2.0;
+        const center_y = (span.bbox.y0 + span.bbox.y1) / 2.0;
+        var best_block: ?usize = null;
+        var best_coverage: f64 = 0;
+        var ambiguous = false;
+
+        for (page_layout.blocks, 0..) |block, block_index| {
+            const bounds = block.bounds.bbox;
+            const epsilon = 0.5;
+            if (center_x < bounds.x0 - epsilon or center_x > bounds.x1 + epsilon or
+                center_y < bounds.y0 - epsilon or center_y > bounds.y1 + epsilon)
+            {
+                continue;
+            }
+
+            var covered_area: f64 = 0;
+            for (block.lines) |line| {
+                for (line.words) |word| {
+                    for (word.spans) |leaf| {
+                        covered_area += overlapArea(span.bbox, leaf.bbox);
+                    }
+                }
+            }
+            const coverage = @min(1.0, covered_area / span_area);
+            if (coverage < 0.90) continue;
+            if (coverage > best_coverage + 0.000001) {
+                best_block = block_index;
+                best_coverage = coverage;
+                ambiguous = false;
+            } else if (@abs(coverage - best_coverage) <= 0.000001) {
+                ambiguous = true;
+            }
+        }
+        if (ambiguous or best_block == null) return false;
+        mapped_blocks[span_index] = best_block.?;
+    }
+
+    var live_positions: std.ArrayList(usize) = .empty;
+    defer live_positions.deinit(allocator);
+    var ranked: std.ArrayList(RankedReadableSpan) = .empty;
+    defer ranked.deinit(allocator);
+    for (readable_spans, mapped_blocks, 0..) |span, block_index, original_index| {
+        if (page_layout.blocks[block_index].removed) continue;
+        const block_rank = block_ranks[block_index];
+        if (block_rank == no_rank) return false;
+        try live_positions.append(allocator, original_index);
+        try ranked.append(allocator, .{
+            .span = span,
+            .block_rank = block_rank,
+            .original_index = original_index,
+        });
+    }
+
+    std.mem.sort(RankedReadableSpan, ranked.items, {}, struct {
+        fn lessThan(_: void, left: RankedReadableSpan, right: RankedReadableSpan) bool {
+            if (left.block_rank != right.block_rank) return left.block_rank < right.block_rank;
+            return left.original_index < right.original_index;
+        }
+    }.lessThan);
+    if (apply_projection) {
+        for (live_positions.items, ranked.items) |position, item| readable_spans[position] = item.span;
+    }
+    return true;
+}
+
+fn buildLayoutLayerSpans(
+    allocator: std.mem.Allocator,
+    page_layout: *const layout.LayoutResult,
+    projected_block_order: ?[]const u32,
+) ![]layout.TextSpan {
     var spans: std.ArrayList(layout.TextSpan) = .empty;
     errdefer {
         for (spans.items) |span| allocator.free(@constCast(span.text));
         spans.deinit(allocator);
     }
 
-    for (page_layout.blocks, 0..) |block, block_index| {
-        if (block.removed or block.lines.len == 0) continue;
-
-        if (page_layout.tableForBlock(block_index)) |table| {
-            if (tableHasUsefulTextRows(table)) {
-                try appendBlockLinesOutsideTable(allocator, &spans, block, table);
-                try appendTableRowSpans(allocator, &spans, table);
-                continue;
-            }
+    if (projected_block_order) |order| {
+        for (order) |block_index| {
+            if (block_index >= page_layout.blocks.len) return error.InvalidReadingOrderProjection;
+            try appendLayoutBlockSpans(allocator, &spans, page_layout, block_index);
         }
-        if (page_layout.blockCoveredByTable(block_index)) {
-            var skip_covered = false;
-            if (tableCoveringBlock(page_layout.tables, block_index)) |table| {
-                skip_covered = tableHasUsefulTextRows(table);
-            }
-            if (skip_covered) continue;
-        }
-
-        for (block.lines) |line| {
-            const text = try lineTextOwned(allocator, &line);
-            errdefer allocator.free(text);
-            if (text.len == 0) {
-                allocator.free(text);
-                continue;
-            }
-            try spans.append(allocator, layout.TextSpan.init(.{
-                .page_index = line.bounds.page_index,
-                .bbox = line.bounds.bbox,
-                .text = text,
-                .source = line.bounds.source,
-                .confidence = block.confidence,
-                .font = stableFont(line.bounds.font),
-                .block_id = line.bounds.block_id,
-                .line_id = line.bounds.line_id,
-                .mcid = line.bounds.mcid,
-            }));
+    } else {
+        for (page_layout.blocks, 0..) |_, block_index| {
+            try appendLayoutBlockSpans(allocator, &spans, page_layout, block_index);
         }
     }
 
     return spans.toOwnedSlice(allocator);
+}
+
+fn appendLayoutBlockSpans(
+    allocator: std.mem.Allocator,
+    spans: *std.ArrayList(layout.TextSpan),
+    page_layout: *const layout.LayoutResult,
+    block_index: usize,
+) !void {
+    const block = page_layout.blocks[block_index];
+    if (block.removed or block.lines.len == 0) return;
+
+    if (page_layout.tableForBlock(block_index)) |table| {
+        if (tableHasUsefulTextRows(table)) {
+            try appendBlockLinesOutsideTable(allocator, spans, block, table);
+            try appendTableRowSpans(allocator, spans, table);
+            return;
+        }
+    }
+    if (page_layout.blockCoveredByTable(block_index)) {
+        var skip_covered = false;
+        if (tableCoveringBlock(page_layout.tables, block_index)) |table| {
+            skip_covered = tableHasUsefulTextRows(table);
+        }
+        if (skip_covered) return;
+    }
+
+    for (block.lines) |line| {
+        const text = try lineTextOwned(allocator, &line);
+        errdefer allocator.free(text);
+        if (text.len == 0) {
+            allocator.free(text);
+            continue;
+        }
+        try spans.append(allocator, layout.TextSpan.init(.{
+            .page_index = line.bounds.page_index,
+            .bbox = line.bounds.bbox,
+            .text = text,
+            .source = line.bounds.source,
+            .confidence = block.confidence,
+            .font = stableFont(line.bounds.font),
+            .block_id = line.bounds.block_id,
+            .line_id = line.bounds.line_id,
+            .mcid = line.bounds.mcid,
+        }));
+    }
 }
 
 fn tableCoveringBlock(tables: []const layout.TableGrid, block_index: usize) ?*const layout.TableGrid {
@@ -2153,6 +2477,43 @@ test "route traces emit OCR stub when route needs OCR" {
     try std.testing.expectEqual(TraceStage.ocr_route_stub, traces.items[0].stage);
 }
 
+test "graph span projection preserves removed furniture slots" {
+    const header = testSpan("Header", 10, 110, 50, 120);
+    const left = testSpan("Left", 10, 80, 40, 90);
+    const right = testSpan("Right", 70, 80, 105, 90);
+    const header_words = [_]layout.TextWord{.{ .bounds = header, .spans = &.{header} }};
+    const left_words = [_]layout.TextWord{.{ .bounds = left, .spans = &.{left} }};
+    const right_words = [_]layout.TextWord{.{ .bounds = right, .spans = &.{right} }};
+    const header_lines = [_]layout.TextLine{.{ .bounds = header, .words = &header_words, .baseline_y = 110, .role = .header }};
+    const left_lines = [_]layout.TextLine{.{ .bounds = left, .words = &left_words, .baseline_y = 80 }};
+    const right_lines = [_]layout.TextLine{.{ .bounds = right, .words = &right_words, .baseline_y = 80 }};
+    const blocks = [_]layout.LayoutBlock{
+        .{ .bounds = header, .lines = &header_lines, .column_index = 0, .kind = .header, .removed = true },
+        .{ .bounds = left, .lines = &left_lines, .column_index = 0, .kind = .paragraph },
+        .{ .bounds = right, .lines = &right_lines, .column_index = 1, .kind = .paragraph },
+    };
+    const page_layout: layout.LayoutResult = .{
+        .spans = &.{},
+        .lines = &.{},
+        .columns = &.{},
+        .paragraphs = &.{},
+        .blocks = &blocks,
+        .tables = &.{},
+        .candidates = &.{},
+        .reading_order = &.{},
+        .body_font_size = 10,
+        .allocator = std.testing.allocator,
+    };
+    var graph = try reading_order_graph.build(std.testing.allocator, 0, &page_layout, .{});
+    defer graph.deinit();
+
+    var spans = [_]layout.TextSpan{ header, right, left };
+    try std.testing.expect(try reorderSpansByGraph(std.testing.allocator, &spans, &page_layout, &graph, true));
+    try std.testing.expectEqualStrings("Header", spans[0].text);
+    try std.testing.expectEqualStrings("Left", spans[1].text);
+    try std.testing.expectEqualStrings("Right", spans[2].text);
+}
+
 test "debug svg marks low-confidence review regions" {
     var spans = [_]reconcile.ReconciledSpan{};
     var blocks = [_]reconcile.ReconciledBlock{};
@@ -2191,6 +2552,7 @@ test "debug svg marks low-confidence review regions" {
         .formula_artifacts = &.{},
         .form_fields = &.{},
         .tables = &.{},
+        .reading_order_pages = &.{},
     };
 
     const svg = try renderDebugSvg(std.testing.allocator, &result);

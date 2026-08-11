@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "body_1",
+      "page_index": 0,
+      "text_anchor": "B Main narrative opens"
+    },
+    {
+      "id": "body_2",
+      "page_index": 0,
+      "text_anchor": "B Main narrative continues"
+    },
+    {
+      "id": "body_3",
+      "page_index": 0,
+      "text_anchor": "B Main narrative closes"
+    },
+    {
+      "id": "sidebar",
+      "page_index": 0,
+      "text_anchor": "B Sidebar context"
+    }
+  ],
+  "required_precedence": [
+    [
+      "body_1",
+      "body_2"
+    ],
+    [
+      "body_2",
+      "body_3"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "body_2",
+      "body_1"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "sidebar",
+      "body_2"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": [
+    [
+      "body_1",
+      "sidebar",
+      "body_2",
+      "body_3"
+    ],
+    [
+      "body_1",
+      "body_2",
+      "sidebar",
+      "body_3"
+    ]
+  ]
+}

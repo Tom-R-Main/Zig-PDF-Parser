@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "B Quarterly summary introduction"
+    },
+    {
+      "id": "header",
+      "page_index": 0,
+      "text_anchor": "B Year Revenue Margin"
+    },
+    {
+      "id": "row_1",
+      "page_index": 0,
+      "text_anchor": "B 2025 100 20"
+    },
+    {
+      "id": "row_2",
+      "page_index": 0,
+      "text_anchor": "B 2026 125 24"
+    },
+    {
+      "id": "conclusion",
+      "page_index": 0,
+      "text_anchor": "B Quarterly summary conclusion"
+    }
+  ],
+  "required_precedence": [
+    [
+      "intro",
+      "header"
+    ],
+    [
+      "header",
+      "row_1"
+    ],
+    [
+      "row_1",
+      "row_2"
+    ],
+    [
+      "row_2",
+      "conclusion"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "header",
+      "intro"
+    ]
+  ],
+  "ambiguous_pairs": [],
+  "relations": [],
+  "valid_orders": []
+}

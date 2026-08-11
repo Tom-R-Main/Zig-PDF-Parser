@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "body_1",
+      "page_index": 0,
+      "text_anchor": "B Analysis before figure"
+    },
+    {
+      "id": "figure",
+      "page_index": 0,
+      "text_anchor": "B Figure region anchor"
+    },
+    {
+      "id": "caption",
+      "page_index": 0,
+      "text_anchor": "Figure B. Observed trend caption"
+    },
+    {
+      "id": "body_2",
+      "page_index": 0,
+      "text_anchor": "B Analysis after figure"
+    }
+  ],
+  "required_precedence": [
+    [
+      "body_1",
+      "figure"
+    ],
+    [
+      "figure",
+      "caption"
+    ],
+    [
+      "caption",
+      "body_2"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "figure",
+      "body_1"
+    ]
+  ],
+  "ambiguous_pairs": [],
+  "relations": [
+    {
+      "type": "caption_of",
+      "from": "caption",
+      "to": "figure"
+    }
+  ],
+  "valid_orders": []
+}

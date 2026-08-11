@@ -92,6 +92,22 @@ pub const FormMetrics = struct {
     field_accuracy: ?f64 = null,
 };
 
+pub const ReadingGraphMetrics = struct {
+    precedence_precision: ?f64 = null,
+    precedence_recall: ?f64 = null,
+    precedence_f1: ?f64 = null,
+    legacy_precedence_f1: ?f64 = null,
+    required_recall: ?f64 = null,
+    forbidden_path_rate: ?f64 = null,
+    caption_f1: ?f64 = null,
+    footnote_f1: ?f64 = null,
+    cycle_rate: ?f64 = null,
+    ambiguity_preservation: ?f64 = null,
+    valid_projection: ?f64 = null,
+    eligible_pages: u32 = 0,
+    fallback_pages: u32 = 0,
+};
+
 pub const LatencyMetrics = struct {
     total_ms: ?f64 = null,
     median_ms_per_page: ?f64 = null,
@@ -118,6 +134,7 @@ pub const DocumentResult = struct {
     pages: u32 = 0,
     text: TextMetrics = .{},
     reading_order_score: ?f64 = null,
+    reading_graph: ReadingGraphMetrics = .{},
     table: TableMetrics = .{},
     formula: FormulaMetrics = .{},
     form: FormMetrics = .{},
@@ -270,6 +287,30 @@ pub fn writeJsonlResult(writer: anytype, result: DocumentResult) !void {
     try writeOptionalFloat(writer, result.text.local_alignment);
     try writer.writeAll(",\"reading_order_score\":");
     try writeOptionalFloat(writer, result.reading_order_score);
+    try writer.writeAll(",\"reading_graph_precedence_precision\":");
+    try writeOptionalFloat(writer, result.reading_graph.precedence_precision);
+    try writer.writeAll(",\"reading_graph_precedence_recall\":");
+    try writeOptionalFloat(writer, result.reading_graph.precedence_recall);
+    try writer.writeAll(",\"reading_graph_precedence_f1\":");
+    try writeOptionalFloat(writer, result.reading_graph.precedence_f1);
+    try writer.writeAll(",\"reading_graph_legacy_precedence_f1\":");
+    try writeOptionalFloat(writer, result.reading_graph.legacy_precedence_f1);
+    try writer.writeAll(",\"reading_graph_required_recall\":");
+    try writeOptionalFloat(writer, result.reading_graph.required_recall);
+    try writer.writeAll(",\"reading_graph_forbidden_path_rate\":");
+    try writeOptionalFloat(writer, result.reading_graph.forbidden_path_rate);
+    try writer.writeAll(",\"reading_graph_caption_f1\":");
+    try writeOptionalFloat(writer, result.reading_graph.caption_f1);
+    try writer.writeAll(",\"reading_graph_footnote_f1\":");
+    try writeOptionalFloat(writer, result.reading_graph.footnote_f1);
+    try writer.writeAll(",\"reading_graph_cycle_rate\":");
+    try writeOptionalFloat(writer, result.reading_graph.cycle_rate);
+    try writer.writeAll(",\"reading_graph_ambiguity_preservation\":");
+    try writeOptionalFloat(writer, result.reading_graph.ambiguity_preservation);
+    try writer.writeAll(",\"reading_graph_valid_projection\":");
+    try writeOptionalFloat(writer, result.reading_graph.valid_projection);
+    try writer.print(",\"reading_graph_eligible_pages\":{}", .{result.reading_graph.eligible_pages});
+    try writer.print(",\"reading_graph_fallback_pages\":{}", .{result.reading_graph.fallback_pages});
     try writer.writeAll(",\"table_f1\":");
     try writeOptionalFloat(writer, result.table.detection.f1);
     try writer.writeAll(",\"teds\":");
@@ -627,6 +668,15 @@ test "result jsonl exposes all north-star metrics" {
         .pages = 2,
         .text = .{ .cer = 0.01, .wer = 0.02, .token_f1 = 0.98 },
         .reading_order_score = 0.88,
+        .reading_graph = .{
+            .precedence_f1 = 0.91,
+            .legacy_precedence_f1 = 0.84,
+            .required_recall = 0.95,
+            .forbidden_path_rate = 0.01,
+            .ambiguity_preservation = 0.96,
+            .valid_projection = 1.0,
+            .eligible_pages = 2,
+        },
         .table = .{
             .detection = scoreDetection(.{ .true_positive = 3, .false_positive = 1 }),
             .role_accuracy = 0.66,
@@ -647,6 +697,13 @@ test "result jsonl exposes all north-star metrics" {
 
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"token_f1\":0.980000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_order_score\":0.880000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_precedence_f1\":0.910000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_legacy_precedence_f1\":0.840000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_required_recall\":0.950000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_forbidden_path_rate\":0.010000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_ambiguity_preservation\":0.960000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_valid_projection\":1.000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"reading_graph_eligible_pages\":2") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"teds\":null") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_role_accuracy\":0.660000") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"table_rowspan_accuracy\":0.770000") != null);

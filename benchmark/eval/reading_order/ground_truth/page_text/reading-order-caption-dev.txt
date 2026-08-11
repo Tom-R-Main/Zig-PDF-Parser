@@ -1,0 +1,4 @@
+1. A Analysis before figure
+1. A Figure region anchor
+Figure A. Observed trend caption
+1. A Analysis after figure

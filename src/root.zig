@@ -1146,6 +1146,21 @@ pub const Document = struct {
         }
     }
 
+    /// Return the borrowed structure-tree MCID sequence for one page.
+    ///
+    /// The slice is owned by the document and remains valid until `close`.
+    /// Missing, malformed, or empty structure trees are reported as `null` so
+    /// adaptive layout can fall back to geometric evidence without changing
+    /// extraction failure semantics.
+    pub fn pageMarkedContentOrder(self: *Document, page_num: usize) ?[]const structtree.MarkedContentRef {
+        if (page_num >= self.pages.items.len) return null;
+        self.ensureReadingOrder();
+        if (self.cached_reading_order) |*cache| {
+            if (cache.get(page_num)) |mcids| return mcids.items;
+        }
+        return null;
+    }
+
     /// Extract text using structure tree reading order (for tagged PDFs)
     /// Falls back to geometric sorting if no structure tree is present
     pub fn extractTextStructured(self: *Document, page_num: usize, allocator: std.mem.Allocator) ![]u8 {
@@ -5217,6 +5232,21 @@ test "ActualText preserves glyph-derived bbox in bounds mode" {
     try std.testing.expect(spans[0].actual_text);
     try std.testing.expect(spans[0].bbox.x1 > spans[0].bbox.x0);
     try std.testing.expectEqual(@as(?i32, 3), spans[0].mcid);
+}
+
+test "page marked content order exposes borrowed structure sequence" {
+    const allocator = std.testing.allocator;
+    const testpdf = @import("testpdf.zig");
+    const pdf_data = try testpdf.generatePartiallyTaggedFormXObjectPdf(allocator);
+    defer allocator.free(pdf_data);
+
+    const doc = try Document.openFromMemory(allocator, pdf_data, ErrorConfig.default());
+    defer doc.close();
+
+    const order = doc.pageMarkedContentOrder(0) orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(usize, 1), order.len);
+    try std.testing.expectEqual(@as(i32, 0), order[0].mcid);
+    try std.testing.expect(doc.pageMarkedContentOrder(1) == null);
 }
 
 test "allocated memory path cleanup" {

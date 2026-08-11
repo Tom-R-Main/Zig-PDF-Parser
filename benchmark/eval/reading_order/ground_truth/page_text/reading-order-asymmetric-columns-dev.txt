@@ -1,0 +1,5 @@
+1. A Long left opening
+1. A Long left middle
+1. A Long left closing
+1. A Short right opening
+1. A Short right closing

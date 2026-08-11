@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "body_ref",
+      "page_index": 0,
+      "text_anchor": "B Claim marker * reference"
+    },
+    {
+      "id": "body_next",
+      "page_index": 0,
+      "text_anchor": "B Supporting body paragraph"
+    },
+    {
+      "id": "footnote",
+      "page_index": 0,
+      "text_anchor": "* B Footnote qualification"
+    }
+  ],
+  "required_precedence": [
+    [
+      "body_ref",
+      "body_next"
+    ],
+    [
+      "body_next",
+      "footnote"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "body_next",
+      "body_ref"
+    ]
+  ],
+  "ambiguous_pairs": [],
+  "relations": [
+    {
+      "type": "footnote_of",
+      "from": "footnote",
+      "to": "body_ref"
+    }
+  ],
+  "valid_orders": []
+}

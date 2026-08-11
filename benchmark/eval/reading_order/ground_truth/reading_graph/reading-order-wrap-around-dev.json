@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "top",
+      "page_index": 0,
+      "text_anchor": "A Text above illustration"
+    },
+    {
+      "id": "left_wrap",
+      "page_index": 0,
+      "text_anchor": "A Left wrapped text"
+    },
+    {
+      "id": "right_wrap",
+      "page_index": 0,
+      "text_anchor": "A Right wrapped text"
+    },
+    {
+      "id": "bottom",
+      "page_index": 0,
+      "text_anchor": "A Text below illustration"
+    }
+  ],
+  "required_precedence": [
+    [
+      "top",
+      "left_wrap"
+    ],
+    [
+      "top",
+      "right_wrap"
+    ],
+    [
+      "left_wrap",
+      "bottom"
+    ],
+    [
+      "right_wrap",
+      "bottom"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "left_wrap",
+      "top"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "left_wrap",
+      "right_wrap"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": [
+    [
+      "top",
+      "left_wrap",
+      "right_wrap",
+      "bottom"
+    ],
+    [
+      "top",
+      "right_wrap",
+      "left_wrap",
+      "bottom"
+    ]
+  ]
+}

@@ -22,6 +22,7 @@ const Fixture = struct {
     formula_truth: ?[]const u8 = null,
     formula_json_truth: ?[]const u8 = null,
     form_json_truth: ?[]const u8 = null,
+    reading_graph_truth: ?[]const u8 = null,
     font_truth: ?[]const u8 = null,
     font_case_tags: []const []const u8 = &.{},
     render_truth: ?[]const u8 = null,
@@ -1290,7 +1291,7 @@ fn writeFixtureSet(
     var manifest: std.ArrayList(u8) = .empty;
     defer manifest.deinit(allocator);
     var manifest_writer = runtime.arrayListWriter(&manifest, allocator);
-    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\ttruth_table_json_path_optional\ttruth_reading_order_path_optional\ttruth_formula_path_optional\ttruth_formula_json_path_optional\ttruth_form_json_path_optional\n");
+    try manifest_writer.writeAll("# category\tdoc_id\tpdf_path\ttruth_text_path\ttruth_table_json_path_optional\ttruth_reading_order_path_optional\ttruth_formula_path_optional\ttruth_formula_json_path_optional\ttruth_form_json_path_optional\ttruth_reading_graph_path_optional\n");
 
     var metadata: std.ArrayList(u8) = .empty;
     defer metadata.deinit(allocator);
@@ -1386,6 +1387,16 @@ fn writeFixtureSet(
             fixture.form_json_truth,
         );
         defer if (form_json_truth_path) |path| allocator.free(path);
+        const reading_graph_truth_path = try writeOptionalTruth(
+            allocator,
+            root,
+            "reading_graph",
+            fixture.category,
+            fixture.doc_id,
+            "json",
+            fixture.reading_graph_truth,
+        );
+        defer if (reading_graph_truth_path) |path| allocator.free(path);
         const font_truth_path = try writeOptionalTruth(
             allocator,
             root,
@@ -1409,7 +1420,7 @@ fn writeFixtureSet(
         try writeFixtureMetadata(metadata_writer, fixture, pdf_path, truth_path, font_truth_path, render_truth_path, pdf);
         try writeOptionalManifestFields(
             manifest_writer,
-            &.{ table_truth_path, reading_order_truth_path, formula_truth_path, formula_json_truth_path, form_json_truth_path },
+            &.{ table_truth_path, reading_order_truth_path, formula_truth_path, formula_json_truth_path, form_json_truth_path, reading_graph_truth_path },
         );
         try manifest_writer.writeByte('\n');
     }

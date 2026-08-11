@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "B Methods and Results"
+    },
+    {
+      "id": "left_1",
+      "page_index": 0,
+      "text_anchor": "B Left evidence one"
+    },
+    {
+      "id": "left_2",
+      "page_index": 0,
+      "text_anchor": "B Left evidence two"
+    },
+    {
+      "id": "right_1",
+      "page_index": 0,
+      "text_anchor": "B Right evidence one"
+    },
+    {
+      "id": "right_2",
+      "page_index": 0,
+      "text_anchor": "B Right evidence two"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "left_1"
+    ],
+    [
+      "heading",
+      "right_1"
+    ],
+    [
+      "left_1",
+      "left_2"
+    ],
+    [
+      "right_1",
+      "right_2"
+    ],
+    [
+      "left_2",
+      "right_1"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "left_1",
+      "heading"
+    ]
+  ],
+  "ambiguous_pairs": [],
+  "relations": [],
+  "valid_orders": []
+}

@@ -213,7 +213,9 @@ can follow: `truth_table_json_path`, `truth_reading_order_path`, and
 `truth_formula_path`. An eighth optional column, `truth_formula_json_path`, can
 carry structured formula labels, and a ninth optional column,
 `truth_form_json_path`, can carry value-bearing AcroForm labels. Empty optional columns are allowed when a later specialist
-truth file is present. Table truth emits `table_cell_accuracy`; reading-order
+truth file is present. A tenth optional column,
+`truth_reading_graph_path`, can carry the internal relation-aware reading-order
+truth described below. Table truth emits `table_cell_accuracy`; reading-order
 truth emits `reading_order_score`; formula truth emits `formula_bleu` and
 `formula_edit_distance`; formula JSON truth emits `formula_structure_accuracy`
 over formula page/text sequence; form JSON truth emits `form_field_accuracy`
@@ -247,6 +249,83 @@ zig build eval -- corpus/scientific_math/example.pdf \
   --table-regions 3 \
   --formula-regions 5
 ```
+
+## Reading-order graph V0 experiment
+
+`benchmark/eval/reading_order/` is a separate deterministic experiment pack;
+it does not replace or regenerate the primary corpus. Its 16 one-page fixtures
+cover eight matched development/holdout families: spanning headings,
+asymmetric columns, sidebars, captions, footnotes, text wrapping around a
+figure, tables interleaved with prose, and content-stream order that conflicts
+with visual order. Regenerate it with:
+
+```sh
+python3 benchmark/eval/generate_reading_order_corpus.py
+```
+
+Graph truth is versioned independently of the public extraction schema. Text
+anchors must resolve to exactly one internal live block; an absent, ambiguous,
+or colliding anchor fails evaluation.
+
+```json
+{
+  "version": 1,
+  "nodes": [
+    {"id": "heading", "page_index": 0, "text_anchor": "Results"},
+    {"id": "body", "page_index": 0, "text_anchor": "Body opening"},
+    {"id": "sidebar", "page_index": 0, "text_anchor": "Context note"},
+    {"id": "caption", "page_index": 0, "text_anchor": "Figure 1"},
+    {"id": "figure", "page_index": 0, "text_anchor": "Figure region"}
+  ],
+  "required_precedence": [["heading", "body"]],
+  "forbidden_precedence": [["body", "heading"]],
+  "ambiguous_pairs": [["sidebar", "body"]],
+  "relations": [{"type": "caption_of", "from": "caption", "to": "figure"}],
+  "valid_orders": []
+}
+```
+
+The runner supports matched internal treatments without changing JSON/JSONL,
+the C ABI, or Python bindings:
+
+```sh
+# Output-preserving graph diagnostics with full evidence.
+zig build eval -- --adaptive --disable-ocr \
+  --manifest benchmark/eval/reading_order/manifest.tsv \
+  --reading-order-mode diagnostic
+
+# Geometry/semantic ablation and structure demotion treatment.
+zig-out/bin/pdf-parser-eval --adaptive --disable-ocr \
+  --manifest benchmark/eval/reading_order/manifest.tsv \
+  --reading-order-mode diagnostic --reading-order-no-structure
+zig-out/bin/pdf-parser-eval --adaptive --disable-ocr \
+  --manifest benchmark/eval/reading_order/manifest.tsv \
+  --reading-order-mode diagnostic --reading-order-soft-structure
+```
+
+The evaluator emits precedence precision/recall/F1, required-edge recall,
+forbidden-path rate, caption/footnote F1, cycle rate, ambiguity preservation,
+valid-projection rate, graph eligibility/fallback counts, and the existing text
+quality metrics. `diagnostic` constructs the graph but never changes extraction
+order; `graph` applies its stable projection only to eligible native,
+horizontal, non-OCR pages. The default remains `legacy`.
+
+The frozen V0 run did not meet promotion gates. On the eight holdouts,
+geometry-only graph and legacy both measured 97.73% macro precedence F1 (a
+0-point gain). Full structure-tree evidence measured 92.37%, 95.83% required
+recall, a 12.5% forbidden-path rate, and 87.5% valid projections. Demoting
+structure edges from hard to soft produced the same result because the
+conflicting tagged order still outranked geometry. Both graph variants
+preserved 0% of declared ambiguous pairs. Caption relation F1 was 0%, while
+footnote relation F1 was 100%. Cycle rate remained zero. These results falsify
+H1-H3 for this V0 evidence model, so graph mode is retained as diagnostic
+infrastructure rather than made the adaptive default. Five matched ReleaseFast
+runs measured a 2.31% median
+graph-mode latency overhead, inside the 15% guardrail. Five artifact JSONL runs
+were byte-identical. Stream JSONL record order and payloads were also stable,
+but exact files differed in the pre-existing `document_finished.elapsed_ms`
+lifecycle measurement; exact stream bytes therefore did not pass the stated
+promotion gate either.
 
 ## Corpus Layout
 
@@ -309,6 +388,16 @@ identity, continuation links, and source-span coverage. Benchmark schema
 `table_footnote_accuracy`. The result schema also has slots for table detection
 F1, TEDS, GriTS, and formula CDM so local specialist adapters can report into
 the same records as they come online.
+
+Reading-graph truth adds `reading_graph_precedence_precision`,
+`reading_graph_precedence_recall`, `reading_graph_precedence_f1`,
+`reading_graph_legacy_precedence_f1`, `reading_graph_required_recall`,
+`reading_graph_forbidden_path_rate`, `reading_graph_caption_f1`,
+`reading_graph_footnote_f1`, `reading_graph_cycle_rate`,
+`reading_graph_ambiguity_preservation`, `reading_graph_valid_projection`, and
+eligible/fallback page counts. A metric is `null` only when its truth contract
+has no applicable assertions; a declared but entirely missed relation has F1
+zero.
 
 Use `zig build native-eval` for checked-in synthetic correctness fixtures and
 `zig build eval -- ...` for real corpus documents.

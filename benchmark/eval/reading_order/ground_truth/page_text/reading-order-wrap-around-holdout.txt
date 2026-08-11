@@ -1,0 +1,4 @@
+1. B Text above illustration
+1. B Left wrapped text
+1. B Right wrapped text
+1. B Text below illustration

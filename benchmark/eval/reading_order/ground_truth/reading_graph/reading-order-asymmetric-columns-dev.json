@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "left_1",
+      "page_index": 0,
+      "text_anchor": "A Long left opening"
+    },
+    {
+      "id": "left_2",
+      "page_index": 0,
+      "text_anchor": "A Long left middle"
+    },
+    {
+      "id": "left_3",
+      "page_index": 0,
+      "text_anchor": "A Long left closing"
+    },
+    {
+      "id": "right_1",
+      "page_index": 0,
+      "text_anchor": "A Short right opening"
+    },
+    {
+      "id": "right_2",
+      "page_index": 0,
+      "text_anchor": "A Short right closing"
+    }
+  ],
+  "required_precedence": [
+    [
+      "left_1",
+      "left_2"
+    ],
+    [
+      "left_2",
+      "left_3"
+    ],
+    [
+      "left_3",
+      "right_1"
+    ],
+    [
+      "right_1",
+      "right_2"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "left_2",
+      "left_1"
+    ]
+  ],
+  "ambiguous_pairs": [],
+  "relations": [],
+  "valid_orders": []
+}

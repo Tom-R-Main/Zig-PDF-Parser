@@ -9,6 +9,7 @@ const runtime = @import("runtime.zig");
 const zpdf = @import("root.zig");
 const eval = @import("eval.zig");
 const layout = @import("layout.zig");
+const reading_order_eval = @import("reading_order_eval.zig");
 const testpdf = @import("testpdf.zig");
 
 pub const main = runtime.MainWithArgs(mainInner).main;
@@ -27,6 +28,7 @@ pub const Options = struct {
     truth_formula_path: ?[]const u8 = null,
     truth_formula_json_path: ?[]const u8 = null,
     truth_form_json_path: ?[]const u8 = null,
+    truth_reading_graph_path: ?[]const u8 = null,
     output_path: ?[]const u8 = null,
     doc_id: ?[]const u8 = null,
     parser: []const u8 = "pdf-parser",
@@ -35,6 +37,9 @@ pub const Options = struct {
     extraction_mode: ExtractionMode = .native,
     enable_ocr: bool = true,
     ocr_config: zpdf.OcrConfig = .{},
+    reading_order_mode: zpdf.adaptive.ReadingOrderMode = .legacy,
+    reading_order_include_structure: bool = true,
+    reading_order_structure_hard: bool = true,
     reading_order_score: ?f64 = null,
     table_f1: ?f64 = null,
     teds: ?f64 = null,
@@ -96,6 +101,7 @@ pub const ManifestEntry = struct {
     truth_formula_path: ?[]const u8 = null,
     truth_formula_json_path: ?[]const u8 = null,
     truth_form_json_path: ?[]const u8 = null,
+    truth_reading_graph_path: ?[]const u8 = null,
 };
 
 pub const ExpectedRouteCounts = struct {
@@ -141,6 +147,7 @@ pub fn runManifest(
         options.truth_formula_path = entry.truth_formula_path;
         options.truth_formula_json_path = entry.truth_formula_json_path;
         options.truth_form_json_path = entry.truth_form_json_path;
+        options.truth_reading_graph_path = entry.truth_reading_graph_path;
         options.doc_id = entry.doc_id;
         options.category = entry.category;
         options.output_path = null;
@@ -206,6 +213,7 @@ pub fn parseManifestLine(raw_line: []const u8) !?ManifestEntry {
     const truth_formula_path = optionalManifestField(fields.next());
     const truth_formula_json_path = optionalManifestField(fields.next());
     const truth_form_json_path = optionalManifestField(fields.next());
+    const truth_reading_graph_path = optionalManifestField(fields.next());
     if (fields.next() != null) return error.MalformedManifest;
 
     return .{
@@ -218,6 +226,7 @@ pub fn parseManifestLine(raw_line: []const u8) !?ManifestEntry {
         .truth_formula_path = truth_formula_path,
         .truth_formula_json_path = truth_formula_json_path,
         .truth_form_json_path = truth_form_json_path,
+        .truth_reading_graph_path = truth_reading_graph_path,
     };
 }
 
@@ -261,6 +270,11 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
     defer if (truth_form_json) |json| allocator.free(json);
     if (options.truth_form_json_path) |path| {
         truth_form_json = try runtime.readFileAllocAlignedCwd(allocator, path, .fromByteUnits(1));
+    }
+    var truth_reading_graph: ?[]align(1) u8 = null;
+    defer if (truth_reading_graph) |json| allocator.free(json);
+    if (options.truth_reading_graph_path) |path| {
+        truth_reading_graph = try runtime.readFileAllocAlignedCwd(allocator, path, .fromByteUnits(1));
     }
 
     const start_rss = eval.currentPeakRssMb();
@@ -349,6 +363,11 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
             truth_json,
         );
     }
+    var reading_graph_metrics: eval.ReadingGraphMetrics = .{};
+    if (truth_reading_graph) |truth_json| {
+        const adaptive_result = if (extraction.adaptive) |*result| result else return error.ReadingGraphRequiresAdaptiveExtraction;
+        reading_graph_metrics = try evaluateReadingGraph(allocator, adaptive_result, truth_json);
+    }
 
     const elapsed_ns = runtime.nanoTimestamp() - start_ns;
     const peak_rss_mb = eval.currentPeakRssMb();
@@ -379,6 +398,7 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
         .pages = page_count,
         .text = text_metrics,
         .reading_order_score = reading_order_score,
+        .reading_graph = reading_graph_metrics,
         .table = .{
             .detection = .{ .f1 = options.table_f1 },
             .teds = options.teds,
@@ -442,9 +462,16 @@ fn extractForEvaluation(
             };
         },
         .adaptive => {
+            const reading_order_mode: zpdf.adaptive.ReadingOrderMode = if (options.truth_reading_graph_path != null and options.reading_order_mode == .legacy)
+                .diagnostic
+            else
+                options.reading_order_mode;
             var result = try doc.extractAdaptive(allocator, .{
                 .enable_ocr = options.enable_ocr,
                 .ocr_config = options.ocr_config,
+                .reading_order_mode = reading_order_mode,
+                .reading_order_include_structure = options.reading_order_include_structure,
+                .reading_order_structure_hard = options.reading_order_structure_hard,
             });
             errdefer result.deinit();
             const text = try result.render(allocator, .text);
@@ -495,6 +522,186 @@ fn adaptiveCounters(
         .table_regions = table_regions,
         .formula_regions = formula_regions,
     };
+}
+
+const ReadingPredictions = struct {
+    allocator: std.mem.Allocator,
+    nodes: []reading_order_eval.PredictedNode,
+    graph_edges: []reading_order_eval.PredictedEdge,
+    graph_projection: []u32,
+    legacy_edges: []reading_order_eval.PredictedEdge,
+    legacy_projection: []u32,
+    graph_valid: bool,
+
+    fn deinit(self: *ReadingPredictions) void {
+        self.allocator.free(self.nodes);
+        self.allocator.free(self.graph_edges);
+        self.allocator.free(self.graph_projection);
+        self.allocator.free(self.legacy_edges);
+        self.allocator.free(self.legacy_projection);
+        self.* = undefined;
+    }
+};
+
+const LegacyNode = struct {
+    id: u32,
+    original_position: u32,
+};
+
+fn evaluateReadingGraph(
+    allocator: std.mem.Allocator,
+    result: *const zpdf.AdaptiveResult,
+    truth_json: []const u8,
+) !eval.ReadingGraphMetrics {
+    var truth = try reading_order_eval.parseTruth(allocator, truth_json);
+    defer truth.deinit();
+    var predictions = try buildReadingPredictions(allocator, result.reading_order_pages);
+    defer predictions.deinit();
+
+    var graph_evaluation = try reading_order_eval.evaluate(allocator, &truth, .{
+        .nodes = predictions.nodes,
+        .edges = predictions.graph_edges,
+        .projection = predictions.graph_projection,
+        .valid = predictions.graph_valid,
+    });
+    defer graph_evaluation.deinit();
+    var legacy_evaluation = try reading_order_eval.evaluate(allocator, &truth, .{
+        .nodes = predictions.nodes,
+        .edges = predictions.legacy_edges,
+        .projection = predictions.legacy_projection,
+        .valid = true,
+    });
+    defer legacy_evaluation.deinit();
+
+    var eligible_pages: u32 = 0;
+    var fallback_pages: u32 = 0;
+    for (result.reading_order_pages) |page| {
+        if (page.eligible) {
+            eligible_pages += 1;
+        } else {
+            fallback_pages += 1;
+        }
+    }
+
+    return .{
+        .precedence_precision = graph_evaluation.metrics.precedence.precision,
+        .precedence_recall = graph_evaluation.metrics.precedence.recall,
+        .precedence_f1 = graph_evaluation.metrics.precedence.f1,
+        .legacy_precedence_f1 = legacy_evaluation.metrics.precedence.f1,
+        .required_recall = graph_evaluation.metrics.required_recall,
+        .forbidden_path_rate = graph_evaluation.metrics.forbidden_path_rate,
+        .caption_f1 = graph_evaluation.metrics.caption.f1,
+        .footnote_f1 = graph_evaluation.metrics.footnote.f1,
+        .cycle_rate = graph_evaluation.metrics.cycle_rate,
+        .ambiguity_preservation = graph_evaluation.metrics.ambiguity_preservation,
+        .valid_projection = graph_evaluation.metrics.valid_projection,
+        .eligible_pages = eligible_pages,
+        .fallback_pages = fallback_pages,
+    };
+}
+
+fn buildReadingPredictions(
+    allocator: std.mem.Allocator,
+    pages: []const zpdf.adaptive.PageReadingOrder,
+) !ReadingPredictions {
+    var nodes: std.ArrayList(reading_order_eval.PredictedNode) = .empty;
+    errdefer nodes.deinit(allocator);
+    var graph_edges: std.ArrayList(reading_order_eval.PredictedEdge) = .empty;
+    errdefer graph_edges.deinit(allocator);
+    var graph_projection: std.ArrayList(u32) = .empty;
+    errdefer graph_projection.deinit(allocator);
+    var legacy_edges: std.ArrayList(reading_order_eval.PredictedEdge) = .empty;
+    errdefer legacy_edges.deinit(allocator);
+    var legacy_projection: std.ArrayList(u32) = .empty;
+    errdefer legacy_projection.deinit(allocator);
+    var legacy_nodes: std.ArrayList(LegacyNode) = .empty;
+    defer legacy_nodes.deinit(allocator);
+    var graph_valid = true;
+
+    for (pages) |page| {
+        if (page.node_texts.len != page.graph.nodes.len) return error.InvalidReadingGraphSummary;
+        const node_offset: u32 = @intCast(nodes.items.len);
+        for (page.graph.nodes, page.node_texts) |node, text_value| {
+            if (node.id >= page.graph.nodes.len) return error.InvalidReadingGraphSummary;
+            try nodes.append(allocator, .{
+                .id = node_offset + node.id,
+                .page_index = node.page_index,
+                .text = text_value,
+            });
+        }
+        for (page.graph.edges) |edge| {
+            try graph_edges.append(allocator, .{
+                .from = node_offset + edge.source,
+                .to = node_offset + edge.target,
+                .relation = readingEvalRelation(edge.relation),
+            });
+        }
+        for (page.graph.projected_block_order) |block_index| {
+            const node_id = graphNodeForBlock(page, block_index) orelse return error.InvalidReadingGraphSummary;
+            try graph_projection.append(allocator, node_offset + node_id);
+        }
+
+        legacy_nodes.clearRetainingCapacity();
+        for (page.graph.nodes) |node| {
+            try legacy_nodes.append(allocator, .{
+                .id = node_offset + node.id,
+                .original_position = node.original_position,
+            });
+        }
+        std.mem.sort(LegacyNode, legacy_nodes.items, {}, struct {
+            fn lessThan(_: void, left: LegacyNode, right: LegacyNode) bool {
+                if (left.original_position != right.original_position) return left.original_position < right.original_position;
+                return left.id < right.id;
+            }
+        }.lessThan);
+        for (legacy_nodes.items, 0..) |node, index| {
+            try legacy_projection.append(allocator, node.id);
+            if (index > 0) {
+                try legacy_edges.append(allocator, .{
+                    .from = legacy_nodes.items[index - 1].id,
+                    .to = node.id,
+                    .relation = .precedes,
+                });
+            }
+        }
+        graph_valid = graph_valid and page.graph.validity;
+    }
+
+    const owned_nodes = try nodes.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_nodes);
+    const owned_graph_edges = try graph_edges.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_graph_edges);
+    const owned_graph_projection = try graph_projection.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_graph_projection);
+    const owned_legacy_edges = try legacy_edges.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_legacy_edges);
+    const owned_legacy_projection = try legacy_projection.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_legacy_projection);
+
+    return .{
+        .allocator = allocator,
+        .nodes = owned_nodes,
+        .graph_edges = owned_graph_edges,
+        .graph_projection = owned_graph_projection,
+        .legacy_edges = owned_legacy_edges,
+        .legacy_projection = owned_legacy_projection,
+        .graph_valid = graph_valid,
+    };
+}
+
+fn readingEvalRelation(relation: zpdf.adaptive.ReadingOrderRelation) reading_order_eval.Relation {
+    return switch (relation) {
+        .precedes => .precedes,
+        .caption_of => .caption_of,
+        .footnote_of => .footnote_of,
+    };
+}
+
+fn graphNodeForBlock(page: zpdf.adaptive.PageReadingOrder, block_index: u32) ?u32 {
+    for (page.graph.nodes) |node| {
+        if (node.original_block_index == block_index) return node.id;
+    }
+    return null;
 }
 
 fn countTrue(values: []const bool) u32 {
@@ -1571,6 +1778,10 @@ fn parseArgs(args: []const []const u8) !Options {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
             options.truth_form_json_path = args[index];
+        } else if (std.mem.eql(u8, arg, "--truth-reading-graph")) {
+            index += 1;
+            if (index >= args.len) return error.MissingArgument;
+            options.truth_reading_graph_path = args[index];
         } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
@@ -1613,6 +1824,14 @@ fn parseArgs(args: []const []const u8) !Options {
             options.formula_cdm = try parseScore(args[index]);
         } else if (std.mem.eql(u8, arg, "--adaptive")) {
             options.extraction_mode = .adaptive;
+        } else if (std.mem.eql(u8, arg, "--reading-order-mode")) {
+            index += 1;
+            if (index >= args.len) return error.MissingArgument;
+            options.reading_order_mode = std.meta.stringToEnum(zpdf.adaptive.ReadingOrderMode, args[index]) orelse return error.InvalidReadingOrderMode;
+        } else if (std.mem.eql(u8, arg, "--reading-order-no-structure")) {
+            options.reading_order_include_structure = false;
+        } else if (std.mem.eql(u8, arg, "--reading-order-soft-structure")) {
+            options.reading_order_structure_hard = false;
         } else if (std.mem.eql(u8, arg, "--disable-ocr")) {
             options.enable_ocr = false;
         } else if (std.mem.eql(u8, arg, "--ocr-executable")) {
@@ -1694,12 +1913,16 @@ fn printUsage() !void {
         \\  --truth-formula FILE    Formula text truth for formula BLEU/edit-distance
         \\  --truth-formula-json FILE Structured formula JSON truth for page/text accuracy
         \\  --truth-form-json FILE Structured value-bearing AcroForm field truth
+        \\  --truth-reading-graph FILE Versioned relation-aware graph truth JSON
         \\  --category NAME         Corpus category, e.g. clean_born_digital
         \\  --doc-id ID             Stable document id for JSONL output
         \\  --parser NAME           Parser label (default: pdf-parser)
         \\  --fast                  Use fast native extraction mode
         \\  --accuracy              Use accuracy extraction mode (default)
         \\  --adaptive              Use adaptive extraction, including OCR when routed
+        \\  --reading-order-mode MODE legacy, diagnostic, or graph (default: legacy)
+        \\  --reading-order-no-structure Run geometry/semantic graph ablation
+        \\  --reading-order-soft-structure Treat tagged order as soft evidence
         \\  --disable-ocr           Keep adaptive OCR routes traceable but do not invoke OCR
         \\  --ocr-executable FILE   Tesseract executable for adaptive OCR
         \\  --ocr-rasterizer FILE   pdftoppm-compatible rasterizer for adaptive OCR
@@ -1743,6 +1966,8 @@ test "eval runner parses category and options" {
         "formula.json",
         "--truth-form-json",
         "forms.json",
+        "--truth-reading-graph",
+        "reading-graph.json",
         "--category",
         "scientific_math",
         "--doc-id",
@@ -1761,6 +1986,10 @@ test "eval runner parses category and options" {
         "--formula-cdm",
         "0.5",
         "--adaptive",
+        "--reading-order-mode",
+        "graph",
+        "--reading-order-no-structure",
+        "--reading-order-soft-structure",
         "--ocr-executable",
         "fake-tesseract",
         "--ocr-rasterizer",
@@ -1780,6 +2009,10 @@ test "eval runner parses category and options" {
     try std.testing.expectEqualStrings("formula.txt", options.truth_formula_path.?);
     try std.testing.expectEqualStrings("formula.json", options.truth_formula_json_path.?);
     try std.testing.expectEqualStrings("forms.json", options.truth_form_json_path.?);
+    try std.testing.expectEqualStrings("reading-graph.json", options.truth_reading_graph_path.?);
+    try std.testing.expectEqual(zpdf.adaptive.ReadingOrderMode.graph, options.reading_order_mode);
+    try std.testing.expect(!options.reading_order_include_structure);
+    try std.testing.expect(!options.reading_order_structure_hard);
     try std.testing.expectEqual(eval.CorpusCategory.scientific_math, options.category);
     try std.testing.expectEqual(zpdf.FullTextMode.fast, options.mode);
     try std.testing.expectApproxEqAbs(@as(f64, 0.75), options.reading_order_score.?, 0.0001);
@@ -1908,14 +2141,16 @@ test "eval runner parses manifest rows" {
     try std.testing.expect(entry.truth_formula_path == null);
     try std.testing.expect(entry.truth_formula_json_path == null);
     try std.testing.expect(entry.truth_form_json_path == null);
+    try std.testing.expect(entry.truth_reading_graph_path == null);
     const table_entry = (try parseManifestLine(
-        "financial_tables\taligned\tcorpus/aligned.pdf\ttruth/aligned.txt\ttruth/tables/aligned.json\ttruth/order/aligned.txt\ttruth/formulas/aligned.txt\ttruth/formulas_json/aligned.json\ttruth/forms/aligned.json",
+        "financial_tables\taligned\tcorpus/aligned.pdf\ttruth/aligned.txt\ttruth/tables/aligned.json\ttruth/order/aligned.txt\ttruth/formulas/aligned.txt\ttruth/formulas_json/aligned.json\ttruth/forms/aligned.json\ttruth/reading_graph/aligned.json",
     )).?;
     try std.testing.expectEqualStrings("truth/tables/aligned.json", table_entry.truth_table_json_path.?);
     try std.testing.expectEqualStrings("truth/order/aligned.txt", table_entry.truth_reading_order_path.?);
     try std.testing.expectEqualStrings("truth/formulas/aligned.txt", table_entry.truth_formula_path.?);
     try std.testing.expectEqualStrings("truth/formulas_json/aligned.json", table_entry.truth_formula_json_path.?);
     try std.testing.expectEqualStrings("truth/forms/aligned.json", table_entry.truth_form_json_path.?);
+    try std.testing.expectEqualStrings("truth/reading_graph/aligned.json", table_entry.truth_reading_graph_path.?);
     const formula_entry = (try parseManifestLine(
         "scientific_math\tmath\tcorpus/math.pdf\ttruth/math.txt\t\t\ttruth/formulas/math.txt\ttruth/formulas_json/math.json",
     )).?;

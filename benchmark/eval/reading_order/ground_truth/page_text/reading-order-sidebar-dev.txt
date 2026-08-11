@@ -1,0 +1,4 @@
+1. A Main narrative opens
+1. A Sidebar context
+1. A Main narrative continues
+1. A Main narrative closes

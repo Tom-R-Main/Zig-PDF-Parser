@@ -1,0 +1,16 @@
+{"doc_id": "reading-order-spanning-heading-dev", "expected_ocr_pages": 0, "family": "spanning-heading", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-asymmetric-columns-dev", "expected_ocr_pages": 0, "family": "asymmetric-columns", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-sidebar-dev", "expected_ocr_pages": 0, "family": "sidebar", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-caption-dev", "expected_ocr_pages": 0, "family": "caption", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-footnote-dev", "expected_ocr_pages": 0, "family": "footnote", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-wrap-around-dev", "expected_ocr_pages": 0, "family": "wrap-around", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-table-prose-dev", "expected_ocr_pages": 0, "family": "table-prose", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-stream-mismatch-dev", "expected_ocr_pages": 0, "family": "stream-mismatch", "reading_order_split": "dev", "tagged": false}
+{"doc_id": "reading-order-spanning-heading-holdout", "expected_ocr_pages": 0, "family": "spanning-heading", "reading_order_split": "holdout", "tagged": true}
+{"doc_id": "reading-order-asymmetric-columns-holdout", "expected_ocr_pages": 0, "family": "asymmetric-columns", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-sidebar-holdout", "expected_ocr_pages": 0, "family": "sidebar", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-caption-holdout", "expected_ocr_pages": 0, "family": "caption", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-footnote-holdout", "expected_ocr_pages": 0, "family": "footnote", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-wrap-around-holdout", "expected_ocr_pages": 0, "family": "wrap-around", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-table-prose-holdout", "expected_ocr_pages": 0, "family": "table-prose", "reading_order_split": "holdout", "tagged": false}
+{"doc_id": "reading-order-stream-mismatch-holdout", "expected_ocr_pages": 0, "family": "stream-mismatch", "reading_order_split": "holdout", "tagged": true}
