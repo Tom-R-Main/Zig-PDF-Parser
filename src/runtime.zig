@@ -311,7 +311,7 @@ fn openFilePath(path: []const u8) !File {
         std.Io.Dir.cwd().openFile(currentIo(), path, .{});
 }
 
-fn deleteFilePath(path: []const u8) void {
+pub fn deleteFilePath(path: []const u8) void {
     deleteFilePathChecked(path) catch {};
 }
 

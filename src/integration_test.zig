@@ -568,7 +568,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.12.0", parsed.value.object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.13.0", parsed.value.object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("0.4.0-dev", parsed.value.object.get("parser_version").?.string);
     try std.testing.expectEqualStrings("document_manifest", parsed.value.object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-clean-native", parsed.value.object.get("source_id").?.string);
@@ -592,7 +592,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("warnings").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 0), parsed.value.object.get("errors").?.array.items.len);
     try std.testing.expectEqual(true, parsed.value.object.get("capability_coverage").?.object.get("native_text").?.bool);
-    try std.testing.expectEqual(false, parsed.value.object.get("capability_coverage").?.object.get("formula_recognition").?.bool);
+    try std.testing.expectEqual(true, parsed.value.object.get("capability_coverage").?.object.get("formula_recognition").?.bool);
     const artifacts = parsed.value.object.get("output_artifacts").?.array.items;
     try std.testing.expect(artifacts.len >= 7);
     try std.testing.expectEqualStrings("spans", artifacts[0].object.get("artifact_name").?.string);
@@ -614,7 +614,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     const debug_assets = parsed.value.object.get("debug_assets").?.array.items;
     try std.testing.expect(debug_assets.len > 0);
     try expectProvenanceObject(debug_assets[0]);
-    try std.testing.expectEqualStrings("0.12.0", debug_assets[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.13.0", debug_assets[0].object.get("schema_version").?.string);
     try std.testing.expect(debug_assets[0].object.get("asset_kind") != null);
     try std.testing.expect(debug_assets[0].object.get("path") != null);
     try std.testing.expectEqual(.null, debug_assets[0].object.get("path").?);
@@ -625,7 +625,7 @@ test "versioned schema renders native document manifest spans blocks chunks and 
     try std.testing.expectEqualStrings("debug", debug_assets[0].object.get("provenance").?.object.get("source_kind").?.string);
 
     try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_name\":\"document_manifest\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.12.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"schema_version\":\"0.13.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"block\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"record_type\":\"rag_chunk\"") != null);
@@ -749,7 +749,7 @@ test "versioned artifact jsonl starts with manifest then typed records" {
     try std.testing.expect(manifest.value.object.get("output_artifacts") != null);
     try std.testing.expect(manifest.value.object.get("extraction_counts") != null);
     try std.testing.expect(manifest.value.object.get("capability_coverage") != null);
-    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.12.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"schema_version\":\"0.13.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl[first_newline + 1 ..], "\"record_type\":\"span\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"record_type\":\"route_trace\"") != null);
     try expectJsonlLinesParse(allocator, jsonl);
@@ -781,7 +781,7 @@ test "specialist protocol emits batch request records for routed table formula r
     const requests = parsed.value.object.get("specialist_requests").?.array.items;
     try std.testing.expect(requests.len > 0);
     try expectProvenanceObject(requests[0]);
-    try std.testing.expectEqualStrings("0.12.0", requests[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.13.0", requests[0].object.get("schema_version").?.string);
     try std.testing.expectEqualStrings("specialist_request", requests[0].object.get("record_type").?.string);
     try std.testing.expectEqualStrings("external-specialist", requests[0].object.get("source_id").?.string);
     try std.testing.expect(requests[0].object.get("requested_kind") != null);
@@ -815,7 +815,34 @@ test "configured formula specialist produces owned linked lifecycle records" {
 
     const pdf_data = try testpdf.generateTableFormulaPdf(allocator);
     defer allocator.free(pdf_data);
-    const doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+
+    var pdf_buf: [128]u8 = undefined;
+    const pdf_path = try std.fmt.bufPrint(&pdf_buf, "pdf-parser-formula-integration-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(pdf_path);
+    defer runtime.deleteFileCwd(pdf_path);
+    const pdf_file = try runtime.createFileCwd(pdf_path);
+    try runtime.writeAllFile(pdf_file, pdf_data);
+    runtime.closeFile(pdf_file);
+
+    const fake_rasterizer =
+        \\#!/bin/sh
+        \\last=""
+        \\for arg do last="$arg"; done
+        \\printf '\211PNG\r\n\032\n\000\000\000\rIHDR\000\000\000\310\000\000\000\144' > "$last.png"
+        \\
+    ;
+    var raster_buf: [128]u8 = undefined;
+    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-formula-raster-{x}.sh", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(raster_path);
+    defer runtime.deleteFileCwd(raster_path);
+    const raster_file = try runtime.createFileCwd(raster_path);
+    try runtime.writeAllFile(raster_file, fake_rasterizer);
+    runtime.closeFile(raster_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", raster_path }));
+    var raster_exec_buf: [144]u8 = undefined;
+    const raster_exec = try std.fmt.bufPrint(&raster_exec_buf, "./{s}", .{raster_path});
+
+    const doc = try zpdf.Document.openWithConfig(allocator, pdf_path, zpdf.ErrorConfig.permissive());
     defer doc.close();
 
     var script_buf: [128]u8 = undefined;
@@ -825,8 +852,15 @@ test "configured formula specialist produces owned linked lifecycle records" {
     const script = try runtime.createFileCwd(script_path);
     try runtime.writeAllFile(script,
         \\#!/bin/sh
-        \\request_id=$(sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
-        \\printf '{"schema_version":"0.12.0","record_type":"specialist_response","request_id":"%s","specialist_id":"fixture-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.95}]}\n' "$request_id"
+        \\case "${1:-}" in
+        \\  timeout) sleep 1; exit 0 ;;
+        \\  invalid) printf '%s\n' '{bad json}'; exit 0 ;;
+        \\esac
+        \\request=$(cat)
+        \\request_id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+        \\crop=$(printf '%s' "$request" | sed -n 's/.*"crop_image_path":"\([^"]*\)".*/\1/p')
+        \\test -n "$crop" && test -f "$crop" || exit 7
+        \\printf '{"schema_version":"0.13.0","record_type":"specialist_response","request_id":"%s","specialist_id":"fixture-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.95}]}\n' "$request_id"
         \\
     );
     runtime.closeFile(script);
@@ -835,21 +869,42 @@ test "configured formula specialist produces owned linked lifecycle records" {
     const executable = try std.fmt.bufPrint(&executable_buf, "./{s}", .{script_path});
 
     var result = try doc.extractAdaptive(allocator, .{
-        .formula_specialist = .{ .executable = executable },
+        .formula_specialist = .{ .executable = executable, .rasterizer_executable = raster_exec, .crop_dpi = 144 },
         .specialist_context = .{ .document_id = "formula-fixture", .source_id = "source-formula" },
     });
     defer result.deinit();
     try std.testing.expect(result.formula_attempts.len > 0);
     try std.testing.expectEqual(result.formula_attempts.len, result.formula_artifacts.len);
     try std.testing.expect(!result.hasSpecialistFailures());
+    for (result.formula_artifacts) |artifact| {
+        try std.testing.expectEqualStrings("x^2+y^2=z^2", artifact.text);
+        try std.testing.expectEqualStrings("latex", artifact.format);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.95), artifact.confidence, 0.001);
+    }
     for (result.formula_attempts) |attempt| {
         try std.testing.expectEqual(zpdf.adaptive.FormulaStatus.completed, attempt.status);
+        try std.testing.expect(attempt.crop_backed);
+        try std.testing.expectEqual(@as(?u32, 144), attempt.crop_dpi);
+        try std.testing.expect(attempt.crop_pixel_width != null and attempt.crop_pixel_height != null);
         var linked: usize = 0;
         for (result.formula_artifacts) |artifact| {
             if (std.mem.eql(u8, artifact.request_id, attempt.request_id)) linked += 1;
         }
         try std.testing.expectEqual(@as(usize, 1), linked);
     }
+    var formula_span_count: usize = 0;
+    var retained_native_formula_text = false;
+    for (result.reconciled.spans) |span| {
+        if (span.chosen_source == .formula_model) formula_span_count += 1;
+        if (std.mem.indexOf(u8, span.span.text, "E=mc^2") != null or
+            std.mem.indexOf(u8, span.span.text, "alpha+beta") != null or
+            std.mem.indexOf(u8, span.span.text, "sum(x_i^2)") != null)
+        {
+            retained_native_formula_text = true;
+        }
+    }
+    try std.testing.expectEqual(result.formula_artifacts.len, formula_span_count);
+    try std.testing.expect(!retained_native_formula_text);
 
     const json = try zpdf.schema.renderArtifactJson(allocator, &result, .{ .document_id = "formula-fixture", .source_id = "source-formula" });
     defer allocator.free(json);
@@ -862,6 +917,11 @@ test "configured formula specialist produces owned linked lifecycle records" {
     try std.testing.expectEqual(result.formula_attempts.len, attempts.len);
     try std.testing.expectEqual(result.formula_attempts.len, responses.len);
     try std.testing.expectEqual(result.formula_attempts.len, results.len);
+    for (requests) |request| {
+        if (std.mem.eql(u8, request.object.get("requested_kind").?.string, "formula")) {
+            try std.testing.expectEqual(.null, request.object.get("crop_image_path").?);
+        }
+    }
     for (attempts) |attempt| {
         const request_id = attempt.object.get("request_id").?.string;
         var request_matches: usize = 0;
@@ -869,18 +929,85 @@ test "configured formula specialist produces owned linked lifecycle records" {
             if (std.mem.eql(u8, request.object.get("request_id").?.string, request_id)) request_matches += 1;
         }
         try std.testing.expectEqual(@as(usize, 1), request_matches);
+        try std.testing.expect(attempt.object.get("config").?.object.get("crop_path_redacted").?.bool);
+        try std.testing.expect(attempt.object.get("config").?.object.get("crop_backed").?.bool);
     }
-    try std.testing.expectEqual(false, parsed.value.object.get("capability_coverage").?.object.get("formula_recognition").?.bool);
+    for (responses) |response| {
+        const formulas = response.object.get("formulas").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), formulas.len);
+        try std.testing.expectEqualStrings("formula", formulas[0].object.get("schema_name").?.string);
+        try std.testing.expectEqualStrings("0.13.0", formulas[0].object.get("schema_version").?.string);
+        try std.testing.expectEqualStrings("formula", formulas[0].object.get("record_type").?.string);
+        try std.testing.expectEqualStrings("source-formula", formulas[0].object.get("source_id").?.string);
+        try expectProvenanceObject(formulas[0]);
+        try std.testing.expectEqualStrings("formula_model", formulas[0].object.get("provenance").?.object.get("source_kind").?.string);
+    }
+    for (results) |specialist_result| {
+        try std.testing.expectEqual(@as(usize, 1), specialist_result.object.get("span_ids").?.array.items.len);
+        try std.testing.expectEqual(@as(i64, 1), specialist_result.object.get("artifact_counts").?.object.get("spans").?.integer);
+    }
+    try std.testing.expectEqual(true, parsed.value.object.get("capability_coverage").?.object.get("formula_recognition").?.bool);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"crop_backed\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"source_kind\":\"formula_model\"") != null);
 
     var unavailable = try doc.extractAdaptive(allocator, .{
-        .formula_specialist = .{ .executable = "./definitely-missing-formula-specialist" },
+        .formula_specialist = .{ .executable = "./definitely-missing-formula-specialist", .rasterizer_executable = raster_exec },
     });
     defer unavailable.deinit();
     try std.testing.expect(unavailable.formula_attempts.len > 0);
     try std.testing.expect(unavailable.hasSpecialistFailures());
+    try expectNativeFormulaFallback(&unavailable);
     for (unavailable.formula_attempts) |attempt| {
         try std.testing.expectEqual(zpdf.adaptive.FormulaStatus.unavailable, attempt.status);
     }
+
+    var timed_out = try doc.extractAdaptive(allocator, .{
+        .formula_specialist = .{
+            .executable = executable,
+            .extra_args = &.{"timeout"},
+            .rasterizer_executable = raster_exec,
+            .timeout_ms = 10,
+        },
+    });
+    defer timed_out.deinit();
+    try std.testing.expectEqual(@as(usize, 0), timed_out.formula_artifacts.len);
+    try expectNativeFormulaFallback(&timed_out);
+    for (timed_out.formula_attempts) |attempt| try std.testing.expectEqual(zpdf.adaptive.FormulaStatus.timeout, attempt.status);
+
+    var invalid = try doc.extractAdaptive(allocator, .{
+        .formula_specialist = .{
+            .executable = executable,
+            .extra_args = &.{"invalid"},
+            .rasterizer_executable = raster_exec,
+        },
+    });
+    defer invalid.deinit();
+    try std.testing.expectEqual(@as(usize, 0), invalid.formula_artifacts.len);
+    try expectNativeFormulaFallback(&invalid);
+    for (invalid.formula_attempts) |attempt| try std.testing.expectEqual(zpdf.adaptive.FormulaStatus.invalid_output, attempt.status);
+
+    const memory_doc = try zpdf.Document.openFromMemory(allocator, pdf_data, zpdf.ErrorConfig.permissive());
+    defer memory_doc.close();
+    var memory_only = try memory_doc.extractAdaptive(allocator, .{
+        .formula_specialist = .{ .executable = executable, .rasterizer_executable = raster_exec },
+    });
+    defer memory_only.deinit();
+    try std.testing.expect(memory_only.formula_attempts.len > 0);
+    try std.testing.expectEqual(@as(usize, 0), memory_only.formula_artifacts.len);
+    try expectNativeFormulaFallback(&memory_only);
+    for (memory_only.formula_attempts) |attempt| {
+        try std.testing.expectEqual(zpdf.adaptive.FormulaStatus.unavailable, attempt.status);
+        try std.testing.expectEqualStrings("formula_crop_requires_file", attempt.diagnostic_code.?);
+    }
+}
+
+fn expectNativeFormulaFallback(result: anytype) !void {
+    var found_native_formula_text = false;
+    for (result.reconciled.spans) |span| {
+        try std.testing.expect(span.chosen_source != .formula_model);
+        if (std.mem.indexOf(u8, span.span.text, "E=mc^2") != null) found_native_formula_text = true;
+    }
+    try std.testing.expect(found_native_formula_text);
 }
 
 test "batch and multi-page streaming specialist request ids are unique and equal" {
@@ -925,6 +1052,34 @@ test "batch and multi-page streaming specialist request ids are unique and equal
         try std.testing.expectEqual(@as(usize, 1), stream_matches);
         for (batch_ids.items[index + 1 ..]) |other| try std.testing.expect(!std.mem.eql(u8, id, other));
     }
+}
+
+test "formula crop reports rotated pages as explicit unsupported outcomes" {
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+    const pdf_data = try testpdf.generateRotatedPageTextPdf(allocator);
+    defer allocator.free(pdf_data);
+    var path_buf: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "pdf-parser-formula-rotated-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(path);
+    defer runtime.deleteFileCwd(path);
+    const file = try runtime.createFileCwd(path);
+    try runtime.writeAllFile(file, pdf_data);
+    runtime.closeFile(file);
+    const doc = try zpdf.Document.openWithConfig(allocator, path, zpdf.ErrorConfig.permissive());
+    defer doc.close();
+
+    var outcome = try doc.rasterizeFormulaRegionDetailed(
+        allocator,
+        0,
+        .{ .x0 = 90, .y0 = 90, .x1 = 280, .y1 = 130 },
+        .{ .executable = "unused", .rasterizer_executable = "unused" },
+    );
+    defer outcome.deinit(allocator);
+    try std.testing.expectEqual(zpdf.specialists.FormulaExecutionStatus.unavailable, outcome.status);
+    try std.testing.expectEqualStrings("formula_crop_rotation_unsupported", outcome.diagnostic_code.?);
 }
 
 fn collectRequestIds(allocator: std.mem.Allocator, jsonl: []const u8, ids: *std.ArrayList([]u8)) !void {
@@ -1181,7 +1336,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const tables = parsed.value.object.get("tables").?.array.items;
     try std.testing.expect(tables.len > 0);
     try expectProvenanceObject(tables[0]);
-    try std.testing.expectEqualStrings("0.12.0", tables[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.13.0", tables[0].object.get("schema_version").?.string);
     try std.testing.expect(tables[0].object.get("logical_table_id") != null);
     try std.testing.expect(tables[0].object.get("table_part_index") != null);
     try std.testing.expect(tables[0].object.get("continued_from_table_id") != null);
@@ -1191,7 +1346,7 @@ test "versioned schema exposes financial table cell span metadata" {
     const cells = tables[0].object.get("rows").?.array.items[0].object.get("cells").?.array.items;
     try std.testing.expect(cells.len > 0);
     try std.testing.expectEqualStrings("table_cell", cells[0].object.get("schema_name").?.string);
-    try std.testing.expectEqualStrings("0.12.0", cells[0].object.get("schema_version").?.string);
+    try std.testing.expectEqualStrings("0.13.0", cells[0].object.get("schema_version").?.string);
     try std.testing.expect(cells[0].object.get("cell_id") != null);
     try std.testing.expectEqualStrings("external-merged-cells", cells[0].object.get("source_id").?.string);
     try std.testing.expect(cells[0].object.get("raw_text") != null);

@@ -259,6 +259,11 @@ pub const FormulaAttempt = struct {
     exit_code: ?u8 = null,
     diagnostic_code: ?[]u8 = null,
     stderr_excerpt: []u8,
+    crop_backed: bool = false,
+    crop_bbox: ?BBox = null,
+    crop_dpi: ?u32 = null,
+    crop_pixel_width: ?u32 = null,
+    crop_pixel_height: ?u32 = null,
 };
 
 pub const FormulaArtifact = struct {
@@ -830,7 +835,7 @@ pub fn extractDocument(
         .tables = owned_tables,
     };
     if (options.formula_specialist) |config| {
-        try executeFormulaSpecialists(allocator, &result, config, options.specialist_context);
+        try executeFormulaSpecialists(allocator, document, &result, config, options.specialist_context, options.reconcile_options);
     }
     return result;
 }
@@ -866,9 +871,11 @@ fn freeFormulaArtifactItems(allocator: std.mem.Allocator, artifacts: []FormulaAr
 
 fn executeFormulaSpecialists(
     allocator: std.mem.Allocator,
+    document: anytype,
     result: *Result,
     config: specialists.SpecialistConfig,
     context: specialist_protocol.RenderContext,
+    reconcile_options: ReconcileOptions,
 ) !void {
     var attempts: std.ArrayList(FormulaAttempt) = .empty;
     errdefer {
@@ -885,15 +892,29 @@ fn executeFormulaSpecialists(
         if (!route.route.needs_formula_model) continue;
         const request_id = try specialist_protocol.allocRequestId(allocator, .formula, route.page_index, route.region_index);
         errdefer allocator.free(request_id);
-        const request_jsonl = try specialist_protocol.renderRegionRequestJsonl(allocator, result, context, route_index);
-        defer allocator.free(request_jsonl);
-
-        var execution = try specialists.runFormulaJsonl(
+        var crop_outcome = try document.rasterizeFormulaRegionDetailed(allocator, route.page_index, route.bbox, config);
+        defer crop_outcome.deinit(allocator);
+        const crop_input = crop_outcome.input;
+        var execution = if (crop_input) |crop| blk: {
+            const request_jsonl = try specialist_protocol.renderRegionRequestJsonl(allocator, result, context, route_index, crop.image_path);
+            defer allocator.free(request_jsonl);
+            var completed = try specialists.runFormulaJsonl(
+                allocator,
+                request_jsonl,
+                request_id,
+                specialist_protocol.schema_version,
+                config,
+            );
+            completed.duration_ms += crop_outcome.duration_ms;
+            break :blk completed;
+        } else try specialists.makeFormulaFailure(
             allocator,
-            request_jsonl,
-            request_id,
-            specialist_protocol.schema_version,
-            config,
+            crop_outcome.status,
+            crop_outcome.duration_ms,
+            crop_outcome.diagnostic_code orelse "formula_crop_failed",
+            "formula-rasterizer",
+            crop_outcome.exit_code,
+            crop_outcome.stderr,
         );
         defer execution.deinit(allocator);
 
@@ -943,12 +964,19 @@ fn executeFormulaSpecialists(
             .exit_code = execution.exit_code,
             .diagnostic_code = diagnostic_code,
             .stderr_excerpt = stderr_excerpt,
+            .crop_backed = crop_input != null,
+            .crop_bbox = if (crop_input) |crop| crop.pdf_bbox else null,
+            .crop_dpi = if (crop_input) |crop| crop.dpi else null,
+            .crop_pixel_width = if (crop_input) |crop| crop.pixel_width else null,
+            .crop_pixel_height = if (crop_input) |crop| crop.pixel_height else null,
         });
     }
 
     const owned_attempts = try attempts.toOwnedSlice(allocator);
     errdefer freeFormulaAttempts(allocator, owned_attempts);
     const owned_artifacts = try artifacts.toOwnedSlice(allocator);
+    errdefer freeFormulaArtifacts(allocator, owned_artifacts);
+    try reconcile.applyFormulaArtifacts(&result.reconciled, owned_artifacts, result.region_routes, reconcile_options);
     allocator.free(result.formula_attempts);
     allocator.free(result.formula_artifacts);
     result.formula_attempts = owned_attempts;

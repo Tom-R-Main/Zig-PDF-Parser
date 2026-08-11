@@ -1871,6 +1871,7 @@ test "extract-adaptive CLI propagates argument and adapter failures" {
 }
 
 test "adaptive CLI emits specialist request JSONL sidecars" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
     const testpdf = @import("testpdf.zig");
     const allocator = std.testing.allocator;
     var threaded: std.Io.Threaded = .init(allocator, .{});
@@ -1889,12 +1890,50 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
     try runtime.writeAllFile(input_file, pdf_data);
     runtime.closeFile(input_file);
 
+    var raster_buf: [112]u8 = undefined;
+    const raster_path = try std.fmt.bufPrint(&raster_buf, "pdf-parser-cli-raster-{x}.sh", .{std.testing.random_seed});
+    runtime.deleteFileCwd(raster_path);
+    defer runtime.deleteFileCwd(raster_path);
+    const raster_file = try runtime.createFileCwd(raster_path);
+    try runtime.writeAllFile(raster_file,
+        \\#!/bin/sh
+        \\last=""
+        \\for arg do last="$arg"; done
+        \\printf '\211PNG\r\n\032\n\000\000\000\rIHDR\000\000\000\310\000\000\000\144' > "$last.png"
+        \\
+    );
+    runtime.closeFile(raster_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", raster_path }));
+
+    var formula_buf: [112]u8 = undefined;
+    const formula_path = try std.fmt.bufPrint(&formula_buf, "pdf-parser-cli-formula-{x}.sh", .{std.testing.random_seed});
+    runtime.deleteFileCwd(formula_path);
+    defer runtime.deleteFileCwd(formula_path);
+    const formula_file = try runtime.createFileCwd(formula_path);
+    try runtime.writeAllFile(formula_file,
+        \\#!/bin/sh
+        \\request=$(cat)
+        \\request_id=$(printf '%s' "$request" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+        \\crop=$(printf '%s' "$request" | sed -n 's/.*"crop_image_path":"\([^"]*\)".*/\1/p')
+        \\test -n "$crop" && test -f "$crop" || exit 7
+        \\printf '{"schema_version":"0.13.0","record_type":"specialist_response","request_id":"%s","specialist_id":"cli-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.95}]}\n' "$request_id"
+        \\
+    );
+    runtime.closeFile(formula_file);
+    try std.testing.expectEqual(@as(u8, 0), try runtime.runIgnored(&.{ "chmod", "+x", formula_path }));
+
     var config_buf: [112]u8 = undefined;
     const config_path = try std.fmt.bufPrint(&config_buf, "pdf-parser-cli-specialist-{x}.json", .{std.testing.random_seed});
     runtime.deleteFileCwd(config_path);
     defer runtime.deleteFileCwd(config_path);
     const config_file = try runtime.createFileCwd(config_path);
-    try runtime.writeAllFile(config_file, "{\"formula\":{\"enabled\":false}}");
+    var config_json_buf: [512]u8 = undefined;
+    const config_json = try std.fmt.bufPrint(
+        &config_json_buf,
+        "{{\"formula\":{{\"enabled\":true,\"executable\":\"./{s}\",\"rasterizer_executable\":\"./{s}\",\"crop_dpi\":144}}}}",
+        .{ formula_path, raster_path },
+    );
+    try runtime.writeAllFile(config_file, config_json);
     runtime.closeFile(config_file);
 
     const cases = [_]struct {
@@ -1951,7 +1990,7 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
         const requests = try runtime.readFileAllocAlignedCwd(allocator, requests_path, .fromByteUnits(1));
         defer allocator.free(requests);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"record_type\":\"specialist_request\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.12.0\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, requests, "\"schema_version\":\"0.13.0\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"source_id\":\"external-specialist-cli\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_kind\":\"") != null);
         try std.testing.expect(std.mem.indexOf(u8, requests, "\"requested_outputs\"") != null);
@@ -1960,6 +1999,10 @@ test "adaptive CLI emits specialist request JSONL sidecars" {
         const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
         defer allocator.free(output);
         try std.testing.expect(std.mem.indexOf(u8, output, "\"record_type\":\"specialist_request\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\"record_type\":\"specialist_attempt\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\"crop_backed\":true") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "\"source_kind\":\"formula_model\"") != null);
+        try std.testing.expect(std.mem.indexOf(u8, output, "x^2+y^2=z^2") != null);
     }
 }
 

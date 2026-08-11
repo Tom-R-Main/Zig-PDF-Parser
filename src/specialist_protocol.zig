@@ -10,7 +10,7 @@ const complexity = @import("complexity.zig");
 const layout = @import("layout.zig");
 const runtime = @import("runtime.zig");
 
-pub const schema_version = "0.12.0";
+pub const schema_version = "0.13.0";
 
 pub const SpecialistKind = enum {
     ocr,
@@ -292,6 +292,7 @@ pub fn renderRegionRequestJsonl(
     result: anytype,
     context: RenderContext,
     region_route_index: usize,
+    crop_image_path: ?[]const u8,
 ) ![]u8 {
     if (region_route_index >= result.region_routes.len) return error.InvalidRegionRoute;
     const route = result.region_routes[region_route_index];
@@ -315,6 +316,7 @@ pub fn renderRegionRequestJsonl(
         route.route,
         route.reason_mask,
         route.signals,
+        crop_image_path,
         null,
         &span_lookup,
         &block_lookup,
@@ -440,14 +442,14 @@ fn writeRequests(
         if (!matchesPage(page_filter, route.page_index)) continue;
         if (!routeNeedsKindOrReason(route.route, .ocr, route.reason_mask)) continue;
         try writeRecordSeparator(writer, jsonl, wrote);
-        try writeRequestRecord(writer, result, context, .ocr, request_index, route.page_index, null, route.bbox, route.route, route.reason_mask, route.signals, event_index, span_lookup, block_lookup);
+        try writeRequestRecord(writer, result, context, .ocr, request_index, route.page_index, null, route.bbox, route.route, route.reason_mask, route.signals, null, event_index, span_lookup, block_lookup);
         request_index += 1;
     }
     for (result.region_routes) |route| {
         if (!matchesPage(page_filter, route.page_index)) continue;
         if (primaryRegionKind(route.route, route.reason_mask)) |kind| {
             try writeRecordSeparator(writer, jsonl, wrote);
-            try writeRequestRecord(writer, result, context, kind, request_index, route.page_index, route.region_index, route.bbox, route.route, route.reason_mask, route.signals, event_index, span_lookup, block_lookup);
+            try writeRequestRecord(writer, result, context, kind, request_index, route.page_index, route.region_index, route.bbox, route.route, route.reason_mask, route.signals, null, event_index, span_lookup, block_lookup);
             request_index += 1;
         }
     }
@@ -458,7 +460,7 @@ fn writeRequests(
             if (traceRequestSeenEarlier(result, trace_index, kind, record.page_index, record.region_index)) continue;
             const bbox = traceBBox(result, record) orelse layout.BBox{ .x0 = 0, .y0 = 0, .x1 = 0, .y1 = 0 };
             try writeRecordSeparator(writer, jsonl, wrote);
-            try writeRequestRecord(writer, result, context, kind, request_index, record.page_index, record.region_index, bbox, record.route, record.reason_mask, zeroSignals(), event_index, span_lookup, block_lookup);
+            try writeRequestRecord(writer, result, context, kind, request_index, record.page_index, record.region_index, bbox, record.route, record.reason_mask, zeroSignals(), null, event_index, span_lookup, block_lookup);
             request_index += 1;
         }
     }
@@ -553,10 +555,24 @@ fn writeFormulaAttempts(
         try writer.writeAll("\",\"specialist_kind\":\"formula\",\"attempt_index\":0,\"attempt_status\":\"");
         try writer.writeAll(@tagName(attempt.status));
         try writer.writeAll("\",\"failure_stage\":");
-        if (formulaStatusFailed(attempt.status)) try writer.writeAll("\"recognize\"") else try writer.writeAll("null");
+        if (formulaStatusFailed(attempt.status)) {
+            try writer.writeByte('"');
+            try writer.writeAll(formulaFailureStage(attempt));
+            try writer.writeByte('"');
+        } else try writer.writeAll("null");
         try writer.writeAll(",\"selected\":");
         try writer.print("{}", .{attempt.status == .completed});
-        try writer.print(",\"config\":{{\"crop_image_path\":null}},\"execution\":{{\"duration_ms\":{},\"exit_code\":", .{attempt.duration_ms});
+        try writer.writeAll(",\"config\":{\"crop_image_path\":null,\"crop_path_redacted\":true,\"crop_backed\":");
+        try writer.print("{}", .{attempt.crop_backed});
+        try writer.writeAll(",\"crop_bbox\":");
+        if (attempt.crop_bbox) |bbox| try writeBBoxJson(writer, bbox) else try writer.writeAll("null");
+        try writer.writeAll(",\"crop_dpi\":");
+        if (attempt.crop_dpi) |dpi| try writer.print("{}", .{dpi}) else try writer.writeAll("null");
+        try writer.writeAll(",\"crop_pixel_width\":");
+        if (attempt.crop_pixel_width) |width| try writer.print("{}", .{width}) else try writer.writeAll("null");
+        try writer.writeAll(",\"crop_pixel_height\":");
+        if (attempt.crop_pixel_height) |height| try writer.print("{}", .{height}) else try writer.writeAll("null");
+        try writer.print("}},\"execution\":{{\"duration_ms\":{},\"exit_code\":", .{attempt.duration_ms});
         if (attempt.exit_code) |code| try writer.print("{}", .{code}) else try writer.writeAll("null");
         try writer.writeAll("},\"quality\":{\"formula_count\":");
         try writer.print("{}", .{formulaArtifactCount(result, attempt.request_id)});
@@ -599,11 +615,11 @@ fn writeFormulaResponses(
             try writer.writeAll("null");
         }
         try writer.writeAll(",\"spans\":[],\"tables\":[],\"blocks\":[],\"formulas\":");
-        try writeFormulaArtifactArray(writer, result, attempt.request_id);
+        try writeFormulaArtifactArray(writer, result, context, attempt);
         try writer.writeAll(",\"entities\":[],\"debug_assets\":[],\"warnings\":[],\"errors\":[");
         try writeFormulaAttemptDiagnostic(writer, attempt);
         try writer.writeByte(']');
-        try writeProvenance(writer, context, "specialist-response-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula", formulaAttemptConfidence(result, attempt.request_id));
+        try writeProvenance(writer, context, "specialist-response-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula_model", formulaAttemptConfidence(result, attempt.request_id));
         try writer.writeByte('}');
     }
 }
@@ -632,7 +648,11 @@ fn writeFormulaResults(
         try writeJsonEscaped(writer, attempt.request_id);
         try writer.writeAll("\",\"specialist_id\":\"");
         try writeJsonEscaped(writer, attempt.specialist_id);
-        try writer.print("\",\"specialist_kind\":\"formula\",\"status\":\"completed\",\"source_kind\":\"formula\",\"selected_attempt_id\":\"specialist-attempt-formula-region-{d}-0\",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":0,\"tables\":0,\"blocks\":0,\"formulas\":{},\"entities\":0}},\"span_ids\":[],\"table_ids\":[],\"block_ids\":[],\"formula_ids\":[", .{ attempt.region_index, formulaAttemptConfidence(result, attempt.request_id), artifact_count });
+        const bbox = formulaAttemptBBox(result, attempt) orelse layout.BBox{};
+        const formula_span_count = countFormulaModelSpans(result, attempt.page_index, bbox);
+        try writer.print("\",\"specialist_kind\":\"formula\",\"status\":\"completed\",\"source_kind\":\"formula_model\",\"selected_attempt_id\":\"specialist-attempt-formula-region-{d}-0\",\"confidence\":{d:.3},\"artifact_counts\":{{\"spans\":{},\"tables\":0,\"blocks\":0,\"formulas\":{},\"entities\":0}},\"span_ids\":", .{ attempt.region_index, formulaAttemptConfidence(result, attempt.request_id), formula_span_count, artifact_count });
+        try writeSpanIdArray(writer, result, attempt.page_index, bbox, .formula_model, null);
+        try writer.writeAll(",\"table_ids\":[],\"block_ids\":[],\"formula_ids\":[");
         var first = true;
         for (result.formula_artifacts) |artifact| {
             if (!std.mem.eql(u8, artifact.request_id, attempt.request_id)) continue;
@@ -643,24 +663,33 @@ fn writeFormulaResults(
             first = false;
         }
         try writer.writeAll("],\"entity_ids\":[]");
-        try writeProvenance(writer, context, "specialist-result-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula", formulaAttemptConfidence(result, attempt.request_id));
+        try writeProvenance(writer, context, "specialist-result-formula", attempt.page_index, formulaAttemptBBox(result, attempt), "formula_model", formulaAttemptConfidence(result, attempt.request_id));
         try writer.writeByte('}');
     }
 }
 
-fn writeFormulaArtifactArray(writer: anytype, result: anytype, request_id: []const u8) !void {
+fn writeFormulaArtifactArray(writer: anytype, result: anytype, context: RenderContext, attempt: anytype) !void {
     try writer.writeByte('[');
     var first = true;
     for (result.formula_artifacts) |artifact| {
-        if (!std.mem.eql(u8, artifact.request_id, request_id)) continue;
+        if (!std.mem.eql(u8, artifact.request_id, attempt.request_id)) continue;
         if (!first) try writer.writeByte(',');
-        try writer.writeAll("{\"formula_id\":\"");
+        try writeRecordHeader(writer, "formula");
+        try writeDocumentFields(writer, context);
+        try writer.print(",\"page_index\":{},\"region_index\":{},\"request_id\":\"", .{ artifact.page_index, artifact.region_index });
+        try writeJsonEscaped(writer, artifact.request_id);
+        try writer.writeAll("\",\"specialist_id\":\"");
+        try writeJsonEscaped(writer, artifact.specialist_id);
+        try writer.writeAll("\",\"formula_id\":\"");
         try writeJsonEscaped(writer, artifact.formula_id);
         try writer.writeAll("\",\"text\":\"");
         try writeJsonEscaped(writer, artifact.text);
         try writer.writeAll("\",\"format\":\"");
         try writeJsonEscaped(writer, artifact.format);
-        try writer.print("\",\"confidence\":{d:.3}}}", .{artifact.confidence});
+        try writer.print("\",\"confidence\":{d:.3},\"bbox\":", .{artifact.confidence});
+        try writeOptionalBBoxJson(writer, formulaAttemptBBox(result, attempt));
+        try writeProvenance(writer, context, artifact.formula_id, artifact.page_index, formulaAttemptBBox(result, attempt), "formula_model", artifact.confidence);
+        try writer.writeByte('}');
         first = false;
     }
     try writer.writeByte(']');
@@ -699,6 +728,18 @@ fn formulaStatusFailed(status: anytype) bool {
     };
 }
 
+fn formulaFailureStage(attempt: anytype) []const u8 {
+    const code = attempt.diagnostic_code orelse return "recognize";
+    return if (std.mem.startsWith(u8, code, "formula_crop_") or
+        std.mem.startsWith(u8, code, "formula_rasterizer_") or
+        std.mem.eql(u8, code, "invalid_formula_crop_bbox") or
+        std.mem.eql(u8, code, "invalid_formula_crop_geometry") or
+        std.mem.eql(u8, code, "invalid_formula_crop_image"))
+        "rasterize"
+    else
+        "recognize";
+}
+
 fn writeFormulaAttemptDiagnostic(writer: anytype, attempt: anytype) !void {
     const code = attempt.diagnostic_code orelse return;
     try writer.writeAll("{\"code\":\"");
@@ -720,6 +761,7 @@ fn writeRequestRecord(
     route: complexity.RouteDecision,
     reason_mask: u32,
     signals: complexity.SignalScores,
+    crop_image_path: ?[]const u8,
     event_index: ?*u64,
     span_lookup: ?*const SpanPageLookup,
     block_lookup: ?*const BlockPageLookup,
@@ -754,7 +796,15 @@ fn writeRequestRecord(
     try writeBlockIdArray(writer, result, page_index, bbox, block_lookup);
     try writer.writeAll(",\"blocks\":");
     try writeBlockContextArray(writer, result, page_index, bbox, block_lookup);
-    try writer.writeAll(",\"ruling_lines\":[],\"crop_image_path\":null,\"debug_asset_ids\":");
+    try writer.writeAll(",\"ruling_lines\":[],\"crop_image_path\":");
+    if (crop_image_path) |path| {
+        try writer.writeByte('"');
+        try writeJsonEscaped(writer, path);
+        try writer.writeByte('"');
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll(",\"debug_asset_ids\":");
     try writeDebugAssetIds(writer, page_index);
     try writeProvenance(writer, context, "specialist-request", page_index, bbox, "lifecycle", routeConfidence(route));
     try writer.writeByte('}');
@@ -1134,7 +1184,7 @@ fn writeRequestedOutputs(writer: anytype, kind: SpecialistKind) !void {
     try writer.writeByte(']');
 }
 
-const SpanFilter = enum { all, fresh_ocr };
+const SpanFilter = enum { all, fresh_ocr, formula_model };
 
 fn writeSpanIdArray(writer: anytype, result: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFilter, span_lookup: ?*const SpanPageLookup) !void {
     try writer.writeByte('[');
@@ -1241,7 +1291,16 @@ fn includeSpan(span: anytype, page_index: u32, bbox: layout.BBox, filter: SpanFi
     return switch (filter) {
         .all => true,
         .fresh_ocr => span.chosen_source == .fresh_ocr or span.span.source == .fresh_ocr,
+        .formula_model => span.chosen_source == .formula_model or span.span.source == .formula_model,
     };
+}
+
+fn countFormulaModelSpans(result: anytype, page_index: u32, bbox: layout.BBox) usize {
+    var count: usize = 0;
+    for (result.reconciled.spans) |span| {
+        if (includeSpan(span, page_index, bbox, .formula_model)) count += 1;
+    }
+    return count;
 }
 
 fn countFreshOcrSpans(result: anytype, page_index: u32, bbox: layout.BBox, span_lookup: ?*const SpanPageLookup) usize {
@@ -1346,6 +1405,11 @@ fn writeReasonArray(writer: anytype, mask: u32) !void {
 
 fn writeBBoxJson(writer: anytype, box: layout.BBox) !void {
     try writer.print("{{\"x0\":{d:.3},\"y0\":{d:.3},\"x1\":{d:.3},\"y1\":{d:.3}}}", .{ box.x0, box.y0, box.x1, box.y1 });
+}
+
+fn writeOptionalBBoxJson(writer: anytype, box: ?layout.BBox) !void {
+    if (box) |value| return writeBBoxJson(writer, value);
+    try writer.writeAll("null");
 }
 
 fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {

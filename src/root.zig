@@ -2967,6 +2967,178 @@ pub const Document = struct {
         return null;
     }
 
+    /// Rasterize one routed formula region to an ephemeral PNG. The crop is
+    /// page-clamped and expressed in Poppler's top-left pixel coordinates.
+    /// Rotated pages remain explicit unsupported outcomes until their geometry
+    /// mapping is fixture-gated.
+    pub fn rasterizeFormulaRegionDetailed(
+        self: *Document,
+        allocator: std.mem.Allocator,
+        page_idx: usize,
+        bbox: layout.BBox,
+        config: specialists.SpecialistConfig,
+    ) !specialists.FormulaCropOutcome {
+        if (page_idx >= self.pages.items.len) return error.PageNotFound;
+        const source_path = self.source_path orelse return .{
+            .status = .unavailable,
+            .diagnostic_code = "formula_crop_requires_file",
+        };
+        const page = self.pages.items[page_idx];
+        const normalized_rotation = @mod(page.rotation, 360);
+        if (normalized_rotation != 0) return .{
+            .status = .unavailable,
+            .diagnostic_code = "formula_crop_rotation_unsupported",
+        };
+
+        const page_bbox = layout.BBox{
+            .x0 = page.media_box[0],
+            .y0 = page.media_box[1],
+            .x1 = page.media_box[2],
+            .y1 = page.media_box[3],
+        };
+        const geometry = formulaCropGeometry(page_bbox, bbox, config.crop_padding_points, config.crop_dpi) orelse return .{
+            .status = .invalid_output,
+            .diagnostic_code = "invalid_formula_crop_geometry",
+        };
+
+        const page_number = try std.fmt.allocPrint(allocator, "{}", .{page_idx + 1});
+        defer allocator.free(page_number);
+        const dpi_arg = try std.fmt.allocPrint(allocator, "{}", .{config.crop_dpi});
+        defer allocator.free(dpi_arg);
+        const x_arg = try std.fmt.allocPrint(allocator, "{}", .{geometry.x});
+        defer allocator.free(x_arg);
+        const y_arg = try std.fmt.allocPrint(allocator, "{}", .{geometry.y});
+        defer allocator.free(y_arg);
+        const width_arg = try std.fmt.allocPrint(allocator, "{}", .{geometry.width});
+        defer allocator.free(width_arg);
+        const height_arg = try std.fmt.allocPrint(allocator, "{}", .{geometry.height});
+        defer allocator.free(height_arg);
+
+        const filename = try std.fmt.allocPrint(allocator, "pdf-parser-formula-crop-{x}-{x}", .{ page_idx, runtime.nanoTimestamp() });
+        defer allocator.free(filename);
+        const temp_dir: []const u8 = if (builtin.os.tag == .windows) "." else "/tmp";
+        const prefix = try std.fs.path.join(allocator, &.{ temp_dir, filename });
+        defer allocator.free(prefix);
+        const image_path = try std.fmt.allocPrint(allocator, "{s}.png", .{prefix});
+        var keep_image_path = false;
+        defer if (!keep_image_path) {
+            runtime.deleteFilePath(image_path);
+            allocator.free(image_path);
+        };
+
+        const grayscale_argv = [_][]const u8{
+            config.rasterizer_executable, "-q",        "-png",    "-gray",     "-singlefile", "-r",        dpi_arg,
+            "-f",                         page_number, "-l",      page_number, "-x",          x_arg,       "-y",
+            y_arg,                        "-W",        width_arg, "-H",        height_arg,    source_path, prefix,
+        };
+        const color_argv = [_][]const u8{
+            config.rasterizer_executable, "-q",        "-png", "-singlefile", "-r", dpi_arg,
+            "-f",                         page_number, "-l",   page_number,   "-x", x_arg,
+            "-y",                         y_arg,       "-W",   width_arg,     "-H", height_arg,
+            source_path,                  prefix,
+        };
+        const argv = if (config.crop_grayscale) &grayscale_argv else &color_argv;
+        const started_ns = runtime.nanoTimestamp();
+        const result = runtime.runCapture(allocator, argv, .{
+            .stdout_limit = 64 * 1024,
+            .stderr_limit = config.stderr_limit,
+            .timeout_ms = config.timeout_ms,
+        }) catch |err| switch (err) {
+            error.FileNotFound => return .{
+                .status = .unavailable,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "formula_rasterizer_unavailable",
+            },
+            error.Timeout => return .{
+                .status = .timeout,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "formula_rasterizer_timeout",
+            },
+            error.StreamTooLong => return .{
+                .status = .invalid_output,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "formula_rasterizer_output_limit",
+            },
+            else => return err,
+        };
+        defer allocator.free(result.stdout);
+        errdefer allocator.free(result.stderr);
+        switch (result.term) {
+            .exited => |code| if (code != 0) return .{
+                .status = .failed,
+                .exit_code = code,
+                .stderr = result.stderr,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "formula_rasterizer_failed",
+            },
+            else => return .{
+                .status = .failed,
+                .stderr = result.stderr,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "formula_rasterizer_failed",
+            },
+        }
+        const dimensions = readPngDimensions(allocator, image_path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return .{
+                .status = .invalid_output,
+                .stderr = result.stderr,
+                .duration_ms = elapsedMilliseconds(started_ns),
+                .diagnostic_code = "invalid_formula_crop_image",
+            },
+        };
+        keep_image_path = true;
+        return .{
+            .status = .completed,
+            .input = .{
+                .image_path = image_path,
+                .pdf_bbox = geometry.pdf_bbox,
+                .pixel_width = dimensions.width,
+                .pixel_height = dimensions.height,
+                .dpi = config.crop_dpi,
+            },
+            .stderr = result.stderr,
+            .duration_ms = elapsedMilliseconds(started_ns),
+        };
+    }
+
+    const FormulaCropGeometry = struct {
+        pdf_bbox: layout.BBox,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+    };
+
+    fn formulaCropGeometry(page_bbox: layout.BBox, bbox: layout.BBox, padding: f64, dpi: u32) ?FormulaCropGeometry {
+        const crop_bbox = layout.BBox{
+            .x0 = @max(page_bbox.x0, bbox.x0 - padding),
+            .y0 = @max(page_bbox.y0, bbox.y0 - padding),
+            .x1 = @min(page_bbox.x1, bbox.x1 + padding),
+            .y1 = @min(page_bbox.y1, bbox.y1 + padding),
+        };
+        if (!(std.math.isFinite(page_bbox.x0) and std.math.isFinite(page_bbox.y0) and
+            std.math.isFinite(page_bbox.x1) and std.math.isFinite(page_bbox.y1) and
+            std.math.isFinite(crop_bbox.x0) and std.math.isFinite(crop_bbox.y0) and
+            std.math.isFinite(crop_bbox.x1) and std.math.isFinite(crop_bbox.y1)) or
+            page_bbox.x1 <= page_bbox.x0 or page_bbox.y1 <= page_bbox.y0 or
+            crop_bbox.x1 <= crop_bbox.x0 or crop_bbox.y1 <= crop_bbox.y0) return null;
+        const scale = @as(f64, @floatFromInt(dpi)) / 72.0;
+        const left = @floor((crop_bbox.x0 - page_bbox.x0) * scale);
+        const top = @floor((page_bbox.y1 - crop_bbox.y1) * scale);
+        const right = @ceil((crop_bbox.x1 - page_bbox.x0) * scale);
+        const bottom = @ceil((page_bbox.y1 - crop_bbox.y0) * scale);
+        const max_u32_f = @as(f64, @floatFromInt(std.math.maxInt(u32)));
+        if (left < 0 or top < 0 or right <= left or bottom <= top or right > max_u32_f or bottom > max_u32_f) return null;
+        return .{
+            .pdf_bbox = crop_bbox,
+            .x = @intFromFloat(left),
+            .y = @intFromFloat(top),
+            .width = @intFromFloat(right - left),
+            .height = @intFromFloat(bottom - top),
+        };
+    }
+
     /// Rasterize a page to a temporary PNG for an OCR engine.
     /// Returns null for memory-opened documents because subprocess rasterizers
     /// need a filesystem PDF path. Caller owns `image_path` and should delete it.
@@ -5430,4 +5602,30 @@ test "search candidate union ownership is safe across every allocation failure" 
         searchCandidateUnionAllocationProbe,
         .{},
     );
+}
+
+test "formula crop geometry is padded clamped and top-left mapped" {
+    const geometry = Document.formulaCropGeometry(
+        .{ .x0 = 0, .y0 = 0, .x1 = 612, .y1 = 792 },
+        .{ .x0 = 100, .y0 = 200, .x1 = 200, .y1 = 250 },
+        4,
+        144,
+    ).?;
+    try std.testing.expectEqual(@as(u32, 192), geometry.x);
+    try std.testing.expectEqual(@as(u32, 1076), geometry.y);
+    try std.testing.expectEqual(@as(u32, 216), geometry.width);
+    try std.testing.expectEqual(@as(u32, 116), geometry.height);
+    try std.testing.expectEqual(@as(f64, 96), geometry.pdf_bbox.x0);
+    try std.testing.expectEqual(@as(f64, 254), geometry.pdf_bbox.y1);
+
+    const clamped = Document.formulaCropGeometry(
+        .{ .x0 = 0, .y0 = 0, .x1 = 100, .y1 = 100 },
+        .{ .x0 = -10, .y0 = 90, .x1 = 12, .y1 = 110 },
+        4,
+        72,
+    ).?;
+    try std.testing.expectEqual(@as(u32, 0), clamped.x);
+    try std.testing.expectEqual(@as(u32, 0), clamped.y);
+    try std.testing.expectEqual(@as(u32, 16), clamped.width);
+    try std.testing.expectEqual(@as(u32, 14), clamped.height);
 }

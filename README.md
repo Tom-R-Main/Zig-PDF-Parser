@@ -13,9 +13,9 @@ protocol all have test coverage.
 
 The project is still pre-1.0, so public schema and API details may change until
 the output contract graduates to `1.0.0`. The deterministic native path and
-artifact JSONL shape are the primary integration surfaces today. Non-OCR
-specialist execution, formula recognition, and the remaining hard-document
-accuracy work are active development areas.
+artifact JSONL shape are the primary integration surfaces today. Formula is the
+first opt-in non-OCR specialist; the remaining specialist families and
+hard-document accuracy work are active development areas.
 
 ## Features
 
@@ -383,11 +383,13 @@ and `debug_asset` records. `artifact-jsonl` emits the same contract as a
 manifest-first batch JSONL stream for host applications and ingestion
 pipelines. Schema `0.11.0` added one `specialist_attempt` record per OCR
 invocation, including configuration, bounded diagnostics, quality signals, and
-the selected attempt. Schema `0.12.0` adds document-global specialist request
+the selected attempt. Schema `0.12.0` added document-global specialist request
 identity across batch/streaming output and the first optional, bounded formula
-JSONL subprocess lifecycle. The formula adapter currently receives native
-span/block context with `crop_image_path:null`; `formula_recognition` therefore
-remains false until visual crop integration and quality proof land.
+JSONL subprocess lifecycle. Schema `0.13.0` closes the visual loop for
+file-backed, unrotated pages: routed formula regions become deterministic,
+page-clamped PNG crops; successful responses replace overlapping native spans
+with `formula_model` spans and provenance-bearing formula artifacts. Crop or
+specialist failures leave native text intact.
 `stream-jsonl` emits page-by-page lifecycle events and artifacts as
 soon as each page is processed: `document_manifest`, `page_started`, route
 traces, specialist requests/results, page artifacts, `page_finished`, optional
@@ -503,9 +505,10 @@ page/region bbox, route reasons, signal scores, native spans/blocks, optional
 crop/debug asset references, and provenance. By default the parser emits
 requests and does not invoke table/formula/layout/entity specialists. Existing
 Tesseract OCR output is represented as `specialist_response` and
-`specialist_result` records when OCR runs. Future subprocess specialists should
-use JSONL-over-stdin/stdout: one request JSON object in, one response JSON
-object out.
+`specialist_result` records when OCR runs. An explicitly enabled formula
+specialist uses JSONL-over-stdin/stdout: one crop-backed request JSON object in,
+one strictly linked response JSON object out. Table, layout, and entity
+specialists remain request-only.
 
 Optional specialist flags:
 
@@ -519,10 +522,12 @@ pdf-parser extract-adaptive \
 ```
 
 The minimal specialist config shape is a JSON object with optional `ocr`,
-`table`, `formula`, `layout`, and `entity` entries. Each entry may include
-`enabled`, `executable`, `args`, and `timeout_ms`. The config is accepted and
-carried as adapter plumbing in this sprint; non-OCR specialist invocation is
-intentionally not enabled by default.
+`table`, `formula`, `layout`, and `entity` entries. Formula entries may include
+`enabled`, `executable`, `args`, `rasterizer_executable`, `crop_dpi`,
+`crop_padding_points`, `crop_grayscale`, and `timeout_ms`. Formula invocation
+is opt-in and model-neutral; no recognizer package is bundled. Memory-opened
+documents and rotated pages produce explicit crop-stage outcomes rather than
+silently invoking a text-only fallback.
 
 The document manifest is the top-level intelligence summary: input SHA256,
 parser/schema versions, page count, encrypted/corrupt flags, route counts,
@@ -642,7 +647,7 @@ and ruling lines, invokes OCR only for scanned routes, then reconciles native,
 OCR, table, formula, and form spans with typed provenance.
 
 The versioned JSON, artifact JSONL, and streaming JSONL schema is currently
-`0.12.0`, with parser build identity `0.4.0-dev` after the `v0.3.0` release.
+`0.13.0`, with parser build identity `0.4.0-dev` after the `v0.3.0` release.
 Every emitted record carries a `provenance` envelope with document and
 source identity, input hash context, artifact id, page/bbox, source kind,
 confidence, related span/block/chunk ids, route trace ids, and route reasons.

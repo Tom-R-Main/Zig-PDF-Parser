@@ -6,10 +6,10 @@ should depend on the records documented here.
 
 ## Version
 
-Current schema version: `0.12.0`
+Current schema version: `0.13.0`
 
 Current parser build identity: `0.4.0-dev`. The `v0.3.0` release emitted schema
-`0.11.0`; the development suffix keeps post-release schema `0.12.0` artifacts
+`0.11.0`; the development suffix keeps post-release schema `0.13.0` artifacts
 distinguishable until the next release is tagged.
 
 The project is still pre-`1.0.0`, so incompatible schema changes may happen.
@@ -34,16 +34,26 @@ JSON output is a `document_manifest` object with arrays of typed records.
 but records are produced page by page so host applications can persist partial
 artifacts and enqueue embeddings before the document finishes.
 
-Schema `0.12.0` makes specialist request identity document-global across batch
+Schema `0.13.0` closes the first formula-specialist loop for file-backed,
+unrotated pages. Routed formula regions are padded, clamped to the page, mapped
+from PDF coordinates to raster coordinates, and rendered as deterministic PNG
+crops before recognition. The public request keeps `crop_image_path:null`; the
+ephemeral path appears only in the request sent to the configured child and is
+deleted after the attempt. Successful formula artifacts become
+`formula_model` spans and replace overlapping native or fallback text inside
+the routed region. Rasterizer and recognizer failures preserve native content.
+Nested formula artifacts now carry versioned record identity and provenance,
+and capability coverage reports `formula_recognition:true` to advertise this
+opt-in adapter support.
+
+Schema `0.12.0` made specialist request identity document-global across batch
 and streaming output, guarantees each route-trace request id resolves to exactly
 one request record, and adds the first configured formula subprocess lifecycle.
 Formula requests are sent as bounded JSONL over stdin and accept exactly one
 strictly linked response line. Formula attempts preserve completed, empty,
 unavailable, failed, timeout, and invalid-output outcomes; completed formula
 artifacts retain owned text, format, confidence, request identity, and
-provenance. Formula requests currently carry native span/block context and
-`crop_image_path:null`, so capability coverage continues to report
-`formula_recognition:false` until deterministic visual crop integration lands.
+provenance. Formula requests carried native span/block context but no crop.
 Only `completed` and `empty` are accepted from an exit-zero child response.
 Unavailable, failed, timeout, output-limit, and invalid-output statuses are
 derived locally from spawn, process, timeout, bound, and validation outcomes.
@@ -198,6 +208,9 @@ native `blocks`, `ruling_lines`, optional `crop_image_path`,
 Region request ids use a document-global region index in both batch and
 page-scoped streaming output. A route trace lists only its primary request, and
 every listed request id resolves exactly once in the same output lifecycle.
+For formula execution, the public artifact remains redacted with
+`crop_image_path:null`; only the bounded child-process request contains the
+ephemeral local crop path.
 
 ### `specialist_attempt`
 
@@ -209,10 +222,13 @@ provenance. OCR config records DPI, PSM, language, grayscale mode, and timeout;
 execution records duration, exit code, and raster dimensions; quality records
 span/character counts, mean confidence, and text coverage.
 
-Formula attempt config records `crop_image_path:null` in this first contract
-slice. Execution records duration and exit code; quality records the formula
-artifact count. Formula attempts are selected only when the response is
-completed and contains at least one valid formula artifact.
+Formula attempt config records `crop_image_path:null`,
+`crop_path_redacted:true`, whether a crop backed the attempt, and its bbox,
+DPI, and pixel dimensions when available. Execution records total crop and
+recognition duration plus exit code; quality records the formula artifact
+count. Formula attempts are selected only when the response is completed and
+contains one valid formula artifact. `failure_stage` distinguishes rasterize
+failures from recognize failures.
 
 `attempt_status` is `not_invoked`, `completed`, `empty`, `unavailable`,
 `failed`, `timeout`, or `invalid_output`. A bounded OCR policy may emit a
@@ -232,16 +248,19 @@ Stable fields include `request_id`, `response_id`, `specialist_id`,
 `specialist_kind`, `status`, `confidence`, returned `spans`, `tables`, `blocks`,
 `formulas`, `entities`, `debug_assets`, `warnings`, `errors`, and provenance.
 OCR responses also carry `attempt_count` and `selected_attempt_id`. Formula
-responses carry nested formula artifacts with `formula_id`, `text`, `format`,
-and confidence. Status remains one of `completed`, `empty`, `unavailable`,
-`failed`, `timeout`, or `invalid_output` without collapsing failures.
+responses carry nested, versioned formula artifacts with document/source
+identity, page/region/request identity, bbox, `formula_id`, text, format,
+confidence, and `formula_model` provenance. Status remains one of `completed`,
+`empty`, `unavailable`, `failed`, `timeout`, or `invalid_output` without
+collapsing failures.
 
 ### `specialist_result`
 
 Compact result summary tying returned specialist artifacts back to their
 request. OCR results report fresh OCR span ids and counts. Completed configured
-formula results report owned formula ids and counts. Table, layout, and entity
-specialists remain future protocol consumers.
+formula results report owned formula ids plus the reconciled `formula_model`
+span ids and counts. Table, layout, and entity specialists remain future
+protocol consumers.
 
 ### `rag_chunk`
 
@@ -401,19 +420,30 @@ Minimal specialist config shape:
 {
   "ocr": { "enabled": true, "executable": "tesseract", "args": [], "timeout_ms": 30000 },
   "table": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
-  "formula": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
+  "formula": {
+    "enabled": false,
+    "executable": null,
+    "args": [],
+    "rasterizer_executable": "pdftoppm",
+    "crop_dpi": 200,
+    "crop_padding_points": 4,
+    "crop_grayscale": true,
+    "timeout_ms": 30000
+  },
   "layout": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 },
   "entity": { "enabled": false, "executable": null, "args": [], "timeout_ms": 30000 }
 }
 ```
 
 The config format is intentionally small and bounded to 256 KiB, 32 arguments,
-4 KiB per executable/argument, and a 1–120000 ms timeout. In schema `0.12.0`, an
-enabled `formula` entry is parsed and invoked. Its executable reads one
-`specialist_request` JSONL record from stdin and writes one
+4 KiB per executable/argument, a 72–600 crop DPI, 0–72 points of crop padding,
+and a 1–120000 ms timeout. In schema `0.13.0`, an enabled `formula` entry on a
+file-backed, unrotated page receives a deterministic PNG crop. Its executable
+reads one `specialist_request` JSONL record from stdin and writes one
 `specialist_response` JSONL record to stdout. The parser remains model-neutral
-and does not depend on a specific Python package or hosted model. Other entries
-remain reserved adapter configuration.
+and does not depend on a specific Python package or hosted model. Memory-opened
+documents and rotated pages produce explicit rasterize-stage outcomes. Other
+entries remain reserved adapter configuration.
 
 ## Host Packaging Modes
 

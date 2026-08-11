@@ -156,6 +156,108 @@ pub fn reconcile(
     };
 }
 
+/// Replace native candidate text inside successfully recognized formula
+/// regions, then rebuild downstream blocks and chunks from the resulting span
+/// set. Failed or empty specialist attempts never call this path, preserving
+/// the native fallback unchanged.
+pub fn applyFormulaArtifacts(
+    doc: *ReconciledDocument,
+    artifacts: anytype,
+    region_routes: anytype,
+    options: ReconcileOptions,
+) !void {
+    if (artifacts.len == 0) return;
+    const allocator = doc.allocator;
+
+    var formula_spans: std.ArrayList(ReconciledSpan) = .empty;
+    errdefer {
+        for (formula_spans.items) |span| freeReconciledSpan(allocator, span);
+        formula_spans.deinit(allocator);
+    }
+    for (artifacts) |artifact| {
+        const route = formulaRouteForArtifact(region_routes, artifact.page_index, artifact.region_index) orelse
+            return error.MissingFormulaRoute;
+        const candidate = try copySpan(allocator, TextSpan.init(.{
+            .page_index = artifact.page_index,
+            .bbox = route.bbox,
+            .text = artifact.text,
+            .source = .formula_model,
+            .confidence = artifact.confidence,
+            .block_id = route.layout_block_index,
+        }), .formula_model, 1.0);
+        formula_spans.append(allocator, candidate) catch |err| {
+            freeReconciledSpan(allocator, candidate);
+            return err;
+        };
+    }
+
+    var retained_count: usize = 0;
+    for (doc.spans) |span| {
+        if (!spanSuppressedByFormula(span, artifacts, region_routes, options.overlap_threshold)) retained_count += 1;
+    }
+    const replacement_spans = try allocator.alloc(ReconciledSpan, retained_count + formula_spans.items.len);
+    errdefer allocator.free(replacement_spans);
+    var next: usize = 0;
+    for (doc.spans) |span| {
+        if (spanSuppressedByFormula(span, artifacts, region_routes, options.overlap_threshold)) continue;
+        replacement_spans[next] = span;
+        next += 1;
+    }
+    @memcpy(replacement_spans[next..], formula_spans.items);
+    if (!options.preserve_input_order) std.mem.sort(ReconciledSpan, replacement_spans, {}, spanLessThan);
+
+    const replacement_blocks = try buildBlocks(allocator, replacement_spans, options);
+    errdefer {
+        for (replacement_blocks) |block| allocator.free(block.text);
+        allocator.free(replacement_blocks);
+    }
+    const replacement_chunks = try buildChunks(allocator, replacement_blocks, options);
+    errdefer {
+        for (replacement_chunks) |chunk| {
+            allocator.free(chunk.source_id);
+            allocator.free(chunk.content);
+        }
+        allocator.free(replacement_chunks);
+    }
+
+    for (doc.spans) |span| {
+        if (spanSuppressedByFormula(span, artifacts, region_routes, options.overlap_threshold)) freeReconciledSpan(allocator, span);
+    }
+    allocator.free(doc.spans);
+    for (doc.blocks) |block| allocator.free(block.text);
+    allocator.free(doc.blocks);
+    for (doc.chunks) |chunk| {
+        allocator.free(chunk.source_id);
+        allocator.free(chunk.content);
+    }
+    allocator.free(doc.chunks);
+
+    doc.spans = replacement_spans;
+    doc.blocks = replacement_blocks;
+    doc.chunks = replacement_chunks;
+    formula_spans.deinit(allocator);
+}
+
+fn formulaRouteForArtifact(region_routes: anytype, page_index: u32, region_index: u32) ?@TypeOf(region_routes[0]) {
+    for (region_routes) |route| {
+        if (route.page_index == page_index and route.region_index == region_index) return route;
+    }
+    return null;
+}
+
+fn spanSuppressedByFormula(span: ReconciledSpan, artifacts: anytype, region_routes: anytype, overlap_threshold: f64) bool {
+    switch (span.chosen_source) {
+        .native_pdf, .embedded_ocr, .poppler_text => {},
+        else => return false,
+    }
+    for (artifacts) |artifact| {
+        if (span.span.page_index != artifact.page_index) continue;
+        const route = formulaRouteForArtifact(region_routes, artifact.page_index, artifact.region_index) orelse continue;
+        if (intersectionOverMinArea(span.span.bbox, route.bbox) >= overlap_threshold) return true;
+    }
+    return false;
+}
+
 pub fn renderMarkdown(allocator: std.mem.Allocator, doc: *const ReconciledDocument) ![]u8 {
     var output: std.ArrayList(u8) = .empty;
     errdefer output.deinit(allocator);

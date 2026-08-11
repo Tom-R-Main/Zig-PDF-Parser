@@ -139,6 +139,10 @@ pub const FormulaSpecialistKind = enum {
 pub const SpecialistConfig = struct {
     executable: []const u8,
     extra_args: []const []const u8 = &.{},
+    rasterizer_executable: []const u8 = "pdftoppm",
+    crop_dpi: u32 = 200,
+    crop_padding_points: f64 = 4,
+    crop_grayscale: bool = true,
     timeout_ms: u32 = 30_000,
     stdout_limit: usize = 16 * 1024 * 1024,
     stderr_limit: usize = 1024 * 1024,
@@ -148,12 +152,17 @@ pub const OwnedSpecialistConfig = struct {
     allocator: std.mem.Allocator,
     executable: []u8,
     extra_args: [][]u8,
+    rasterizer_executable: []u8,
+    crop_dpi: u32,
+    crop_padding_points: f64,
+    crop_grayscale: bool,
     timeout_ms: u32,
 
     pub fn deinit(self: *OwnedSpecialistConfig) void {
         self.allocator.free(self.executable);
         for (self.extra_args) |arg| self.allocator.free(arg);
         self.allocator.free(self.extra_args);
+        self.allocator.free(self.rasterizer_executable);
         self.* = undefined;
     }
 
@@ -161,6 +170,10 @@ pub const OwnedSpecialistConfig = struct {
         return .{
             .executable = self.executable,
             .extra_args = self.extra_args,
+            .rasterizer_executable = self.rasterizer_executable,
+            .crop_dpi = self.crop_dpi,
+            .crop_padding_points = self.crop_padding_points,
+            .crop_grayscale = self.crop_grayscale,
             .timeout_ms = self.timeout_ms,
             .stdout_limit = 1024 * 1024,
             .stderr_limit = 64 * 1024,
@@ -205,10 +218,39 @@ pub const FormulaExecution = struct {
     }
 };
 
+pub const FormulaCrop = struct {
+    image_path: []u8,
+    pdf_bbox: BBox,
+    pixel_width: u32,
+    pixel_height: u32,
+    dpi: u32,
+
+    pub fn deinit(self: *FormulaCrop, allocator: std.mem.Allocator) void {
+        runtime.deleteFilePath(self.image_path);
+        allocator.free(self.image_path);
+        self.* = undefined;
+    }
+};
+
+pub const FormulaCropOutcome = struct {
+    status: FormulaExecutionStatus,
+    input: ?FormulaCrop = null,
+    exit_code: ?u8 = null,
+    stderr: []u8 = &.{},
+    duration_ms: u64 = 0,
+    diagnostic_code: ?[]const u8 = null,
+
+    pub fn deinit(self: *FormulaCropOutcome, allocator: std.mem.Allocator) void {
+        if (self.input) |*input| input.deinit(allocator);
+        if (self.stderr.len > 0) allocator.free(self.stderr);
+        self.* = undefined;
+    }
+};
+
 const max_config_bytes = 256 * 1024;
 const max_specialist_args = 32;
 const max_config_string_bytes = 4096;
-const max_formula_artifacts = 32;
+const max_formula_artifacts = 1;
 
 pub fn loadFormulaConfig(allocator: std.mem.Allocator, path: []const u8) !?OwnedSpecialistConfig {
     if (try runtime.fileSizeCwd(path) > max_config_bytes) return error.SpecialistConfigTooLarge;
@@ -242,6 +284,36 @@ pub fn loadFormulaConfig(allocator: std.mem.Allocator, path: []const u8) !?Owned
             try args.append(allocator, arg);
         }
     }
+    const rasterizer_value = formula_value.object.get("rasterizer_executable");
+    const rasterizer_text = if (rasterizer_value) |value| blk: {
+        if (value != .string or value.string.len == 0 or value.string.len > max_config_string_bytes)
+            return error.InvalidSpecialistConfig;
+        break :blk value.string;
+    } else "pdftoppm";
+    const rasterizer_executable = try allocator.dupe(u8, rasterizer_text);
+    errdefer allocator.free(rasterizer_executable);
+
+    var crop_dpi: u32 = 200;
+    if (formula_value.object.get("crop_dpi")) |dpi_value| {
+        if (dpi_value != .integer or dpi_value.integer < 72 or dpi_value.integer > 600)
+            return error.InvalidSpecialistConfig;
+        crop_dpi = @intCast(dpi_value.integer);
+    }
+    var crop_padding_points: f64 = 4;
+    if (formula_value.object.get("crop_padding_points")) |padding_value| {
+        crop_padding_points = switch (padding_value) {
+            .integer => |value| @floatFromInt(value),
+            .float => |value| value,
+            else => return error.InvalidSpecialistConfig,
+        };
+        if (!std.math.isFinite(crop_padding_points) or crop_padding_points < 0 or crop_padding_points > 72)
+            return error.InvalidSpecialistConfig;
+    }
+    var crop_grayscale = true;
+    if (formula_value.object.get("crop_grayscale")) |grayscale_value| {
+        if (grayscale_value != .bool) return error.InvalidSpecialistConfig;
+        crop_grayscale = grayscale_value.bool;
+    }
     var timeout_ms: u32 = 30_000;
     if (formula_value.object.get("timeout_ms")) |timeout_value| {
         if (timeout_value != .integer or timeout_value.integer < 1 or timeout_value.integer > 120_000)
@@ -252,6 +324,10 @@ pub fn loadFormulaConfig(allocator: std.mem.Allocator, path: []const u8) !?Owned
         .allocator = allocator,
         .executable = executable,
         .extra_args = try args.toOwnedSlice(allocator),
+        .rasterizer_executable = rasterizer_executable,
+        .crop_dpi = crop_dpi,
+        .crop_padding_points = crop_padding_points,
+        .crop_grayscale = crop_grayscale,
         .timeout_ms = timeout_ms,
     };
 }
@@ -402,18 +478,32 @@ fn expectJsonString(object: std.json.ObjectMap, name: []const u8, expected: []co
 }
 
 fn emptyFormulaExecution(allocator: std.mem.Allocator, status: FormulaExecutionStatus, duration_ms: u64, code: []const u8) !FormulaExecution {
-    const specialist_id = try allocator.dupe(u8, "formula-subprocess");
+    return makeFormulaFailure(allocator, status, duration_ms, code, "formula-subprocess", null, &.{});
+}
+
+pub fn makeFormulaFailure(
+    allocator: std.mem.Allocator,
+    status: FormulaExecutionStatus,
+    duration_ms: u64,
+    code: []const u8,
+    specialist_name: []const u8,
+    exit_code: ?u8,
+    stderr: []const u8,
+) !FormulaExecution {
+    std.debug.assert(status != .completed and status != .empty);
+    const specialist_id = try allocator.dupe(u8, specialist_name);
     errdefer allocator.free(specialist_id);
     const artifacts = try allocator.alloc(FormulaExecutionArtifact, 0);
     errdefer allocator.free(artifacts);
     const diagnostic_code = try allocator.dupe(u8, code);
     errdefer allocator.free(diagnostic_code);
-    const stderr_excerpt = try allocator.alloc(u8, 0);
+    const stderr_excerpt = try boundedDupe(allocator, stderr, 4096);
     return .{
         .status = status,
         .specialist_id = specialist_id,
         .artifacts = artifacts,
         .duration_ms = duration_ms,
+        .exit_code = exit_code,
         .diagnostic_code = diagnostic_code,
         .stderr_excerpt = stderr_excerpt,
     };
@@ -979,7 +1069,7 @@ test "formula JSONL adapter accepts exactly one linked completed response" {
 
     const path = try fakeSpecialistScript("success",
         \\#!/bin/sh
-        \\printf '%s\n' '{"schema_version":"0.12.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-7","specialist_id":"fake-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.97}]}'
+        \\printf '%s\n' '{"schema_version":"0.13.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-7","specialist_id":"fake-formula","specialist_kind":"formula","status":"completed","formulas":[{"text":"x^2+y^2=z^2","format":"latex","confidence":0.97}]}'
         \\
     );
     defer {
@@ -988,7 +1078,7 @@ test "formula JSONL adapter accepts exactly one linked completed response" {
     }
     var executable_buf: [160]u8 = undefined;
     const executable = try std.fmt.bufPrint(&executable_buf, "./{s}", .{path});
-    var result = try runFormulaJsonl(allocator, "{\"request_id\":\"specialist-request-formula-region-7\"}\n", "specialist-request-formula-region-7", "0.12.0", .{ .executable = executable });
+    var result = try runFormulaJsonl(allocator, "{\"request_id\":\"specialist-request-formula-region-7\"}\n", "specialist-request-formula-region-7", "0.13.0", .{ .executable = executable });
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(FormulaExecutionStatus.completed, result.status);
@@ -1007,7 +1097,7 @@ test "formula JSONL adapter distinguishes empty unavailable failed and timeout" 
 
     const empty_path = try fakeSpecialistScript("empty",
         \\#!/bin/sh
-        \\printf '%s\n' '{"schema_version":"0.12.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-3","specialist_id":"fake-formula","specialist_kind":"formula","status":"empty","formulas":[]}'
+        \\printf '%s\n' '{"schema_version":"0.13.0","record_type":"specialist_response","request_id":"specialist-request-formula-region-3","specialist_id":"fake-formula","specialist_kind":"formula","status":"empty","formulas":[]}'
         \\
     );
     defer {
@@ -1016,11 +1106,11 @@ test "formula JSONL adapter distinguishes empty unavailable failed and timeout" 
     }
     var empty_exec_buf: [160]u8 = undefined;
     const empty_exec = try std.fmt.bufPrint(&empty_exec_buf, "./{s}", .{empty_path});
-    var empty = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = empty_exec });
+    var empty = try runFormulaJsonl(allocator, "{}\n", request_id, "0.13.0", .{ .executable = empty_exec });
     defer empty.deinit(allocator);
     try std.testing.expectEqual(FormulaExecutionStatus.empty, empty.status);
 
-    var unavailable = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = "./definitely-missing-formula-specialist" });
+    var unavailable = try runFormulaJsonl(allocator, "{}\n", request_id, "0.13.0", .{ .executable = "./definitely-missing-formula-specialist" });
     defer unavailable.deinit(allocator);
     try std.testing.expectEqual(FormulaExecutionStatus.unavailable, unavailable.status);
 
@@ -1031,7 +1121,7 @@ test "formula JSONL adapter distinguishes empty unavailable failed and timeout" 
     }
     var failed_exec_buf: [160]u8 = undefined;
     const failed_exec = try std.fmt.bufPrint(&failed_exec_buf, "./{s}", .{failed_path});
-    var failed = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = failed_exec });
+    var failed = try runFormulaJsonl(allocator, "{}\n", request_id, "0.13.0", .{ .executable = failed_exec });
     defer failed.deinit(allocator);
     try std.testing.expectEqual(FormulaExecutionStatus.failed, failed.status);
     try std.testing.expectEqual(@as(?u8, 9), failed.exit_code);
@@ -1043,7 +1133,7 @@ test "formula JSONL adapter distinguishes empty unavailable failed and timeout" 
     }
     var timeout_exec_buf: [160]u8 = undefined;
     const timeout_exec = try std.fmt.bufPrint(&timeout_exec_buf, "./{s}", .{timeout_path});
-    var timeout = try runFormulaJsonl(allocator, "{}\n", request_id, "0.12.0", .{ .executable = timeout_exec, .timeout_ms = 10 });
+    var timeout = try runFormulaJsonl(allocator, "{}\n", request_id, "0.13.0", .{ .executable = timeout_exec, .timeout_ms = 10 });
     defer timeout.deinit(allocator);
     try std.testing.expectEqual(FormulaExecutionStatus.timeout, timeout.status);
 }
@@ -1056,9 +1146,9 @@ test "formula JSONL adapter rejects malformed wrong-id and extra-line output" {
     runtime.setIo(threaded.io());
     const cases = [_]struct { name: []const u8, body: []const u8 }{
         .{ .name = "malformed", .body = "#!/bin/sh\nprintf '%s\\n' '{bad json}'\n" },
-        .{ .name = "wrong-id", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"wrong\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}'\n" },
-        .{ .name = "extra-line", .body = "#!/bin/sh\nprintf '%s\\n%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}' '{}'\n" },
-        .{ .name = "child-status", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.12.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"timeout\",\"formulas\":[]}'\n" },
+        .{ .name = "wrong-id", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.13.0\",\"record_type\":\"specialist_response\",\"request_id\":\"wrong\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}'\n" },
+        .{ .name = "extra-line", .body = "#!/bin/sh\nprintf '%s\\n%s\\n' '{\"schema_version\":\"0.13.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"empty\",\"formulas\":[]}' '{}'\n" },
+        .{ .name = "child-status", .body = "#!/bin/sh\nprintf '%s\\n' '{\"schema_version\":\"0.13.0\",\"record_type\":\"specialist_response\",\"request_id\":\"specialist-request-formula-region-4\",\"specialist_id\":\"fake\",\"specialist_kind\":\"formula\",\"status\":\"timeout\",\"formulas\":[]}'\n" },
     };
     for (cases) |case| {
         const path = try fakeSpecialistScript(case.name, case.body);
@@ -1068,7 +1158,7 @@ test "formula JSONL adapter rejects malformed wrong-id and extra-line output" {
         }
         var executable_buf: [160]u8 = undefined;
         const executable = try std.fmt.bufPrint(&executable_buf, "./{s}", .{path});
-        var result = try runFormulaJsonl(allocator, "{}\n", "specialist-request-formula-region-4", "0.12.0", .{ .executable = executable });
+        var result = try runFormulaJsonl(allocator, "{}\n", "specialist-request-formula-region-4", "0.13.0", .{ .executable = executable });
         defer result.deinit(allocator);
         try std.testing.expectEqual(FormulaExecutionStatus.invalid_output, result.status);
     }
@@ -1083,12 +1173,16 @@ test "formula specialist config parser is bounded and owned" {
     const path = try std.fmt.bufPrint(&path_buf, "pdf-parser-formula-config-{x}.json", .{runtime.nanoTimestamp()});
     defer runtime.deleteFileCwd(path);
     const file = try runtime.createFileCwd(path);
-    try runtime.writeAllFile(file, "{\"formula\":{\"enabled\":true,\"executable\":\"fake\",\"args\":[\"--jsonl\"],\"timeout_ms\":1234}}");
+    try runtime.writeAllFile(file, "{\"formula\":{\"enabled\":true,\"executable\":\"fake\",\"args\":[\"--jsonl\"],\"rasterizer_executable\":\"fake-raster\",\"crop_dpi\":240,\"crop_padding_points\":6.5,\"crop_grayscale\":false,\"timeout_ms\":1234}}");
     runtime.closeFile(file);
     var config = (try loadFormulaConfig(allocator, path)).?;
     defer config.deinit();
     try std.testing.expectEqualStrings("fake", config.executable);
     try std.testing.expectEqualStrings("--jsonl", config.extra_args[0]);
+    try std.testing.expectEqualStrings("fake-raster", config.rasterizer_executable);
+    try std.testing.expectEqual(@as(u32, 240), config.crop_dpi);
+    try std.testing.expectEqual(@as(f64, 6.5), config.crop_padding_points);
+    try std.testing.expect(!config.crop_grayscale);
     try std.testing.expectEqual(@as(u32, 1234), config.timeout_ms);
 }
 

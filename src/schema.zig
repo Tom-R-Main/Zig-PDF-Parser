@@ -922,7 +922,7 @@ fn hashPrint(hasher: anytype, comptime fmt: []const u8, args: anytype) void {
 
 fn writeCapabilityCoverage(writer: anytype, streaming: bool, include_debug_asset_refs: bool) !void {
     try writer.print(
-        "{{\"native_text\":true,\"span_model\":true,\"layout_reconstruction\":true,\"complexity_routing\":true,\"reconciliation\":true,\"table_reconstruction\":true,\"form_fields\":true,\"ocr_adapter\":true,\"specialist_protocol\":true,\"formula_routing\":true,\"formula_recognition\":false,\"debug_assets\":{},\"streaming\":{}}}",
+        "{{\"native_text\":true,\"span_model\":true,\"layout_reconstruction\":true,\"complexity_routing\":true,\"reconciliation\":true,\"table_reconstruction\":true,\"form_fields\":true,\"ocr_adapter\":true,\"specialist_protocol\":true,\"formula_routing\":true,\"formula_recognition\":true,\"debug_assets\":{},\"streaming\":{}}}",
         .{ include_debug_asset_refs, streaming },
     );
 }
