@@ -205,7 +205,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
                 "page_count": 1,
                 "input_sha256": hashlib.sha256(b"/JBIG2Decode").hexdigest(),
                 "has_specialist_failures": False,
-                "route_counts": {"native_pages": 0},
+                "route_counts": {"native_pages": 0, "ocr_regions": 1},
             },
             {
                 "record_type": "specialist_attempt",
@@ -230,6 +230,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
             "expected_attempt_count": 1,
             "expected_selected_attempt": {"dpi": 200, "psm": 6},
             "expected_route_counts": {"native_pages": 0},
+            "minimum_route_counts": {"ocr_regions": 1},
             "floors": {
                 "fixture_sha256_exact": 1.0,
                 "manifest_input_sha256_exact": 1.0,
@@ -238,6 +239,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
                 "page_count_exact": 1.0,
                 "native_page_count_exact": 1.0,
                 "route_counts_exact": 1.0,
+                "route_count_floors_met": 1.0,
                 "ocr_attempt_completed": 1.0,
                 "attempt_count_exact": 1.0,
                 "selected_attempt_config_exact": 1.0,
@@ -260,6 +262,15 @@ class BenchmarkHygieneTests(unittest.TestCase):
             [failure["metric"] for failure in route_failure["failures"]],
         )
         artifacts[0]["route_counts"]["native_pages"] = 0
+        artifacts[0]["route_counts"]["ocr_regions"] = 0
+        route_floor_failure = ocr_hard_document_quality.evaluate(
+            artifacts, truth, b"/JBIG2Decode"
+        )
+        self.assertIn(
+            "route_count_floors_met",
+            [failure["metric"] for failure in route_floor_failure["failures"]],
+        )
+        artifacts[0]["route_counts"]["ocr_regions"] = 1
         artifacts[1]["config"]["psm"] = 11
         attempt_failure = ocr_hard_document_quality.evaluate(
             artifacts, truth, b"/JBIG2Decode"

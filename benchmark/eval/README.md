@@ -73,7 +73,9 @@ derivative of the same source. Its main page image is a 1192 by 1920, 300-DPI
 color JPX map/cover; the remaining JBIG2 object is only the small Google
 watermark mask. The roughly 188 KB fixture forces rasterization of real JPX
 content and gates the selected 300-DPI sparse-text fallback and readable cover
-labels separately from noisy map detail:
+labels separately from noisy map detail. OCR-derived table/formula region counts
+are recorded but remain observational because the pinned Linux and current macOS
+toolchains segment the map differently while recovering the same required text:
 
 ```sh
 qpdf --deterministic-id --object-streams=disable \

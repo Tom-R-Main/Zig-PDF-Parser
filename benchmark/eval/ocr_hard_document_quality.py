@@ -92,6 +92,7 @@ def evaluate(
     tokens = token_metrics(str(truth["text"]), span_text)
     route_counts = manifest.get("route_counts", {})
     expected_route_counts = truth.get("expected_route_counts", {})
+    minimum_route_counts = truth.get("minimum_route_counts", {})
 
     metrics = {
         "fixture_sha256_exact": 1.0 if actual_sha256 == expected_sha256 else 0.0,
@@ -109,6 +110,11 @@ def evaluate(
         "route_counts_exact": (
             1.0
             if all(route_counts.get(key) == value for key, value in expected_route_counts.items())
+            else 0.0
+        ),
+        "route_count_floors_met": (
+            1.0
+            if all(route_counts.get(key, 0) >= value for key, value in minimum_route_counts.items())
             else 0.0
         ),
         "ocr_attempt_completed": 1.0 if len(completed_selected_attempts) == 1 else 0.0,
@@ -157,6 +163,7 @@ def evaluate(
         "span_count": len(spans),
         "attempt_count": len(attempts),
         "expected_route_counts": expected_route_counts,
+        "minimum_route_counts": minimum_route_counts,
         "actual_route_counts": route_counts,
         "attempts": [
             {
