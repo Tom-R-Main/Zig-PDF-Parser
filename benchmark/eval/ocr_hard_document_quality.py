@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Absolute OCR quality gate for a real public-domain JBIG2 scan."""
+"""Absolute OCR quality gate for real public-domain hard scans."""
 
 from __future__ import annotations
 
@@ -73,6 +73,8 @@ def evaluate(
         for record in attempts
         if record.get("attempt_status") == "completed" and record.get("selected") is True
     ]
+    expected_attempt_count = truth.get("expected_attempt_count")
+    expected_selected_attempt = truth.get("expected_selected_attempt", {})
     fresh_ocr_spans = [
         record
         for record in spans
@@ -89,6 +91,7 @@ def evaluate(
     ]
     tokens = token_metrics(str(truth["text"]), span_text)
     route_counts = manifest.get("route_counts", {})
+    expected_route_counts = truth.get("expected_route_counts", {})
 
     metrics = {
         "fixture_sha256_exact": 1.0 if actual_sha256 == expected_sha256 else 0.0,
@@ -103,7 +106,24 @@ def evaluate(
             1.0 if manifest.get("page_count") == int(truth["expected_page_count"]) else 0.0
         ),
         "native_page_count_exact": 1.0 if route_counts.get("native_pages") == 0 else 0.0,
+        "route_counts_exact": (
+            1.0
+            if all(route_counts.get(key) == value for key, value in expected_route_counts.items())
+            else 0.0
+        ),
         "ocr_attempt_completed": 1.0 if len(completed_selected_attempts) == 1 else 0.0,
+        "attempt_count_exact": (
+            1.0 if expected_attempt_count is None or len(attempts) == expected_attempt_count else 0.0
+        ),
+        "selected_attempt_config_exact": (
+            1.0
+            if len(completed_selected_attempts) == 1
+            and all(
+                completed_selected_attempts[0].get("config", {}).get(key) == value
+                for key, value in expected_selected_attempt.items()
+            )
+            else 0.0
+        ),
         "fresh_ocr_span_fraction": len(fresh_ocr_spans) / len(spans) if spans else 0.0,
         "required_phrase_recall": (
             len(matched_phrases) / len(required_phrases) if required_phrases else 1.0
@@ -136,6 +156,8 @@ def evaluate(
         "matched_phrases": matched_phrases,
         "span_count": len(spans),
         "attempt_count": len(attempts),
+        "expected_route_counts": expected_route_counts,
+        "actual_route_counts": route_counts,
         "attempts": [
             {
                 "attempt_id": record.get("attempt_id"),

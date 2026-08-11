@@ -131,6 +131,15 @@ jobs:
             --expected-rasterizer-version "$OCR_POPPLER_VERSION" \
             --output /tmp/ocr-hard-document-quality.json
 
+      - name: Enforce real JPX scan quality
+        run: |
+          python3 benchmark/eval/ocr_hard_document_quality.py \
+            --pdf benchmark/eval/corpus/scanned_typewritten/jpx-public-domain-map-cover.pdf \
+            --truth benchmark/eval/ground_truth/ocr_text/scanned_typewritten/jpx-public-domain-map-cover.json \
+            --expected-ocr-version "$OCR_TESSERACT_VERSION" \
+            --expected-rasterizer-version "$OCR_POPPLER_VERSION" \
+            --output /tmp/ocr-jpx-hard-document-quality.json
+
       - name: Upload OCR quality report
         if: always()
         uses: actions/upload-artifact@v6
@@ -139,4 +148,5 @@ jobs:
           path: |
             /tmp/ocr-form-quality.json
             /tmp/ocr-hard-document-quality.json
+            /tmp/ocr-jpx-hard-document-quality.json
           if-no-files-found: ignore

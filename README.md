@@ -126,6 +126,10 @@ python3 benchmark/eval/ocr_form_quality.py \
   --output /tmp/pdf-parser-ocr-form-quality.json
 python3 benchmark/eval/ocr_hard_document_quality.py \
   --output /tmp/pdf-parser-ocr-hard-document-quality.json
+python3 benchmark/eval/ocr_hard_document_quality.py \
+  --pdf benchmark/eval/corpus/scanned_typewritten/jpx-public-domain-map-cover.pdf \
+  --truth benchmark/eval/ground_truth/ocr_text/scanned_typewritten/jpx-public-domain-map-cover.json \
+  --output /tmp/pdf-parser-ocr-jpx-hard-document-quality.json
 .venv/bin/python benchmark/eval/fetch_large_corpus.py --dry-run
 .venv/bin/python benchmark/eval/run_baseline.py --large
 .venv/bin/python benchmark/eval/profile_lanes.py \
@@ -141,8 +145,8 @@ python3 benchmark/eval/ocr_hard_document_quality.py \
 ```
 
 Current fixture classes include clean born-digital text, academic two-column
-layout, scientific formulas, synthetic image-only scans, a public-domain real
-JBIG2 scan, mixed native/scan pages,
+layout, scientific formulas, synthetic image-only scans, public-domain real
+JBIG2 and JPX scans, mixed native/scan pages,
 financial tables, AcroForms, weird-font cases, visual truth fixtures, and
 corrupt/adversarial PDFs.
 `benchmark/eval/font_compare.py` runs the weird-font subset against

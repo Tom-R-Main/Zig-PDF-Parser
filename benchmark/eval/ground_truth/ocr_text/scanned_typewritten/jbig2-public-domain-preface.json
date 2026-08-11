@@ -13,6 +13,18 @@
     "sections on the practice of map making"
   ],
   "expected_page_count": 1,
+  "expected_attempt_count": 1,
+  "expected_selected_attempt": {
+    "dpi": 200,
+    "psm": 6
+  },
+  "expected_route_counts": {
+    "native_pages": 0,
+    "page_routes": 1,
+    "ocr_regions": 18,
+    "table_regions": 3,
+    "formula_regions": 0
+  },
   "floors": {
     "fixture_sha256_exact": 1.0,
     "manifest_input_sha256_exact": 1.0,
@@ -20,7 +32,10 @@
     "required_pdf_filter_recall": 1.0,
     "page_count_exact": 1.0,
     "native_page_count_exact": 1.0,
+    "route_counts_exact": 1.0,
     "ocr_attempt_completed": 1.0,
+    "attempt_count_exact": 1.0,
+    "selected_attempt_config_exact": 1.0,
     "fresh_ocr_span_fraction": 1.0,
     "required_phrase_recall": 1.0,
     "token_precision": 0.9,

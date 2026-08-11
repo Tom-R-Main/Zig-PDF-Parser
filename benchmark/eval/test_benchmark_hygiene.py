@@ -212,6 +212,7 @@ class BenchmarkHygieneTests(unittest.TestCase):
                 "attempt_id": "attempt-0",
                 "attempt_status": "completed",
                 "selected": True,
+                "config": {"dpi": 200, "psm": 6},
             },
             {
                 "record_type": "span",
@@ -226,6 +227,9 @@ class BenchmarkHygieneTests(unittest.TestCase):
             "text": "Harvard University and the United States Forest Service",
             "required_phrases": ["Harvard University", "United States Forest Service"],
             "expected_page_count": 1,
+            "expected_attempt_count": 1,
+            "expected_selected_attempt": {"dpi": 200, "psm": 6},
+            "expected_route_counts": {"native_pages": 0},
             "floors": {
                 "fixture_sha256_exact": 1.0,
                 "manifest_input_sha256_exact": 1.0,
@@ -233,7 +237,10 @@ class BenchmarkHygieneTests(unittest.TestCase):
                 "required_pdf_filter_recall": 1.0,
                 "page_count_exact": 1.0,
                 "native_page_count_exact": 1.0,
+                "route_counts_exact": 1.0,
                 "ocr_attempt_completed": 1.0,
+                "attempt_count_exact": 1.0,
+                "selected_attempt_config_exact": 1.0,
                 "fresh_ocr_span_fraction": 1.0,
                 "required_phrase_recall": 1.0,
                 "token_precision": 1.0,
@@ -244,6 +251,24 @@ class BenchmarkHygieneTests(unittest.TestCase):
 
         passing = ocr_hard_document_quality.evaluate(artifacts, truth, b"/JBIG2Decode")
         self.assertEqual("pass", passing["status"])
+        artifacts[0]["route_counts"]["native_pages"] = 1
+        route_failure = ocr_hard_document_quality.evaluate(
+            artifacts, truth, b"/JBIG2Decode"
+        )
+        self.assertIn(
+            "route_counts_exact",
+            [failure["metric"] for failure in route_failure["failures"]],
+        )
+        artifacts[0]["route_counts"]["native_pages"] = 0
+        artifacts[1]["config"]["psm"] = 11
+        attempt_failure = ocr_hard_document_quality.evaluate(
+            artifacts, truth, b"/JBIG2Decode"
+        )
+        self.assertIn(
+            "selected_attempt_config_exact",
+            [failure["metric"] for failure in attempt_failure["failures"]],
+        )
+        artifacts[1]["config"]["psm"] = 6
         artifacts[2]["text"] = "Harvard University"
         failing = ocr_hard_document_quality.evaluate(artifacts, truth, b"not the filter")
         self.assertEqual("fail", failing["status"])

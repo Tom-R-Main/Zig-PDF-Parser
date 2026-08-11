@@ -32,9 +32,9 @@ zig build eval -- --manifest benchmark/eval/corpus/manifest.tsv
 
 That command emits one JSONL record for each current fixture category:
 clean born-digital text, academic two-column layout, scientific math notation,
-scanned/typewritten image-only input, a real public-domain JBIG2 scan, financial
-tables, forms, weird-font fixtures, visual truth fixtures, and adversarial
-page-tree recovery.
+scanned/typewritten image-only input, real public-domain JBIG2 and JPX scans,
+financial tables, forms, weird-font fixtures, visual truth fixtures, and
+adversarial page-tree recovery.
 
 `benchmark/eval/corpus/metadata.jsonl` is the provenance sidecar for the tiny
 checked-in corpus. Each row records the fixture id, source note, redistribution
@@ -68,12 +68,30 @@ python3 benchmark/eval/ocr_hard_document_quality.py \
   --output /tmp/pdf-parser-ocr-hard-document-quality.json
 ```
 
+The companion `jpx-public-domain-map-cover` fixture is a deterministic page-2
+derivative of the same source. Its main page image is a 1192 by 1920, 300-DPI
+color JPX map/cover; the remaining JBIG2 object is only the small Google
+watermark mask. The roughly 188 KB fixture forces rasterization of real JPX
+content and gates the selected 300-DPI sparse-text fallback and readable cover
+labels separately from noisy map detail:
+
+```sh
+qpdf --deterministic-id --object-streams=disable \
+  benchmark/eval/raw_cache/large/image-heavy-scan.pdf \
+  --pages . 2 -- \
+  benchmark/eval/corpus/scanned_typewritten/jpx-public-domain-map-cover.pdf
+python3 benchmark/eval/ocr_hard_document_quality.py \
+  --pdf benchmark/eval/corpus/scanned_typewritten/jpx-public-domain-map-cover.pdf \
+  --truth benchmark/eval/ground_truth/ocr_text/scanned_typewritten/jpx-public-domain-map-cover.json \
+  --output /tmp/pdf-parser-ocr-jpx-hard-document-quality.json
+```
+
 The ignored large corpus explicitly inventories a real technical reference with
 CID Identity/no-ToUnicode cases and the full public-domain scan containing
 JBIG2 and JPX images. These exercise honest fallback and routed OCR behavior;
-one JBIG2 page is now promoted into the checked-in blocking corpus, while real
-predefined-collection CJK and Type3 PDFs remain acquisition targets rather than
-being represented by synthetic fixtures alone.
+one JBIG2 page and one JPX page are now promoted into the checked-in blocking
+corpus, while real predefined-collection CJK and Type3 PDFs remain acquisition
+targets rather than being represented by synthetic fixtures alone.
 
 Font-fidelity sidecars live under `benchmark/eval/ground_truth/fonts/`. They are
 discovered from `metadata.jsonl` instead of extra manifest columns so existing
