@@ -9,6 +9,18 @@ __version__ = "0.1.0"
 __all__ = ["Document", "PageInfo", "TextSpan", "extract_adaptive", "ZpdfError", "InvalidPdfError", "PageNotFoundError", "ExtractionError"]
 
 
+def _raise_native_error(context: str) -> None:
+    """Raise the Python exception corresponding to the last legacy ABI error."""
+    code = lib.zpdf_last_error()
+    if code == lib.ZPDF_ERROR_NONE:
+        return
+    if code == lib.ZPDF_ERROR_PAGE_NOT_FOUND:
+        raise PageNotFoundError(context)
+    if code == lib.ZPDF_ERROR_OUT_OF_MEMORY:
+        raise MemoryError(context)
+    raise ExtractionError(context)
+
+
 class TextSpan:
     """A text span with bounding box coordinates."""
     __slots__ = ("x0", "y0", "x1", "y1", "text", "font_size", "page_index", "source_kind", "confidence", "block_id", "line_id", "mcid")
@@ -142,6 +154,8 @@ class Document:
             self._handle = lib.zpdf_open(path)
 
         if self._handle == ffi.NULL:
+            if lib.zpdf_last_error() == lib.ZPDF_ERROR_OUT_OF_MEMORY:
+                raise MemoryError(f"Failed to open PDF: {source}")
             raise InvalidPdfError(f"Failed to open PDF: {source}")
 
     def __enter__(self) -> "Document":
@@ -220,9 +234,8 @@ class Document:
             buf_ptr = lib.zpdf_extract_page(self._handle, page_num, out_len)
 
         if buf_ptr == ffi.NULL:
-            if out_len[0] == 0:
-                return ""  # Empty page
-            raise ExtractionError(f"Failed to extract page {page_num}")
+            _raise_native_error(f"Failed to extract page {page_num}")
+            return ""  # Empty page
 
         try:
             data = ffi.buffer(buf_ptr, out_len[0])[:]
@@ -248,9 +261,8 @@ class Document:
             raise ValueError("mode must be 'accuracy' or 'fast'")
 
         if buf_ptr == ffi.NULL:
-            if out_len[0] == 0:
-                return ""  # Empty document
-            raise ExtractionError("Failed to extract text")
+            _raise_native_error("Failed to extract text")
+            return ""  # Empty document
 
         try:
             data = ffi.buffer(buf_ptr, out_len[0])[:]
@@ -267,10 +279,9 @@ class Document:
         out_count = ffi.new("size_t*")
         spans_ptr = lib.zpdf_extract_bounds(self._handle, page_num, out_count)
 
-        if spans_ptr == ffi.NULL and out_count[0] == 0:
-            return []
         if spans_ptr == ffi.NULL:
-            raise ExtractionError(f"Failed to extract bounds for page {page_num}")
+            _raise_native_error(f"Failed to extract bounds for page {page_num}")
+            return []
 
         try:
             spans = []
@@ -318,9 +329,8 @@ class Document:
         buf_ptr = lib.zpdf_extract_page_markdown(self._handle, page_num, out_len)
 
         if buf_ptr == ffi.NULL:
-            if out_len[0] == 0:
-                return ""  # Empty page
-            raise ExtractionError(f"Failed to extract markdown from page {page_num}")
+            _raise_native_error(f"Failed to extract markdown from page {page_num}")
+            return ""  # Empty page
 
         try:
             data = ffi.buffer(buf_ptr, out_len[0])[:]
@@ -347,9 +357,8 @@ class Document:
         buf_ptr = lib.zpdf_extract_all_markdown(self._handle, out_len)
 
         if buf_ptr == ffi.NULL:
-            if out_len[0] == 0:
-                return ""  # Empty document
-            raise ExtractionError("Failed to extract markdown")
+            _raise_native_error("Failed to extract markdown")
+            return ""  # Empty document
 
         try:
             data = ffi.buffer(buf_ptr, out_len[0])[:]
@@ -444,9 +453,12 @@ class Document:
     def get_page_label(self, page_num: int) -> Optional[str]:
         """Get the display label for a page (e.g., 'i', 'ii', '1', '2', 'A-1')."""
         self._check_open()
+        if page_num < 0 or page_num >= self.page_count:
+            raise PageNotFoundError(f"Page {page_num} not found")
         out_len = ffi.new("size_t*")
         buf_ptr = lib.zpdf_get_page_label(self._handle, page_num, out_len)
         if buf_ptr == ffi.NULL:
+            _raise_native_error(f"Failed to get label for page {page_num}")
             return None
         try:
             return ffi.buffer(buf_ptr, out_len[0])[:].decode("utf-8", errors="replace")
@@ -463,6 +475,8 @@ class Document:
         Returns list of links, each with: {"rect": [x0,y0,x1,y1], "uri": str or None, "dest_page": int or None}.
         """
         self._check_open()
+        if page_num < 0 or page_num >= self.page_count:
+            raise PageNotFoundError(f"Page {page_num} not found")
         out_ptr = ffi.new("CLink**")
         count = ffi.new("size_t*")
 
@@ -497,6 +511,8 @@ class Document:
         Returns list of images, each with: {"rect": [x0,y0,x1,y1], "width": int, "height": int}.
         """
         self._check_open()
+        if page_num < 0 or page_num >= self.page_count:
+            raise PageNotFoundError(f"Page {page_num} not found")
         out_ptr = ffi.new("CImageInfo**")
         count = ffi.new("size_t*")
 

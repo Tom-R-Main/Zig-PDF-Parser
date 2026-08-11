@@ -24,6 +24,14 @@ typedef enum PdfParserStatus {
     PDF_PARSER_STATUS_EXTRACT_ERROR = 3,
 } PdfParserStatus;
 
+typedef enum ZpdfLegacyError {
+    ZPDF_ERROR_NONE = 0,
+    ZPDF_ERROR_INVALID_HANDLE = 1,
+    ZPDF_ERROR_PAGE_NOT_FOUND = 2,
+    ZPDF_ERROR_EXTRACTION_FAILED = 3,
+    ZPDF_ERROR_OUT_OF_MEMORY = 4,
+} ZpdfLegacyError;
+
 typedef struct PdfParserAdaptiveOptions {
     uint32_t abi_version;
     int32_t format;
@@ -54,6 +62,7 @@ typedef struct PdfParserAdaptiveResult {
 
 const char *pdf_parser_version(void);
 uint32_t pdf_parser_abi_version(void);
+int32_t zpdf_last_error(void);
 void pdf_parser_free_buffer(uint8_t *ptr, size_t len);
 void pdf_parser_result_clear(PdfParserAdaptiveResult *result);
 int32_t pdf_parser_extract_adaptive_file(const PdfParserAdaptiveOptions *options, PdfParserAdaptiveResult *result);

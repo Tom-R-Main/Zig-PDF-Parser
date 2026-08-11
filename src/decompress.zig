@@ -130,25 +130,34 @@ fn decodeFlateDecode(
     data: []const u8,
     params: ?Object,
 ) ![]u8 {
+    return decodeFlateDecodeWithLimit(allocator, data, params, MAX_DECOMPRESSED_SIZE);
+}
+
+fn decodeFlateDecodeWithLimit(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    params: ?Object,
+    max_size: usize,
+) ![]u8 {
     // Use Zig's built-in zlib/flate decompressor
     var input: std.Io.Reader = .fixed(data);
-    var decomp: std.compress.flate.Decompress = .init(&input, .zlib, &.{});
+    var decompress_buffer: [std.compress.flate.max_window_len]u8 = undefined;
+    var decomp: std.compress.flate.Decompress = .init(&input, .zlib, &decompress_buffer);
 
-    // Read all decompressed data using allocating writer
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-
-    _ = decomp.reader.streamRemaining(&aw.writer) catch |err| {
-        // Some PDFs have truncated streams - try to use what we have
-        if (aw.written().len > 0 and err == error.EndOfStream) {
-            // Continue with what we have
-        } else {
-            return DecompressError.DecompressFailed;
+    // Pull bounded chunks and grow capacity precisely so a compression bomb
+    // cannot make the allocating writer reserve beyond the configured cap.
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const read_count = decomp.reader.readSliceShort(&chunk) catch return DecompressError.DecompressFailed;
+        if (output.items.len > max_size or read_count > max_size - output.items.len) {
+            return DecompressError.OutputTooLarge;
         }
-    };
-
-    if (aw.written().len > MAX_DECOMPRESSED_SIZE) {
-        return DecompressError.OutputTooLarge;
+        const new_len = output.items.len + read_count;
+        try ensureBoundedCapacity(&output, allocator, new_len, max_size);
+        output.appendSliceAssumeCapacity(chunk[0..read_count]);
+        if (read_count < chunk.len) break;
     }
 
     // Apply predictor if specified
@@ -166,7 +175,7 @@ fn decodeFlateDecode(
 
                 const unpredicted = try applyPredictor(
                     allocator,
-                    aw.written(),
+                    output.items,
                     predictor,
                     columns,
                     colors,
@@ -177,7 +186,26 @@ fn decodeFlateDecode(
         }
     }
 
-    return try allocator.dupe(u8, aw.written());
+    return output.toOwnedSlice(allocator);
+}
+
+fn ensureBoundedCapacity(
+    output: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    needed: usize,
+    max_size: usize,
+) !void {
+    if (needed <= output.capacity) return;
+    std.debug.assert(needed <= max_size);
+
+    var target = @min(max_size, @max(needed, @as(usize, 64 * 1024)));
+    if (output.capacity > 0) {
+        target = output.capacity;
+        while (target < needed) {
+            target = if (target > max_size / 2) max_size else target * 2;
+        }
+    }
+    try output.ensureTotalCapacityPrecise(allocator, target);
 }
 
 /// Apply PNG predictor to decoded data
@@ -480,6 +508,12 @@ fn decodeASCIIHex(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
 // LZWDECODE
 // ============================================================================
 
+const lzw_single_byte_entries = blk: {
+    var values: [256]u8 = undefined;
+    for (&values, 0..) |*value, index| value.* = @truncate(index);
+    break :blk values;
+};
+
 fn decodeLZW(
     allocator: std.mem.Allocator,
     data: []const u8,
@@ -502,26 +536,37 @@ fn decodeLZW(
             // Initialize with single-byte entries
             var i: u16 = 0;
             while (i < 256) : (i += 1) {
-                table.entries[i] = &[_]u8{@truncate(i)};
+                table.entries[i] = lzw_single_byte_entries[i..][0..1];
             }
 
             return table;
         }
 
-        fn add(self: *@This(), entry: []const u8) void {
+        fn add(self: *@This(), entry: []const u8) bool {
             if (self.size < 4096) {
                 self.entries[self.size] = entry;
                 self.size += 1;
+                return true;
             }
+            return false;
         }
 
         fn get(self: @This(), code: u16) ?[]const u8 {
             if (code < self.size) return self.entries[code];
             return null;
         }
+
+        fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+            var index: u16 = 258;
+            while (index < self.size) : (index += 1) {
+                alloc.free(@constCast(self.entries[index]));
+            }
+            self.size = 258;
+        }
     };
 
     var table = LzwTable.init();
+    defer table.deinit(allocator);
     var bit_pos: usize = 0;
     var code_size: u4 = 9;
     var prev_code: ?u16 = null;
@@ -533,6 +578,7 @@ fn decodeLZW(
 
         // Clear table
         if (code == 256) {
+            table.deinit(allocator);
             table = LzwTable.init();
             code_size = 9;
             prev_code = null;
@@ -544,6 +590,9 @@ fn decodeLZW(
 
         // Output string for code
         if (table.get(code)) |entry| {
+            if (output.items.len > MAX_DECOMPRESSED_SIZE or entry.len > MAX_DECOMPRESSED_SIZE - output.items.len) {
+                return DecompressError.OutputTooLarge;
+            }
             try output.appendSlice(allocator, entry);
 
             if (prev_code) |pc| {
@@ -552,18 +601,27 @@ fn decodeLZW(
                     var new_entry = try allocator.alloc(u8, prev_entry.len + 1);
                     @memcpy(new_entry[0..prev_entry.len], prev_entry);
                     new_entry[prev_entry.len] = entry[0];
-                    table.add(new_entry);
+                    if (!table.add(new_entry)) allocator.free(new_entry);
                 }
             }
-        } else if (prev_code) |pc| {
-            // Code not in table - special case
-            if (table.get(pc)) |prev_entry| {
-                var new_entry = try allocator.alloc(u8, prev_entry.len + 1);
-                @memcpy(new_entry[0..prev_entry.len], prev_entry);
-                new_entry[prev_entry.len] = prev_entry[0];
-                try output.appendSlice(allocator, new_entry);
-                table.add(new_entry);
+        } else {
+            // KwKwK is valid only for the next dictionary slot. Arbitrary
+            // future codes are malformed input, not another special case.
+            if (code != table.size) return DecompressError.DecompressFailed;
+            const pc = prev_code orelse return DecompressError.DecompressFailed;
+            const prev_entry = table.get(pc) orelse return DecompressError.DecompressFailed;
+            var new_entry = try allocator.alloc(u8, prev_entry.len + 1);
+            @memcpy(new_entry[0..prev_entry.len], prev_entry);
+            new_entry[prev_entry.len] = prev_entry[0];
+            if (output.items.len > MAX_DECOMPRESSED_SIZE or new_entry.len > MAX_DECOMPRESSED_SIZE - output.items.len) {
+                allocator.free(new_entry);
+                return DecompressError.OutputTooLarge;
             }
+            output.appendSlice(allocator, new_entry) catch |err| {
+                allocator.free(new_entry);
+                return err;
+            };
+            if (!table.add(new_entry)) allocator.free(new_entry);
         }
 
         prev_code = code;
@@ -578,20 +636,18 @@ fn decodeLZW(
 }
 
 fn readBits(data: []const u8, bit_pos: usize, count: u4) ?u16 {
-    const byte_pos = bit_pos / 8;
-    const bit_offset: u3 = @truncate(bit_pos % 8);
+    if (count == 0) return 0;
+    const total_bits = std.math.mul(usize, data.len, 8) catch return null;
+    if (bit_pos > total_bits or count > total_bits - bit_pos) return null;
 
-    if (byte_pos + 2 >= data.len) return null;
-
-    // Read 3 bytes to ensure we have enough bits
-    const b0: u24 = data[byte_pos];
-    const b1: u24 = if (byte_pos + 1 < data.len) data[byte_pos + 1] else 0;
-    const b2: u24 = if (byte_pos + 2 < data.len) data[byte_pos + 2] else 0;
-
-    const combined: u24 = (b0 << 16) | (b1 << 8) | b2;
-    const shift: u5 = @as(u5, 24 - @as(u5, count)) - bit_offset;
-
-    return @truncate(combined >> shift);
+    var value: u16 = 0;
+    for (0..count) |offset| {
+        const source_pos = bit_pos + offset;
+        const byte = data[source_pos / 8];
+        const shift: u3 = @intCast(7 - (source_pos % 8));
+        value = (value << 1) | @as(u16, (byte >> shift) & 1);
+    }
+    return value;
 }
 
 // ============================================================================
@@ -675,6 +731,88 @@ test "decodeRunLength" {
     defer allocator.free(result);
 
     try std.testing.expectEqualStrings("ABCXXX", result);
+}
+
+fn compressZlibForTest(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output: std.Io.Writer.Allocating = try .initCapacity(allocator, 64);
+    defer output.deinit();
+    const history = try allocator.alloc(u8, std.compress.flate.max_window_len);
+    defer allocator.free(history);
+    var compressor = try std.compress.flate.Compress.init(
+        &output.writer,
+        history,
+        .zlib,
+        .default,
+    );
+    try compressor.writer.writeAll(input);
+    try compressor.finish();
+    return output.toOwnedSlice();
+}
+
+test "FlateDecode enforces exact output-cap boundaries while streaming" {
+    const allocator = std.testing.allocator;
+    const input = [_]u8{'A'} ** 1024;
+    const compressed = try compressZlibForTest(allocator, &input);
+    defer allocator.free(compressed);
+
+    const exact = try decodeFlateDecodeWithLimit(allocator, compressed, null, input.len);
+    defer allocator.free(exact);
+    try std.testing.expectEqualSlices(u8, &input, exact);
+
+    try std.testing.expectError(
+        DecompressError.OutputTooLarge,
+        decodeFlateDecodeWithLimit(allocator, compressed, null, input.len - 1),
+    );
+}
+
+fn flateAllocationProbe(allocator: std.mem.Allocator, compressed: []const u8) !void {
+    const output = try decodeFlateDecodeWithLimit(allocator, compressed, null, 1024);
+    defer allocator.free(output);
+}
+
+test "FlateDecode releases bounded output on allocation failure" {
+    const input = [_]u8{'B'} ** 1024;
+    const compressed = try compressZlibForTest(std.testing.allocator, &input);
+    defer std.testing.allocator.free(compressed);
+
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        flateAllocationProbe,
+        .{compressed},
+    );
+}
+
+test "LZW dictionary entries are released after decoding" {
+    // Codes: clear(256), 'A'(65), 'B'(66), end(257), packed at 9 bits.
+    const encoded = [_]u8{ 128, 16, 72, 80, 16 };
+    const decoded = try decodeLZW(std.testing.allocator, &encoded, null);
+    defer std.testing.allocator.free(decoded);
+
+    try std.testing.expectEqualStrings("AB", decoded);
+}
+
+fn lzwAllocationProbe(allocator: std.mem.Allocator) !void {
+    const encoded = [_]u8{ 128, 16, 72, 80, 16 };
+    const decoded = try decodeLZW(allocator, &encoded, null);
+    defer allocator.free(decoded);
+}
+
+test "LZW bit reader accepts final one-byte and two-byte windows" {
+    const one_byte = [_]u8{0b1010_1100};
+    try std.testing.expectEqual(@as(?u16, 0b1010_1100), readBits(&one_byte, 0, 8));
+    try std.testing.expectEqual(@as(?u16, 0b1100), readBits(&one_byte, 4, 4));
+
+    const two_bytes = [_]u8{ 0b0000_0001, 0b1000_0000 };
+    try std.testing.expectEqual(@as(?u16, 0b11), readBits(&two_bytes, 7, 2));
+    try std.testing.expectEqual(@as(?u16, null), readBits(&two_bytes, 8, 9));
+}
+
+test "LZW releases output and dictionary entries on allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        lzwAllocationProbe,
+        .{},
+    );
 }
 
 test "TIFF predictor reconstructs a row and rejects unsafe dimensions" {

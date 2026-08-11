@@ -6,9 +6,17 @@ inherited API.
 
 ## Install
 
+Published wheels are platform-specific. From a source checkout, build a wheel
+from the current Zig shared library with:
+
 ```bash
-pip install pdf-parser
+python3 -m pip install build
+python3 -m build --wheel python
 ```
+
+Repository imports prefer an explicit `PDF_PARSER_LIB` (or legacy `ZPDF_LIB`),
+then the current `zig-out/lib` build, and finally a library bundled in an
+installed wheel. An explicit override must name an existing file.
 
 ## Usage
 

@@ -222,10 +222,12 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
         if (std.mem.eql(u8, arg, "-o")) {
             i += 1;
-            if (i < args.len) output_file = args[i];
+            if (i >= args.len) return error.InvalidArguments;
+            output_file = args[i];
         } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--pages")) {
             i += 1;
-            if (i < args.len) page_range = args[i];
+            if (i >= args.len) return error.InvalidArguments;
+            page_range = args[i];
         } else if (std.mem.eql(u8, arg, "--source-id")) {
             i += 1;
             if (i < args.len) source_id = args[i];
@@ -301,12 +303,11 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
             output_format = .markdown;
         } else if (std.mem.eql(u8, arg, "--format") or std.mem.eql(u8, arg, "-f")) {
             i += 1;
-            if (i < args.len) {
-                output_format = parseOutputFormat(args[i]) orelse {
-                    std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
-                    return error.InvalidArguments;
-                };
-            }
+            if (i >= args.len) return error.InvalidArguments;
+            output_format = parseOutputFormat(args[i]) orelse {
+                std.debug.print("Unknown format: {s}. Use text, markdown, json, jsonl, artifact-jsonl, stream-jsonl, rag-jsonl, hocr, alto, or debug-svg.\n", .{args[i]});
+                return error.InvalidArguments;
+            };
         } else if (std.mem.eql(u8, arg, "--adaptive")) {
             adaptive = true;
         } else if (std.mem.eql(u8, arg, "--trace")) {
@@ -320,7 +321,11 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--fast")) {
             extraction_mode = .fast;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
+            if (input_file != null) return error.InvalidArguments;
             input_file = arg;
+        } else {
+            std.debug.print("Unknown extract option: {s}\n", .{arg});
+            return error.InvalidArguments;
         }
     }
 
@@ -368,7 +373,15 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.debug.print("Warning: {s} is encrypted and was not authenticated. Text extraction may produce incorrect results.\n", .{path});
     }
 
-    // Setup output
+    // Parse page range
+    const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
+        std.debug.print("Error parsing page range: {}\n", .{err});
+        return err;
+    };
+    defer allocator.free(pages);
+
+    // Do not create or truncate the destination until all input selectors have
+    // been validated successfully.
     const output_handle = if (output_file) |out_path|
         runtime.createFileCwd(out_path) catch |err| {
             std.debug.print("Error creating {s}: {}\n", .{ out_path, err });
@@ -377,13 +390,6 @@ fn runExtract(allocator: std.mem.Allocator, args: []const []const u8) !void {
     else
         null;
     defer if (output_handle) |h| runtime.closeFile(h);
-
-    // Parse page range
-    const pages = parsePageRange(allocator, page_range, doc.pages.items.len) catch |err| {
-        std.debug.print("Error parsing page range: {}\n", .{err});
-        return err;
-    };
-    defer allocator.free(pages);
 
     var fallback_document_text: ?[]u8 = null;
     defer if (fallback_document_text) |text_value| allocator.free(text_value);
@@ -1658,8 +1664,49 @@ test "OCR CLI parsers accept named and numeric PSM values" {
 
 test "legacy extract returns typed argument errors" {
     try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{"-p"}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{"-o"}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{"--format"}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{"--unknown"}));
+    try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{ "first.pdf", "second.pdf" }));
     try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{ "--adaptive", "--ocr-dpi", "nope" }));
     try std.testing.expectError(error.InvalidArguments, runExtract(std.testing.allocator, &.{ "--adaptive", "--ocr-psm", "99" }));
+}
+
+test "invalid page ranges do not create or truncate output files" {
+    const testpdf = @import("testpdf.zig");
+    const allocator = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    runtime.setIo(threaded.io());
+
+    const pdf_data = try testpdf.generateMinimalPdf(allocator, "page range guard");
+    defer allocator.free(pdf_data);
+
+    var input_buf: [96]u8 = undefined;
+    const input_path = try std.fmt.bufPrint(&input_buf, "pdf-parser-page-range-{x}.pdf", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(input_path);
+    defer runtime.deleteFileCwd(input_path);
+    const input_file = try runtime.createFileCwd(input_path);
+    try runtime.writeAllFile(input_file, pdf_data);
+    runtime.closeFile(input_file);
+
+    var output_buf: [96]u8 = undefined;
+    const output_path = try std.fmt.bufPrint(&output_buf, "pdf-parser-page-range-{x}.txt", .{runtime.nanoTimestamp()});
+    runtime.deleteFileCwd(output_path);
+    defer runtime.deleteFileCwd(output_path);
+    const output_file = try runtime.createFileCwd(output_path);
+    try runtime.writeAllFile(output_file, "preserve me");
+    runtime.closeFile(output_file);
+
+    try std.testing.expectError(
+        error.InvalidPageRange,
+        runExtract(allocator, &.{ "-p", "nope", "-o", output_path, input_path }),
+    );
+
+    const output = try runtime.readFileAllocAlignedCwd(allocator, output_path, .fromByteUnits(1));
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("preserve me", output);
 }
 
 test "extract-adaptive fails invoked OCR by default and permits explicit partial output" {
@@ -2944,7 +2991,7 @@ const CharCounter = struct {
 };
 
 fn parsePageRange(allocator: std.mem.Allocator, range_str: ?[]const u8, total_pages: usize) ![]usize {
-    if (range_str == null or range_str.?.len == 0) {
+    if (range_str == null) {
         // Return all pages
         const pages = try allocator.alloc(usize, total_pages);
         for (pages, 0..) |*p, i| {
@@ -2954,52 +3001,96 @@ fn parsePageRange(allocator: std.mem.Allocator, range_str: ?[]const u8, total_pa
     }
 
     const spec = range_str.?;
+    if (spec.len == 0) return error.InvalidPageRange;
 
-    // Count how many pages we'll need
-    var count: usize = 0;
+    var pages: std.ArrayList(usize) = .empty;
+    errdefer pages.deinit(allocator);
+
     var iter = std.mem.splitScalar(u8, spec, ',');
     while (iter.next()) |part| {
         const trimmed = std.mem.trim(u8, part, " ");
+        if (trimmed.len == 0) return error.InvalidPageRange;
+
         if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
+            if (std.mem.indexOfPos(u8, trimmed, dash_pos + 1, "-") != null) return error.InvalidPageRange;
             const start_str = trimmed[0..dash_pos];
             const end_str = trimmed[dash_pos + 1 ..];
-            const start = (std.fmt.parseInt(usize, start_str, 10) catch 1) -| 1;
-            const end = std.fmt.parseInt(usize, end_str, 10) catch total_pages;
-            count += @min(end, total_pages) -| start;
+            if (start_str.len == 0 or end_str.len == 0) return error.InvalidPageRange;
+
+            const start_one = std.fmt.parseInt(usize, start_str, 10) catch return error.InvalidPageRange;
+            const end_one = std.fmt.parseInt(usize, end_str, 10) catch return error.InvalidPageRange;
+            if (start_one == 0 or end_one == 0 or start_one > end_one or end_one > total_pages) {
+                return error.PageOutOfRange;
+            }
+
+            var page_index = start_one - 1;
+            while (page_index < end_one) : (page_index += 1) {
+                try pages.append(allocator, page_index);
+            }
         } else {
-            count += 1;
+            const page_one = std.fmt.parseInt(usize, trimmed, 10) catch return error.InvalidPageRange;
+            if (page_one == 0 or page_one > total_pages) return error.PageOutOfRange;
+            try pages.append(allocator, page_one - 1);
         }
     }
 
-    var pages = try allocator.alloc(usize, count);
-    var idx: usize = 0;
+    if (pages.items.len == 0) return error.InvalidPageRange;
+    return pages.toOwnedSlice(allocator);
+}
 
-    iter = std.mem.splitScalar(u8, spec, ',');
-    while (iter.next()) |part| {
-        const trimmed = std.mem.trim(u8, part, " ");
-        if (std.mem.indexOf(u8, trimmed, "-")) |dash_pos| {
-            const start_str = trimmed[0..dash_pos];
-            const end_str = trimmed[dash_pos + 1 ..];
-            const start = (std.fmt.parseInt(usize, start_str, 10) catch 1) -| 1;
-            const end = std.fmt.parseInt(usize, end_str, 10) catch total_pages;
+test "page range parser accepts single pages and inclusive ranges" {
+    const pages = try parsePageRange(std.testing.allocator, " 1 , 3-5 ", 5);
+    defer std.testing.allocator.free(pages);
 
-            var page = start;
-            while (page < @min(end, total_pages)) : (page += 1) {
-                if (idx < pages.len) {
-                    pages[idx] = page;
-                    idx += 1;
-                }
-            }
-        } else {
-            const page = (std.fmt.parseInt(usize, trimmed, 10) catch continue) -| 1;
-            if (page < total_pages and idx < pages.len) {
-                pages[idx] = page;
-                idx += 1;
-            }
-        }
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 3, 4 }, pages);
+}
+
+test "page range parser rejects malformed and out-of-range input" {
+    const malformed = [_][]const u8{
+        "nope",
+        "2,nope",
+        "",
+        ",",
+        "1,,",
+        "1,",
+        "-2",
+        "2-",
+        "1-2-3",
+        "18446744073709551616",
+    };
+    for (malformed) |spec| {
+        try std.testing.expectError(
+            error.InvalidPageRange,
+            parsePageRange(std.testing.allocator, spec, 5),
+        );
     }
 
-    return pages[0..idx];
+    const out_of_range = [_][]const u8{ "0", "6", "1-6", "3-2" };
+    for (out_of_range) |spec| {
+        try std.testing.expectError(
+            error.PageOutOfRange,
+            parsePageRange(std.testing.allocator, spec, 5),
+        );
+    }
+}
+
+test "page range parser preserves requested order and duplicates" {
+    const pages = try parsePageRange(std.testing.allocator, "3,1-2,2", 3);
+    defer std.testing.allocator.free(pages);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 0, 1, 1 }, pages);
+}
+
+fn pageRangeAllocationProbe(allocator: std.mem.Allocator) !void {
+    const pages = try parsePageRange(allocator, "1,3-5", 5);
+    defer allocator.free(pages);
+}
+
+test "page range parser releases partial results on allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        pageRangeAllocationProbe,
+        .{},
+    );
 }
 
 test "pdftotext fallback forwards an authenticated password" {

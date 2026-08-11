@@ -44,12 +44,13 @@ pub fn build(b: *std.Build) void {
         .root_module = parserModule(b, "src/capi.zig", target, optimize, ocr_build),
     });
 
-    b.installArtifact(shared_lib);
+    const install_shared = b.addInstallArtifact(shared_lib, .{});
+    b.getInstallStep().dependOn(&install_shared.step);
     const install_header = b.addInstallFile(b.path("include/pdf_parser.h"), "include/pdf_parser.h");
     b.getInstallStep().dependOn(&install_header.step);
 
     const shared_step = b.step("shared", "Build shared library for FFI");
-    shared_step.dependOn(&shared_lib.step);
+    shared_step.dependOn(&install_shared.step);
     shared_step.dependOn(&install_header.step);
 
     // WebAssembly build

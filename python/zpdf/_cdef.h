@@ -1,5 +1,13 @@
 typedef struct ZpdfDocument ZpdfDocument;
 
+typedef enum {
+    ZPDF_ERROR_NONE = 0,
+    ZPDF_ERROR_INVALID_HANDLE = 1,
+    ZPDF_ERROR_PAGE_NOT_FOUND = 2,
+    ZPDF_ERROR_EXTRACTION_FAILED = 3,
+    ZPDF_ERROR_OUT_OF_MEMORY = 4,
+} ZpdfLegacyError;
+
 #define PDF_PARSER_ABI_VERSION 2u
 
 typedef enum {
@@ -57,6 +65,7 @@ ZpdfDocument* zpdf_open_memory_unsafe(const uint8_t* data, size_t len);
 void zpdf_close(ZpdfDocument* doc);
 int zpdf_page_count(ZpdfDocument* doc);
 bool zpdf_is_encrypted(ZpdfDocument* doc);
+int zpdf_last_error(void);
 uint8_t* zpdf_extract_page(ZpdfDocument* doc, int page_num, size_t* out_len);
 uint8_t* zpdf_extract_all(ZpdfDocument* doc, size_t* out_len);
 uint8_t* zpdf_extract_all_fast(ZpdfDocument* doc, size_t* out_len);

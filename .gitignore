@@ -17,6 +17,15 @@ benchmark/eval/raw_cache/
 .DS_Store
 Thumbs.db
 __pycache__/
+*.egg-info/
+python/build/
+python/dist/
+python/zpdf/libpdf_parser.dylib
+python/zpdf/libpdf_parser.so
+python/zpdf/pdf_parser.dll
+python/zpdf/libzpdf.dylib
+python/zpdf/libzpdf.so
+python/zpdf/zpdf.dll
 
 # Test files
 test/

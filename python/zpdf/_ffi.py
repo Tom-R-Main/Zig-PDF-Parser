@@ -9,40 +9,42 @@ _cdef_path = Path(__file__).parent / "_cdef.h"
 with open(_cdef_path) as f:
     ffi.cdef(f.read())
 
-def _find_library():
-    candidates = []
 
-    if "PDF_PARSER_LIB" in os.environ:
-        candidates.append(Path(os.environ["PDF_PARSER_LIB"]))
-    if "ZPDF_LIB" in os.environ:
-        candidates.append(Path(os.environ["ZPDF_LIB"]))
+def _library_names():
+    if sys.platform == "darwin":
+        return ("libpdf_parser.dylib", "libzpdf.dylib")
+    if sys.platform == "win32":
+        return ("pdf_parser.dll", "zpdf.dll")
+    return ("libpdf_parser.so", "libzpdf.so")
+
+
+def _find_library():
+    for variable in ("PDF_PARSER_LIB", "ZPDF_LIB"):
+        configured = os.environ.get(variable)
+        if configured is None:
+            continue
+        path = Path(configured).expanduser().resolve()
+        if not path.is_file():
+            raise ImportError(f"{variable} does not name a file: {path}")
+        return str(path)
 
     pkg_dir = Path(__file__).parent
-    if sys.platform == "darwin":
-        candidates.append(pkg_dir / "libpdf_parser.dylib")
-        candidates.append(pkg_dir / "libzpdf.dylib")
-    elif sys.platform == "win32":
-        candidates.append(pkg_dir / "pdf_parser.dll")
-        candidates.append(pkg_dir / "zpdf.dll")
-    else:
-        candidates.append(pkg_dir / "libpdf_parser.so")
-        candidates.append(pkg_dir / "libzpdf.so")
-
     repo_root = pkg_dir.parent.parent
-    lib_dir = repo_root / "zig-out" / "lib"
-    if sys.platform == "darwin":
-        candidates.append(lib_dir / "libpdf_parser.dylib")
-        candidates.append(lib_dir / "libzpdf.dylib")
-    elif sys.platform == "win32":
-        candidates.append(lib_dir / "pdf_parser.dll")
-        candidates.append(lib_dir / "zpdf.dll")
-    else:
-        candidates.append(lib_dir / "libpdf_parser.so")
-        candidates.append(lib_dir / "libzpdf.so")
+    library_names = _library_names()
+    candidates = []
+
+    # A source checkout must exercise the current Zig build, not a stale binary
+    # copied beside the Python package. Installed wheels have no build.zig and
+    # therefore skip this checkout-only path.
+    if (repo_root / "build.zig").is_file():
+        lib_dir = repo_root / "zig-out" / "lib"
+        candidates.extend(lib_dir / name for name in library_names)
+
+    candidates.extend(pkg_dir / name for name in library_names)
 
     for path in candidates:
-        if path.exists():
-            return str(path)
+        if path.is_file():
+            return str(path.resolve())
 
     raise ImportError(f"Could not find pdf-parser library. Searched: {candidates}")
 

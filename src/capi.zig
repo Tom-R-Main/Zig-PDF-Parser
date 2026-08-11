@@ -25,6 +25,35 @@ pub const PdfParserStatus = enum(c_int) {
     extract_error = 3,
 };
 
+/// Error state for the inherited pointer-returning zpdf_* ABI. A null pointer
+/// with `none` means an empty optional result; any other value is a failure.
+pub const ZpdfLegacyError = enum(c_int) {
+    none = 0,
+    invalid_handle = 1,
+    page_not_found = 2,
+    extraction_failed = 3,
+    out_of_memory = 4,
+};
+
+threadlocal var zpdf_last_error_value: ZpdfLegacyError = .none;
+
+fn setLegacyError(value: ZpdfLegacyError) void {
+    zpdf_last_error_value = value;
+}
+
+fn setLegacyErrorFromZig(err: anyerror) void {
+    setLegacyError(if (err == error.OutOfMemory) .out_of_memory else .extraction_failed);
+}
+
+fn beginLegacyOutput(out_len: *usize) void {
+    setLegacyError(.none);
+    out_len.* = 0;
+}
+
+export fn zpdf_last_error() c_int {
+    return @intFromEnum(zpdf_last_error_value);
+}
+
 pub const PdfParserAdaptiveOptions = extern struct {
     abi_version: u32 = pdf_parser_abi_version_value,
     format: c_int = @intFromEnum(PdfParserAdaptiveFormat.artifact_jsonl),
@@ -62,16 +91,24 @@ export fn pdf_parser_abi_version() u32 {
 }
 
 export fn zpdf_open(path_ptr: [*:0]const u8) ?*ZpdfDocument {
+    setLegacyError(.none);
     const path = std.mem.span(path_ptr);
-    const doc = zpdf.Document.open(c_allocator, path) catch return null;
+    const doc = zpdf.Document.open(c_allocator, path) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
     return @ptrCast(doc);
 }
 
 /// Open from caller-owned memory without copying.
 /// The caller must ensure the memory remains valid until zpdf_close.
 export fn zpdf_open_memory_unsafe(data: [*]const u8, len: usize) ?*ZpdfDocument {
+    setLegacyError(.none);
     const slice = data[0..len];
-    const doc = zpdf.Document.openFromMemoryUnsafe(c_allocator, slice, zpdf.ErrorConfig.default()) catch return null;
+    const doc = zpdf.Document.openFromMemoryUnsafe(c_allocator, slice, zpdf.ErrorConfig.default()) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
     return @ptrCast(doc);
 }
 
@@ -104,19 +141,30 @@ export fn zpdf_is_encrypted(handle: ?*ZpdfDocument) bool {
 }
 
 export fn zpdf_extract_page(handle: ?*ZpdfDocument, page_num: c_int, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        if (page_num < 0) return null;
-
-        var buffer: std.ArrayList(u8) = .empty;
-        defer buffer.deinit(c_allocator);
-        doc.extractText(@intCast(page_num), runtime.arrayListWriter(&buffer, c_allocator)) catch return null;
-
-        const slice = buffer.toOwnedSlice(c_allocator) catch return null;
-        out_len.* = slice.len;
-        return slice.ptr;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) {
+        setLegacyError(.page_not_found);
+        return null;
     }
-    return null;
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(c_allocator);
+    doc.extractText(@intCast(page_num), runtime.arrayListWriter(&buffer, c_allocator)) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+
+    const slice = buffer.toOwnedSlice(c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    out_len.* = slice.len;
+    return slice.ptr;
 }
 
 /// Extract text from all pages in reading order
@@ -127,13 +175,18 @@ export fn zpdf_extract_all(handle: ?*ZpdfDocument, out_len: *usize) ?[*]u8 {
 
 /// Extract all pages in fast stream-order mode.
 export fn zpdf_extract_all_fast(handle: ?*ZpdfDocument, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        const result = doc.extractAllTextFast(c_allocator) catch return null;
-        out_len.* = result.len;
-        return result.ptr;
-    }
-    return null;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    const result = doc.extractAllTextFast(c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    out_len.* = result.len;
+    return result.ptr;
 }
 
 /// Alias for zpdf_extract_all (parallel is deprecated, uses sequential)
@@ -413,23 +466,31 @@ fn buildCTextSpans(allocator: std.mem.Allocator, spans: []const zpdf.TextSpan) !
 }
 
 export fn zpdf_extract_bounds(handle: ?*ZpdfDocument, page_num: c_int, out_count: *usize) ?[*]CTextSpan {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        if (page_num < 0) return null;
-
-        const spans = doc.extractTextWithBounds(@intCast(page_num), c_allocator) catch return null;
-        defer zpdf.Document.freeTextSpans(c_allocator, spans);
-        if (spans.len == 0) {
-            out_count.* = 0;
-            return null;
-        }
-
-        const c_spans = buildCTextSpans(c_allocator, spans) catch return null;
-
-        out_count.* = spans.len;
-        return c_spans.ptr;
+    beginLegacyOutput(out_count);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) {
+        setLegacyError(.page_not_found);
+        return null;
     }
-    return null;
+
+    const spans = doc.extractTextWithBounds(@intCast(page_num), c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    defer zpdf.Document.freeTextSpans(c_allocator, spans);
+    if (spans.len == 0) return null;
+
+    const c_spans = buildCTextSpans(c_allocator, spans) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+
+    out_count.* = spans.len;
+    return c_spans.ptr;
 }
 
 fn optionalU32ToC(value: ?u32) i32 {
@@ -451,44 +512,57 @@ export fn zpdf_free_bounds(ptr: ?[*]CTextSpan, count: usize) void {
 
 /// Extract text from a single page in reading order (visual order)
 export fn zpdf_extract_page_reading_order(handle: ?*ZpdfDocument, page_num: c_int, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) return null;
-
-        const page_idx: usize = @intCast(page_num);
-        const page = doc.pages.items[page_idx];
-        const page_width = page.media_box[2] - page.media_box[0];
-
-        // Extract spans with bounds
-        const spans = doc.extractTextWithBounds(page_idx, c_allocator) catch return null;
-        if (spans.len == 0) {
-            out_len.* = 0;
-            return null;
-        }
-        defer zpdf.Document.freeTextSpans(c_allocator, spans);
-
-        // Analyze layout for reading order
-        var layout_result = zpdf.layout.analyzeLayout(c_allocator, spans, page_width) catch return null;
-        defer layout_result.deinit();
-
-        // Get text in reading order
-        const text = layout_result.getTextInOrder(c_allocator) catch return null;
-        out_len.* = text.len;
-        return text.ptr;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) {
+        setLegacyError(.page_not_found);
+        return null;
     }
-    return null;
+
+    const page_idx: usize = @intCast(page_num);
+    const page = doc.pages.items[page_idx];
+    const page_width = page.media_box[2] - page.media_box[0];
+
+    const spans = doc.extractTextWithBounds(page_idx, c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    if (spans.len == 0) return null;
+    defer zpdf.Document.freeTextSpans(c_allocator, spans);
+
+    var layout_result = zpdf.layout.analyzeLayout(c_allocator, spans, page_width) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    defer layout_result.deinit();
+
+    const text = layout_result.getTextInOrder(c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    out_len.* = text.len;
+    return text.ptr;
 }
 
 /// Extract text from all pages in reading order (sequential)
 /// Uses structure tree when available, falls back to geometric sorting
 export fn zpdf_extract_all_reading_order(handle: ?*ZpdfDocument, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        const result = doc.extractAllTextStructured(c_allocator) catch return null;
-        out_len.* = result.len;
-        return result.ptr;
-    }
-    return null;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    const result = doc.extractAllTextStructured(c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    out_len.* = result.len;
+    return result.ptr;
 }
 
 /// Alias for zpdf_extract_all_reading_order (parallel is deprecated)
@@ -498,34 +572,47 @@ export fn zpdf_extract_all_reading_order_parallel(handle: ?*ZpdfDocument, out_le
 
 /// Extract text from a single page as Markdown
 export fn zpdf_extract_page_markdown(handle: ?*ZpdfDocument, page_num: c_int, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) return null;
-
-        const result = doc.extractMarkdown(@intCast(page_num), c_allocator) catch return null;
-        out_len.* = result.len;
-        return result.ptr;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) {
+        setLegacyError(.page_not_found);
+        return null;
     }
-    return null;
+
+    const result = doc.extractMarkdown(@intCast(page_num), c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
+    out_len.* = result.len;
+    return result.ptr;
 }
 
 /// Extract text from all pages as Markdown
 export fn zpdf_extract_all_markdown(handle: ?*ZpdfDocument, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        const result = doc.extractAllMarkdown(c_allocator) catch return null;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    const result = doc.extractAllMarkdown(c_allocator) catch |err| {
+        setLegacyErrorFromZig(err);
+        return null;
+    };
 
-        // extractAllMarkdown returns an allocated slice; treat zero-length as "no data"
-        if (result.len == 0) {
-            c_allocator.free(result);
-            out_len.* = 0;
-            return null;
-        }
-
-        out_len.* = result.len;
-        return result.ptr;
+    // extractAllMarkdown returns an allocated slice; treat zero-length as an
+    // empty successful result rather than an extraction failure.
+    if (result.len == 0) {
+        c_allocator.free(result);
+        return null;
     }
-    return null;
+
+    out_len.* = result.len;
+    return result.ptr;
 }
 
 // =========================================================================
@@ -722,14 +809,19 @@ export fn zpdf_free_search_results(ptr: ?[*]CSearchResult, count: usize) void {
 // =========================================================================
 
 export fn zpdf_get_page_label(handle: ?*ZpdfDocument, page_num: c_int, out_len: *usize) ?[*]u8 {
-    if (handle) |h| {
-        const doc: *zpdf.Document = @ptrCast(@alignCast(h));
-        if (page_num < 0) return null;
-        const label = doc.getPageLabel(c_allocator, @intCast(page_num)) orelse return null;
-        out_len.* = label.len;
-        return label.ptr;
+    beginLegacyOutput(out_len);
+    const h = handle orelse {
+        setLegacyError(.invalid_handle);
+        return null;
+    };
+    const doc: *zpdf.Document = @ptrCast(@alignCast(h));
+    if (page_num < 0 or @as(usize, @intCast(page_num)) >= doc.pages.items.len) {
+        setLegacyError(.page_not_found);
+        return null;
     }
-    return null;
+    const label = doc.getPageLabel(c_allocator, @intCast(page_num)) orelse return null;
+    out_len.* = label.len;
+    return label.ptr;
 }
 
 // =========================================================================
@@ -946,8 +1038,55 @@ test "public header exposes adaptive C ABI constants" {
 
     try std.testing.expectEqual(@as(c_uint, pdf_parser_abi_version_value), c.PDF_PARSER_ABI_VERSION);
     try std.testing.expectEqual(@as(c_int, @intFromEnum(PdfParserAdaptiveFormat.artifact_jsonl)), c.PDF_PARSER_FORMAT_ARTIFACT_JSONL);
+    try std.testing.expectEqual(@as(c_int, @intFromEnum(ZpdfLegacyError.page_not_found)), c.ZPDF_ERROR_PAGE_NOT_FOUND);
     try std.testing.expect(@sizeOf(c.PdfParserAdaptiveOptions) > 0);
     try std.testing.expect(@sizeOf(c.PdfParserAdaptiveResult) > 0);
+}
+
+test "legacy C ABI distinguishes invalid handles, invalid pages, and success" {
+    var out_len: usize = 99;
+    try std.testing.expect(zpdf_extract_page(null, 0, &out_len) == null);
+    try std.testing.expectEqual(@as(usize, 0), out_len);
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(ZpdfLegacyError.invalid_handle)),
+        zpdf_last_error(),
+    );
+
+    const pdf_data = try testpdf.generateMinimalPdf(std.testing.allocator, "legacy ABI errors");
+    defer std.testing.allocator.free(pdf_data);
+    const handle = zpdf_open_memory_unsafe(pdf_data.ptr, pdf_data.len) orelse return error.TestUnexpectedResult;
+    defer zpdf_close(handle);
+
+    out_len = 99;
+    try std.testing.expect(zpdf_extract_page(handle, 999999, &out_len) == null);
+    try std.testing.expectEqual(@as(usize, 0), out_len);
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(ZpdfLegacyError.page_not_found)),
+        zpdf_last_error(),
+    );
+
+    const output = zpdf_extract_page(handle, 0, &out_len) orelse return error.TestUnexpectedResult;
+    defer zpdf_free_buffer(output, out_len);
+    try std.testing.expect(out_len > 0);
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(ZpdfLegacyError.none)),
+        zpdf_last_error(),
+    );
+}
+
+test "legacy bounds ABI zeros count and reports invalid pages" {
+    const pdf_data = try testpdf.generateMinimalPdf(std.testing.allocator, "legacy bounds errors");
+    defer std.testing.allocator.free(pdf_data);
+    const handle = zpdf_open_memory_unsafe(pdf_data.ptr, pdf_data.len) orelse return error.TestUnexpectedResult;
+    defer zpdf_close(handle);
+
+    var out_count: usize = 99;
+    try std.testing.expect(zpdf_extract_bounds(handle, -1, &out_count) == null);
+    try std.testing.expectEqual(@as(usize, 0), out_count);
+    try std.testing.expectEqual(
+        @as(c_int, @intFromEnum(ZpdfLegacyError.page_not_found)),
+        zpdf_last_error(),
+    );
 }
 
 test "adaptive memory C ABI emits artifact JSONL and frees buffers" {

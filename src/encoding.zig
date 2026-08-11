@@ -2886,12 +2886,16 @@ fn resolveEncodingTestObject(_: *const anyopaque, obj: Object) Object {
     return obj;
 }
 
-const ResolveEncodingStreamCounter = struct {
-    stream_resolves: usize = 0,
-
-    fn resolve(ctx: *const anyopaque, obj: Object) Object {
-        const self: *ResolveEncodingStreamCounter = @ptrCast(@alignCast(@constCast(ctx)));
-        if (obj == .stream) self.stream_resolves += 1;
+const RejectUnencodedType3Stream = struct {
+    fn resolve(_: *const anyopaque, obj: Object) Object {
+        switch (obj) {
+            .stream => |stream| {
+                if (std.mem.eql(u8, stream.data, "not parsed")) {
+                    @panic("resolved an unencoded Type3 CharProc");
+                }
+            },
+            else => {},
+        }
         return obj;
     }
 };
@@ -2996,11 +3000,9 @@ test "Type3 metric discovery does not resolve unencoded CharProcs" {
         .{ .key = "Encoding", .value = .{ .dict = .{ .entries = @constCast(encoding_entries[0..]) } } },
         .{ .key = "CharProcs", .value = .{ .dict = .{ .entries = @constCast(charproc_entries[0..]) } } },
     };
-    var counter = ResolveEncodingStreamCounter{};
-    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, ResolveEncodingStreamCounter.resolve, &counter);
+    var enc = try parseFontEncoding(allocator, .{ .entries = @constCast(entries[0..]) }, RejectUnencodedType3Stream.resolve, undefined);
     defer enc.deinit();
 
-    try std.testing.expectEqual(@as(usize, 1), counter.stream_resolves);
     try std.testing.expectEqual(@as(f64, 600), enc.widths.getWidth('A'));
 }
 

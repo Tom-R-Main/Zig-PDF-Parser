@@ -1,6 +1,7 @@
 import pytest
 import zpdf
 from pathlib import Path
+from zpdf import _ffi as zpdf_ffi
 
 # Test files
 TEST_DIR = Path(__file__).parent.parent.parent
@@ -62,6 +63,75 @@ class TestDocumentProperties:
         with zpdf.Document(TEST_PDF) as doc:
             with pytest.raises(zpdf.PageNotFoundError):
                 doc.get_page_info(9999)
+
+
+class TestNativeErrors:
+    def test_null_handle_sets_explicit_error_and_zeros_length(self):
+        out_len = zpdf_ffi.ffi.new("size_t*", 99)
+        assert zpdf_ffi.lib.zpdf_extract_page(zpdf_ffi.ffi.NULL, 0, out_len) == zpdf_ffi.ffi.NULL
+        assert out_len[0] == 0
+        assert zpdf_ffi.lib.zpdf_last_error() == zpdf_ffi.lib.ZPDF_ERROR_INVALID_HANDLE
+
+    def test_open_failure_sets_explicit_error(self):
+        assert zpdf_ffi.lib.zpdf_open(b"/nonexistent/zpdf-input.pdf") == zpdf_ffi.ffi.NULL
+        assert zpdf_ffi.lib.zpdf_last_error() == zpdf_ffi.lib.ZPDF_ERROR_EXTRACTION_FAILED
+
+    def test_invalid_page_sets_explicit_error(self):
+        with zpdf.Document(TEST_PDF) as doc:
+            out_len = zpdf_ffi.ffi.new("size_t*", 99)
+            assert zpdf_ffi.lib.zpdf_extract_page(doc._handle, 999999, out_len) == zpdf_ffi.ffi.NULL
+            assert out_len[0] == 0
+            assert zpdf_ffi.lib.zpdf_last_error() == zpdf_ffi.lib.ZPDF_ERROR_PAGE_NOT_FOUND
+
+    def test_success_clears_stale_native_error(self):
+        with zpdf.Document(TEST_PDF) as doc:
+            out_len = zpdf_ffi.ffi.new("size_t*")
+            assert zpdf_ffi.lib.zpdf_extract_page(doc._handle, 999999, out_len) == zpdf_ffi.ffi.NULL
+            assert zpdf_ffi.lib.zpdf_last_error() == zpdf_ffi.lib.ZPDF_ERROR_PAGE_NOT_FOUND
+
+            buf_ptr = zpdf_ffi.lib.zpdf_extract_page(doc._handle, 0, out_len)
+            assert buf_ptr != zpdf_ffi.ffi.NULL
+            try:
+                assert zpdf_ffi.lib.zpdf_last_error() == zpdf_ffi.lib.ZPDF_ERROR_NONE
+            finally:
+                zpdf_ffi.lib.zpdf_free_buffer(buf_ptr, out_len[0])
+
+    @pytest.mark.parametrize("method", ["get_page_label", "get_links", "get_images"])
+    @pytest.mark.parametrize("page_num", [-1, 999999])
+    def test_page_helpers_reject_invalid_pages(self, method, page_num):
+        with zpdf.Document(TEST_PDF) as doc:
+            with pytest.raises(zpdf.PageNotFoundError):
+                getattr(doc, method)(page_num)
+
+
+class TestLibrarySelection:
+    def test_checkout_build_precedes_packaged_library(self, tmp_path, monkeypatch):
+        package_dir = tmp_path / "repo" / "python" / "zpdf"
+        checkout_dir = tmp_path / "repo" / "zig-out" / "lib"
+        package_dir.mkdir(parents=True)
+        checkout_dir.mkdir(parents=True)
+        (tmp_path / "repo" / "build.zig").write_text("// marker")
+
+        canonical_name = zpdf_ffi._library_names()[0]
+        packaged = package_dir / canonical_name
+        checkout = checkout_dir / canonical_name
+        packaged.write_bytes(b"stale")
+        checkout.write_bytes(b"current")
+
+        monkeypatch.setattr(zpdf_ffi, "__file__", str(package_dir / "_ffi.py"))
+        monkeypatch.delenv("PDF_PARSER_LIB", raising=False)
+        monkeypatch.delenv("ZPDF_LIB", raising=False)
+        assert Path(zpdf_ffi._find_library()) == checkout.resolve()
+
+    def test_invalid_primary_override_does_not_fall_through(self, tmp_path, monkeypatch):
+        legacy = tmp_path / zpdf_ffi._library_names()[1]
+        legacy.write_bytes(b"legacy")
+        missing = tmp_path / "missing-library"
+        monkeypatch.setenv("PDF_PARSER_LIB", str(missing))
+        monkeypatch.setenv("ZPDF_LIB", str(legacy))
+
+        with pytest.raises(ImportError, match="PDF_PARSER_LIB does not name a file"):
+            zpdf_ffi._find_library()
 
 
 class TestTextExtraction:
