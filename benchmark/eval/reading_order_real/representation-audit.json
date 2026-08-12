@@ -11,15 +11,25 @@
   },
   "exact_anchor_audit": {
     "anchor_count": 96,
-    "resolved_one_to_one": 51,
-    "not_found": 11,
+    "resolved_one_to_one": 52,
+    "not_found": 7,
     "ambiguous": 5,
-    "collision": 29,
+    "collision": 32,
     "not_found_causes": {
       "present_in_removed_header_block": 7,
-      "straight_vs_curly_apostrophe_truth_transcription": 4
+      "straight_vs_curly_apostrophe_truth_transcription": 0
     },
-    "interpretation": "After separating truth transcription defects, every missing source phrase is present in layout output. The dominant representation failure is multiple intended regions collapsing into one live block, followed by page titles being removed as headers without cross-page recurrence evidence."
+    "interpretation": "Four objective straight-versus-curly apostrophe transcription defects were corrected in truth. Every remaining missing source phrase is present in a block removed as a header. The dominant representation failure remains multiple intended regions collapsing into one live block, followed by page titles being removed as headers without cross-page recurrence evidence."
+  },
+  "determinism": {
+    "repeated_audit_runs": 2,
+    "audit_byte_identical": true,
+    "repeated_artifact_jsonl_runs": 5,
+    "artifact_jsonl_byte_identical": true,
+    "repeated_stream_jsonl_runs": 5,
+    "stream_payload_identical_after_elapsed_ms_normalization": true,
+    "stream_byte_identical": false,
+    "stream_difference": "Only document_finished.elapsed_ms varied; record order and all non-timing payload fields were identical."
   },
   "follow_up_experiments": [
     {
@@ -51,6 +61,28 @@
       "ambiguous_anchor_count": 3,
       "result": "falsified_and_removed",
       "reason": "Preserving distant same-baseline fragments alone did not change any frozen anchor outcome; the missing unit is a hierarchical region and semantic-block representation."
+    },
+    {
+      "work_item": "PDF-LAYOUT-05B",
+      "treatment": "local large-gap fragments joined from the existing native baseline groups",
+      "anchor_count": 96,
+      "resolved_anchor_count": 15,
+      "not_found_anchor_count": 81,
+      "ambiguous_anchor_count": 0,
+      "collision_anchor_count": 0,
+      "result": "falsified_and_removed",
+      "reason": "The treatment inherited native baseline groups that had already interleaved characters from adjacent visual lines. Region splitting occurred after the destructive merge."
+    },
+    {
+      "work_item": "PDF-LAYOUT-05B",
+      "treatment": "strict glyph-bbox baseline bands followed by local large-gap splits and conservative vertical joins",
+      "anchor_count": 96,
+      "resolved_anchor_count": 49,
+      "not_found_anchor_count": 27,
+      "ambiguous_anchor_count": 6,
+      "collision_anchor_count": 14,
+      "result": "falsified_and_removed",
+      "reason": "The strict bands prevented the observed character interleaving but still failed to recover stable paragraph and semantic-region boundaries. The result was below the corrected 52-anchor baseline and exhausted the permitted revision."
     }
   ],
   "fixtures": [
@@ -67,5 +99,5 @@
     {"doc_id": "reading-order-real-sec-043-holdout", "error": "NodeAnchorCollision"},
     {"doc_id": "reading-order-real-sec-049-holdout", "error": "NodeAnchorNotFound"}
   ],
-  "decision": "Do not tune or promote graph evidence. Build section-local regions directly from glyph or line fragments while preserving their identity, then repeat this frozen representation gate."
+  "decision": "Do not tune or promote graph evidence. The next representation must be hierarchical: preserve glyph-to-line identity, infer rectilinear whitespace cuts at multiple scales, retain parent and leaf regions, and classify recurrent furniture separately. Repeat this frozen representation gate before any projection experiment."
 }

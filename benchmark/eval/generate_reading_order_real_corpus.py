@@ -77,7 +77,7 @@ def fixtures() -> tuple[Fixture, ...]:
                 ("left_tail", "Net interest income reached a low"),
                 ("stat_card", "net income in 2024"),
                 ("right_chart", "2024 BAC stock performance"),
-                ("right_body", "every employee's responsibility to find"),
+                ("right_body", "every employee’s responsibility to find"),
                 ("right_section", "Creating opportunity for those"),
             ],
             [
@@ -140,7 +140,7 @@ def fixtures() -> tuple[Fixture, ...]:
             [
                 ("left_top", "Bank of America Student Leaders program"),
                 ("left_mid", "Our commitment to provide important support"),
-                ("left_lower", "world's most well-known sporting events"),
+                ("left_lower", "world’s most well-known sporting events"),
                 ("left_end", "communities in times of crisis"),
                 ("left_stat", "philanthropic impact from"),
                 ("right_top", "devastation caused by Hurricane Helene"),
@@ -217,7 +217,7 @@ def fixtures() -> tuple[Fixture, ...]:
                 ("heading", "Providing a comprehensive"),
                 ("intro", "Merrill advisors serve"),
                 ("left_section", "Harnessing our industry leadership"),
-                ("left_body", "Merrill's financial advisors are at the center"),
+                ("left_body", "Merrill’s financial advisors are at the center"),
                 ("left_lower", "Leveraging an extended team"),
                 ("left_stat", "fee-based AUM flows"),
                 ("right_top", "Working in partnership with ISG specialists"),
@@ -298,7 +298,7 @@ def fixtures() -> tuple[Fixture, ...]:
                 ("left_tail", "Germany has a longstanding commitment"),
                 ("right_top", "organization working across Germany"),
                 ("right_stat", "teammates in Germany"),
-                ("right_mid", "support our clients' needs related"),
+                ("right_mid", "support our clients’ needs related"),
                 ("right_tail", "International business contributing"),
             ],
             [

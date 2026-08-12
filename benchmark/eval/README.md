@@ -356,30 +356,44 @@ callouts, and side labels into one `LayoutBlock`, while some intended regions
 are removed as furniture. A graph over those blocks cannot repair order inside
 the merged node.
 
-Three bounded follow-ups were tested and removed after failing the same frozen
+Five bounded treatments were tested and removed after failing the same frozen
 gate. Sparse global occupancy plus repeated row-gap recovery resolved 81 of 96
 anchors as written, but remained below the 95% threshold and regressed the
 existing two-column footer control. Replacing content-stream spans with the
 current glyph-first line spans resolved only 59 of 96 anchors, even when given
 the native gutter or opt-in row-gap recovery. Splitting large horizontal gaps
-inside those native lines produced the identical 59-of-96 outcome. The exact
-treatment results are recorded in `reading_order_real/representation-audit.json`.
+inside those native lines produced the identical 59-of-96 outcome. A subsequent
+section-local treatment exposed a deeper failure: using the existing native
+baseline groups resolved only 15 anchors because some groups had already
+interleaved adjacent lines. Rebuilding strict bands from glyph bounding boxes
+prevented that specific corruption but resolved only 49 anchors, below the
+corrected baseline, because flat vertical joins still did not recover stable
+paragraph and semantic-region boundaries. The exact treatment results are
+recorded in `reading_order_real/representation-audit.json`.
 
-The evidence rules out another global-gutter threshold pass. The next
-dependency is a section-local layout-region representation that preserves
-fragment-to-line-to-region identity instead of flattening the page to spans and
-then attempting to rediscover regions. Only after that representation gate
-passes should graph edges or structure-tree corroboration be retested.
+The evidence rules out another global-gutter or flat-region threshold pass. The
+next dependency is a hierarchical rectilinear representation that preserves
+glyph-to-line-to-leaf-to-parent identity, represents whitespace cuts at multiple
+scales, and classifies recurrent furniture independently. Only after that
+representation gate passes should graph edges or structure-tree corroboration
+be retested.
 
 `--reading-graph-audit` is an evaluator-only diagnostic. It emits every truth
 anchor status and match, every live graph node, and every layout block,
 including removed furniture, with text and geometry. It does not alter normal
-evaluation JSONL or any extraction schema. The complete audit found 51 of 96
-anchors mapped one-to-one, 29 collisions, five ambiguous anchors, and 11
-not-found anchors. Seven of the latter were present in blocks incorrectly
-removed as page headers; the other four were straight-versus-curly apostrophe
-transcription mismatches in truth. The dominant parser failure is therefore
-block granularity, not text recall.
+evaluation JSONL or any extraction schema. Four objective straight-versus-curly
+apostrophe transcription mismatches were corrected in the generated truth. The
+corrected audit finds 52 of 96 anchors mapped one-to-one, 32 collisions, five
+ambiguous anchors, and seven not-found anchors. Every remaining missing phrase
+is present in a block incorrectly removed as a page header. The dominant parser
+failure is therefore block granularity and furniture classification, not text
+recall.
+
+Two repeated audit runs and five repeated artifact JSONL extractions were
+byte-identical. Five stream JSONL runs had identical record order and payloads
+after removing `document_finished.elapsed_ms`; raw stream bytes differed only in
+that runtime observation. The audit records this existing lifecycle-field caveat
+instead of treating it as reading-order nondeterminism.
 
 ## Corpus Layout
 
