@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "left_top",
+      "page_index": 0,
+      "text_anchor": "Bank of America Student Leaders program"
+    },
+    {
+      "id": "left_mid",
+      "page_index": 0,
+      "text_anchor": "Our commitment to provide important support"
+    },
+    {
+      "id": "left_lower",
+      "page_index": 0,
+      "text_anchor": "world's most well-known sporting events"
+    },
+    {
+      "id": "left_end",
+      "page_index": 0,
+      "text_anchor": "communities in times of crisis"
+    },
+    {
+      "id": "left_stat",
+      "page_index": 0,
+      "text_anchor": "philanthropic impact from"
+    },
+    {
+      "id": "right_top",
+      "page_index": 0,
+      "text_anchor": "devastation caused by Hurricane Helene"
+    },
+    {
+      "id": "right_mid",
+      "page_index": 0,
+      "text_anchor": "teammates actively invest their own time"
+    },
+    {
+      "id": "right_lower",
+      "page_index": 0,
+      "text_anchor": "invest in opportunities to help improve lives"
+    },
+    {
+      "id": "right_stat",
+      "page_index": 0,
+      "text_anchor": "volunteer hours recorded"
+    }
+  ],
+  "required_precedence": [
+    [
+      "left_top",
+      "left_mid"
+    ],
+    [
+      "left_mid",
+      "left_lower"
+    ],
+    [
+      "left_lower",
+      "left_end"
+    ],
+    [
+      "left_end",
+      "right_top"
+    ],
+    [
+      "right_top",
+      "right_mid"
+    ],
+    [
+      "right_mid",
+      "right_lower"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_top",
+      "left_end"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "left_stat",
+      "right_stat"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "quote",
+      "page_index": 0,
+      "text_anchor": "driven by a client-first"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "At Bank of America, we are driven"
+    },
+    {
+      "id": "left_tail",
+      "page_index": 0,
+      "text_anchor": "Germany has a longstanding commitment"
+    },
+    {
+      "id": "right_top",
+      "page_index": 0,
+      "text_anchor": "organization working across Germany"
+    },
+    {
+      "id": "right_stat",
+      "page_index": 0,
+      "text_anchor": "teammates in Germany"
+    },
+    {
+      "id": "right_mid",
+      "page_index": 0,
+      "text_anchor": "support our clients' needs related"
+    },
+    {
+      "id": "right_tail",
+      "page_index": 0,
+      "text_anchor": "International business contributing"
+    }
+  ],
+  "required_precedence": [
+    [
+      "quote",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "left_tail"
+    ],
+    [
+      "right_top",
+      "right_mid"
+    ],
+    [
+      "right_mid",
+      "right_tail"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_mid",
+      "quote"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "quote",
+      "right_top"
+    ],
+    [
+      "right_stat",
+      "left_body"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

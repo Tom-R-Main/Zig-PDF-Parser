@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "side_label",
+      "page_index": 0,
+      "text_anchor": "eight lines of business | preferred banking"
+    },
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Delivering financial solutions that meet"
+    },
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "In Preferred Banking, we support clients"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "Our team provides clients and small businesses"
+    },
+    {
+      "id": "stat",
+      "page_index": 0,
+      "text_anchor": "Preferred Banking teammates"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Investing in financial centers"
+    },
+    {
+      "id": "right_continuation",
+      "page_index": 0,
+      "text_anchor": "destinations to serve more clients"
+    },
+    {
+      "id": "right_close",
+      "page_index": 0,
+      "text_anchor": "plan to open more than 200"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "intro"
+    ],
+    [
+      "intro",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "right_continuation"
+    ],
+    [
+      "right_continuation",
+      "right_close"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_continuation",
+      "left_section"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "side_label",
+      "right_continuation"
+    ],
+    [
+      "stat",
+      "right_continuation"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

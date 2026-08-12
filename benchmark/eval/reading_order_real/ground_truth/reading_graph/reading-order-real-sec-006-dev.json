@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "top_right",
+      "page_index": 0,
+      "text_anchor": "These communities needed a bank"
+    },
+    {
+      "id": "left_start",
+      "page_index": 0,
+      "text_anchor": "U.S. capitalism is still the engine"
+    },
+    {
+      "id": "left_tail",
+      "page_index": 0,
+      "text_anchor": "our roots run as deep as in the U.S"
+    },
+    {
+      "id": "quote",
+      "page_index": 0,
+      "text_anchor": "source of strength for those"
+    },
+    {
+      "id": "right_after",
+      "page_index": 0,
+      "text_anchor": "assess how to help all our stakeholders"
+    },
+    {
+      "id": "right_list",
+      "page_index": 0,
+      "text_anchor": "When we listen, we hear our stakeholders"
+    }
+  ],
+  "required_precedence": [
+    [
+      "top_right",
+      "left_start"
+    ],
+    [
+      "left_start",
+      "left_tail"
+    ],
+    [
+      "quote",
+      "right_after"
+    ],
+    [
+      "right_after",
+      "right_list"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_after",
+      "top_right"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "quote",
+      "left_tail"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

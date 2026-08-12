@@ -327,6 +327,49 @@ but exact files differed in the pre-existing `document_finished.elapsed_ms`
 lifecycle measurement; exact stream bytes therefore did not pass the stated
 promotion gate either.
 
+### Real-page representation preflight
+
+`PDF-READORDER-02` tested the block graph's representation boundary before
+changing geometric evidence. `generate_reading_order_real_corpus.py` verifies
+the exact SHA-256 of the existing ignored `table-heavy-sec.pdf` cache entry and
+derives six development and six frozen holdout pages from a real annual report:
+
+```sh
+python3 benchmark/eval/generate_reading_order_real_corpus.py
+zig build eval -- --adaptive --disable-ocr \
+  --manifest benchmark/eval/reading_order_real/manifest.tsv \
+  --reading-order-mode diagnostic --reading-order-no-structure
+```
+
+The derived PDFs and full page-text transcriptions stay ignored and must be
+regenerated locally; the source digest, page selection, relation truth,
+metadata, and audit result are checked in. This avoids treating a
+redistribution-unclear annual report as ordinary fixture material.
+
+The frozen preflight was not representable by the current live-block graph.
+All 12 fixtures failed the evaluator's required unique-anchor contract before
+edge scoring: six `NodeAnchorNotFound`, five `NodeAnchorCollision`, and one
+`NodeAnchorAmbiguous`. Visual review and debug overlays showed the dominant
+failure class: the layout layer often merges text from parallel columns,
+callouts, and side labels into one `LayoutBlock`, while some intended regions
+are removed as furniture. A graph over those blocks cannot repair order inside
+the merged node.
+
+Three bounded follow-ups were tested and removed after failing the same frozen
+gate. Sparse global occupancy plus repeated row-gap recovery resolved 81 of 96
+anchors as written, but remained below the 95% threshold and regressed the
+existing two-column footer control. Replacing content-stream spans with the
+current glyph-first line spans resolved only 59 of 96 anchors, even when given
+the native gutter or opt-in row-gap recovery. Splitting large horizontal gaps
+inside those native lines produced the identical 59-of-96 outcome. The exact
+treatment results are recorded in `reading_order_real/representation-audit.json`.
+
+The evidence rules out another global-gutter threshold pass. The next
+dependency is a section-local layout-region representation that preserves
+fragment-to-line-to-region identity instead of flattening the page to spans and
+then attempting to rediscover regions. Only after that representation gate
+passes should graph edges or structure-tree corroboration be retested.
+
 ## Corpus Layout
 
 ```text

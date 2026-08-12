@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Using the power of every connection"
+    },
+    {
+      "id": "top_body",
+      "page_index": 0,
+      "text_anchor": "Through our workforce development"
+    },
+    {
+      "id": "stat",
+      "page_index": 0,
+      "text_anchor": "invested in workforce partners"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Delivering skill-specific learning"
+    },
+    {
+      "id": "left_lower",
+      "page_index": 0,
+      "text_anchor": "Connecting the expertise of our teammates"
+    },
+    {
+      "id": "right_section",
+      "page_index": 0,
+      "text_anchor": "Advancing local workforce efforts"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "By partnering with employers"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "top_body"
+    ],
+    [
+      "top_body",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_lower"
+    ],
+    [
+      "right_section",
+      "right_body"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_section",
+      "heading"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "stat",
+      "right_section"
+    ],
+    [
+      "left_lower",
+      "right_section"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

@@ -1,0 +1,59 @@
+{
+  "milestone": "PDF-READORDER-02",
+  "source_sha256": "943cec3d492a966b4b29a15154aaf7c46a81465c958510c44301b0ffa01e4d5e",
+  "fixture_count": 12,
+  "representable_fixture_count": 0,
+  "result": "falsified_before_edge_tuning",
+  "failure_counts": {
+    "NodeAnchorNotFound": 6,
+    "NodeAnchorCollision": 5,
+    "NodeAnchorAmbiguous": 1
+  },
+  "follow_up_experiments": [
+    {
+      "work_item": "PDF-LAYOUT-02",
+      "treatment": "sparse page-wide occupancy plus repeated row-gap gutter recovery over content-stream spans",
+      "anchor_count": 96,
+      "resolved_anchor_count": 81,
+      "not_found_anchor_count": 10,
+      "ambiguous_anchor_count": 5,
+      "result": "not_promoted",
+      "reason": "Below the 95 percent representation gate and regressed the existing two-column footer control."
+    },
+    {
+      "work_item": "PDF-LAYOUT-03",
+      "treatment": "quality-gated glyph-first line spans with native gutter and opt-in row-gap recovery",
+      "anchor_count": 96,
+      "resolved_anchor_count": 59,
+      "not_found_anchor_count": 34,
+      "ambiguous_anchor_count": 3,
+      "result": "falsified_and_removed",
+      "reason": "Flattened line spans still discard the local region and fragment identity required by graph nodes."
+    },
+    {
+      "work_item": "PDF-LAYOUT-04",
+      "treatment": "diagnostic large-gap fragments inside native lines plus opt-in row-gap region recovery",
+      "anchor_count": 96,
+      "resolved_anchor_count": 59,
+      "not_found_anchor_count": 34,
+      "ambiguous_anchor_count": 3,
+      "result": "falsified_and_removed",
+      "reason": "Preserving distant same-baseline fragments alone did not change any frozen anchor outcome; the missing unit is a hierarchical region and semantic-block representation."
+    }
+  ],
+  "fixtures": [
+    {"doc_id": "reading-order-real-sec-005-dev", "error": "NodeAnchorNotFound"},
+    {"doc_id": "reading-order-real-sec-006-dev", "error": "NodeAnchorCollision"},
+    {"doc_id": "reading-order-real-sec-008-dev", "error": "NodeAnchorNotFound"},
+    {"doc_id": "reading-order-real-sec-012-dev", "error": "NodeAnchorCollision"},
+    {"doc_id": "reading-order-real-sec-018-dev", "error": "NodeAnchorCollision"},
+    {"doc_id": "reading-order-real-sec-020-dev", "error": "NodeAnchorNotFound"},
+    {"doc_id": "reading-order-real-sec-022-holdout", "error": "NodeAnchorNotFound"},
+    {"doc_id": "reading-order-real-sec-024-holdout", "error": "NodeAnchorCollision"},
+    {"doc_id": "reading-order-real-sec-030-holdout", "error": "NodeAnchorNotFound"},
+    {"doc_id": "reading-order-real-sec-037-holdout", "error": "NodeAnchorAmbiguous"},
+    {"doc_id": "reading-order-real-sec-043-holdout", "error": "NodeAnchorCollision"},
+    {"doc_id": "reading-order-real-sec-049-holdout", "error": "NodeAnchorNotFound"}
+  ],
+  "decision": "Do not tune or promote graph evidence. Build section-local regions directly from glyph or line fragments while preserving their identity, then repeat this frozen representation gate."
+}

@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "left_heading",
+      "page_index": 0,
+      "text_anchor": "To our shareholders"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Delivering consistent, long-term results"
+    },
+    {
+      "id": "left_tail",
+      "page_index": 0,
+      "text_anchor": "Net interest income reached a low"
+    },
+    {
+      "id": "stat_card",
+      "page_index": 0,
+      "text_anchor": "net income in 2024"
+    },
+    {
+      "id": "right_chart",
+      "page_index": 0,
+      "text_anchor": "2024 BAC stock performance"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "every employee's responsibility to find"
+    },
+    {
+      "id": "right_section",
+      "page_index": 0,
+      "text_anchor": "Creating opportunity for those"
+    }
+  ],
+  "required_precedence": [
+    [
+      "left_heading",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_tail"
+    ],
+    [
+      "right_chart",
+      "right_body"
+    ],
+    [
+      "right_body",
+      "right_section"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_body",
+      "left_heading"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "stat_card",
+      "right_body"
+    ],
+    [
+      "stat_card",
+      "right_section"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

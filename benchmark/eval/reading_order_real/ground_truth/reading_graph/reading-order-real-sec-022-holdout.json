@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "side_label",
+      "page_index": 0,
+      "text_anchor": "eight lines of business | merrill"
+    },
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Providing a comprehensive"
+    },
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "Merrill advisors serve"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Harnessing our industry leadership"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "Merrill's financial advisors are at the center"
+    },
+    {
+      "id": "left_lower",
+      "page_index": 0,
+      "text_anchor": "Leveraging an extended team"
+    },
+    {
+      "id": "left_stat",
+      "page_index": 0,
+      "text_anchor": "fee-based AUM flows"
+    },
+    {
+      "id": "right_top",
+      "page_index": 0,
+      "text_anchor": "Working in partnership with ISG specialists"
+    },
+    {
+      "id": "right_section",
+      "page_index": 0,
+      "text_anchor": "Providing clients all Bank of America"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "In addition to our investment platform"
+    },
+    {
+      "id": "right_stat",
+      "page_index": 0,
+      "text_anchor": "banking accounts opened"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "intro"
+    ],
+    [
+      "intro",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "left_lower"
+    ],
+    [
+      "left_lower",
+      "right_top"
+    ],
+    [
+      "right_top",
+      "right_section"
+    ],
+    [
+      "right_section",
+      "right_body"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_top",
+      "left_section"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "side_label",
+      "right_body"
+    ],
+    [
+      "left_stat",
+      "right_top"
+    ],
+    [
+      "right_stat",
+      "left_lower"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

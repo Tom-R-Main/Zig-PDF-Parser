@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "side_label",
+      "page_index": 0,
+      "text_anchor": "eight lines of business | private bank"
+    },
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Providing a customized wealth management"
+    },
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "Private Bank provides wealth management solutions"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Meeting the comprehensive needs"
+    },
+    {
+      "id": "left_lower",
+      "page_index": 0,
+      "text_anchor": "Delivering Responsible Growth"
+    },
+    {
+      "id": "left_stat",
+      "page_index": 0,
+      "text_anchor": "net new client relationships"
+    },
+    {
+      "id": "right_top",
+      "page_index": 0,
+      "text_anchor": "Our client-focused growth strategy"
+    },
+    {
+      "id": "right_bullet",
+      "page_index": 0,
+      "text_anchor": "Grow deposit, loan and investment accounts"
+    },
+    {
+      "id": "right_close",
+      "page_index": 0,
+      "text_anchor": "Prioritize investments in technology"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "intro"
+    ],
+    [
+      "intro",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_lower"
+    ],
+    [
+      "left_lower",
+      "right_top"
+    ],
+    [
+      "right_top",
+      "right_bullet"
+    ],
+    [
+      "right_bullet",
+      "right_close"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_top",
+      "left_lower"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "side_label",
+      "right_bullet"
+    ],
+    [
+      "left_stat",
+      "right_top"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

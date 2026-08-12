@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "side_label",
+      "page_index": 0,
+      "text_anchor": "eight lines of business | retail banking"
+    },
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Empowering clients with solutions"
+    },
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "Retail Banking brings together"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Driving Responsible Growth"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "Retail Banking team supports"
+    },
+    {
+      "id": "right_bullets",
+      "page_index": 0,
+      "text_anchor": "Keep the Change"
+    },
+    {
+      "id": "right_section",
+      "page_index": 0,
+      "text_anchor": "Providing tools to help clients"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "extensive personalized support"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "intro"
+    ],
+    [
+      "intro",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "right_bullets"
+    ],
+    [
+      "right_bullets",
+      "right_section"
+    ],
+    [
+      "right_section",
+      "right_body"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_section",
+      "heading"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "side_label",
+      "right_body"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

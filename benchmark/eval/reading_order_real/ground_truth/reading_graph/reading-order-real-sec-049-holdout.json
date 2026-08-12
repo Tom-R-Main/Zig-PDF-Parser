@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Attracting talent"
+    },
+    {
+      "id": "top_body",
+      "page_index": 0,
+      "text_anchor": "Building a strong pipeline of talent"
+    },
+    {
+      "id": "stats_heading",
+      "page_index": 0,
+      "text_anchor": "2024 hiring statistics"
+    },
+    {
+      "id": "stats_grid",
+      "page_index": 0,
+      "text_anchor": "Pathways hires from"
+    },
+    {
+      "id": "right_section",
+      "page_index": 0,
+      "text_anchor": "Supporting career development"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "ways we invest in our teammates"
+    },
+    {
+      "id": "right_tail",
+      "page_index": 0,
+      "text_anchor": "drive innovative learning"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "top_body"
+    ],
+    [
+      "right_section",
+      "right_body"
+    ],
+    [
+      "right_body",
+      "right_tail"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_section",
+      "heading"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "stats_heading",
+      "right_section"
+    ],
+    [
+      "stats_grid",
+      "right_body"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

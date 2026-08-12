@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "left_heading",
+      "page_index": 0,
+      "text_anchor": "Delivering for our clients"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "One way we are unique"
+    },
+    {
+      "id": "left_stat",
+      "page_index": 0,
+      "text_anchor": "digital client logins"
+    },
+    {
+      "id": "left_tail",
+      "page_index": 0,
+      "text_anchor": "For our Global Banking clients"
+    },
+    {
+      "id": "right_start",
+      "page_index": 0,
+      "text_anchor": "Across our wealth management businesses"
+    },
+    {
+      "id": "right_stat",
+      "page_index": 0,
+      "text_anchor": "wealth management client"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "Global Banking also delivered"
+    },
+    {
+      "id": "right_tail",
+      "page_index": 0,
+      "text_anchor": "strong, diversified deposit franchise"
+    }
+  ],
+  "required_precedence": [
+    [
+      "left_heading",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "left_tail"
+    ],
+    [
+      "right_start",
+      "right_body"
+    ],
+    [
+      "right_body",
+      "right_tail"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_body",
+      "left_heading"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "left_stat",
+      "right_start"
+    ],
+    [
+      "right_stat",
+      "left_body"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}

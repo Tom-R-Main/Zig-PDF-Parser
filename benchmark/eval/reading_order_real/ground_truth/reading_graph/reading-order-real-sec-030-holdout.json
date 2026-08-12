@@ -1,0 +1,90 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "side_label",
+      "page_index": 0,
+      "text_anchor": "global corporate & investment banking"
+    },
+    {
+      "id": "heading",
+      "page_index": 0,
+      "text_anchor": "Helping our clients succeed"
+    },
+    {
+      "id": "intro",
+      "page_index": 0,
+      "text_anchor": "Global Corporate & Investment Banking"
+    },
+    {
+      "id": "left_section",
+      "page_index": 0,
+      "text_anchor": "Focusing on client needs"
+    },
+    {
+      "id": "left_body",
+      "page_index": 0,
+      "text_anchor": "corporate and investment banking clients depend"
+    },
+    {
+      "id": "left_quote",
+      "page_index": 0,
+      "text_anchor": "Strong investment banking results"
+    },
+    {
+      "id": "right_top",
+      "page_index": 0,
+      "text_anchor": "focus on key business opportunities"
+    },
+    {
+      "id": "right_stat",
+      "page_index": 0,
+      "text_anchor": "increase in investment banking"
+    },
+    {
+      "id": "right_body",
+      "page_index": 0,
+      "text_anchor": "In investment banking, we maintained"
+    }
+  ],
+  "required_precedence": [
+    [
+      "heading",
+      "intro"
+    ],
+    [
+      "intro",
+      "left_section"
+    ],
+    [
+      "left_section",
+      "left_body"
+    ],
+    [
+      "left_body",
+      "right_top"
+    ],
+    [
+      "right_top",
+      "right_body"
+    ]
+  ],
+  "forbidden_precedence": [
+    [
+      "right_top",
+      "left_body"
+    ]
+  ],
+  "ambiguous_pairs": [
+    [
+      "side_label",
+      "right_body"
+    ],
+    [
+      "left_quote",
+      "right_stat"
+    ]
+  ],
+  "relations": [],
+  "valid_orders": []
+}
