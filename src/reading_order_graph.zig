@@ -21,10 +21,19 @@ pub const EvidenceKind = enum(u4) {
     sidebar_anchor,
     caption_candidate,
     footnote_marker,
+    hierarchy_sibling,
+    local_boundary,
+    spanning_boundary,
+    repeated_callout,
 
     pub fn mask(self: EvidenceKind) EvidenceMask {
         return @as(EvidenceMask, 1) << @intFromEnum(self);
     }
+};
+
+pub const GeometryModel = enum(u8) {
+    flat,
+    hierarchy,
 };
 
 pub const BlockNode = struct {
@@ -70,6 +79,7 @@ pub const BuildOptions = struct {
     structure_is_hard: bool = true,
     include_semantics: bool = true,
     include_geometry: bool = true,
+    geometry_model: GeometryModel = .flat,
 };
 
 pub const PageReadingOrderGraph = struct {
@@ -230,7 +240,16 @@ fn buildFromParts(
         try appendFootnoteEvidence(allocator, nodes.items, blocks, body_font_size, &soft_edges);
     }
     if (options.include_geometry) {
-        try appendGeometryEvidence(allocator, nodes.items, &soft_edges);
+        switch (options.geometry_model) {
+            .flat => try appendGeometryEvidence(allocator, nodes.items, &soft_edges),
+            .hierarchy => try appendHierarchyEvidence(
+                allocator,
+                nodes.items,
+                blocks,
+                body_font_size,
+                &soft_edges,
+            ),
+        }
     }
 
     std.mem.sort(GraphEdge, soft_edges.items, {}, softEdgeLessThan);
@@ -451,6 +470,478 @@ fn blockContainsMarker(block: layout.LayoutBlock, marker: []const u8) bool {
         }
     }
     return false;
+}
+
+const HierarchyFlow = struct {
+    column_index: u32,
+    core_x0: f64,
+    core_width: f64,
+    top_y: f64,
+    usable_count: usize,
+    primary: bool,
+};
+
+/// Generates sparse evidence from the diagnostic root/flow/block hierarchy.
+/// Synthetic region blocks use `column_index` as their parent-flow identity.
+/// Only coherent body flows participate in cross-flow ordering; rotated labels,
+/// stat-only flows, and other side material remain incomparable unless a local
+/// continuation or repeated-callout relation is unambiguous.
+fn appendHierarchyEvidence(
+    allocator: std.mem.Allocator,
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    body_font_size: f64,
+    proposals: *std.ArrayList(GraphEdge),
+) !void {
+    if (nodes.len < 2) return;
+
+    var min_y = nodes[0].bounds.y0;
+    var max_y = nodes[0].bounds.y1;
+    var min_x = nodes[0].bounds.x0;
+    var max_x = nodes[0].bounds.x1;
+    for (nodes[1..]) |node| {
+        min_y = @min(min_y, node.bounds.y0);
+        max_y = @max(max_y, node.bounds.y1);
+        min_x = @min(min_x, node.bounds.x0);
+        max_x = @max(max_x, node.bounds.x1);
+    }
+    const content_width = max_x - min_x;
+    if (content_width <= 0) return;
+    const bottom_limit = min_y + (max_y - min_y) * 0.05;
+
+    const normalized = try allocator.alloc([]u8, nodes.len);
+    var normalized_count: usize = 0;
+    var normalized_complete = false;
+    errdefer if (!normalized_complete) {
+        for (normalized[0..normalized_count]) |text| allocator.free(text);
+        allocator.free(normalized);
+    };
+    for (nodes) |node| {
+        normalized[node.id] = try normalizedBlockText(
+            allocator,
+            blocks[node.original_block_index],
+        );
+        normalized_count += 1;
+    }
+    normalized_complete = true;
+    defer {
+        for (normalized) |text| allocator.free(text);
+        allocator.free(normalized);
+    }
+
+    var flows: std.ArrayList(HierarchyFlow) = .empty;
+    defer flows.deinit(allocator);
+    const metric_scratch = try allocator.alloc(f64, nodes.len);
+    defer allocator.free(metric_scratch);
+    for (nodes) |node| {
+        var seen = false;
+        for (flows.items) |flow| {
+            if (flow.column_index == node.column_index) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen) continue;
+        try flows.append(allocator, summarizeHierarchyFlow(
+            nodes,
+            blocks,
+            normalized,
+            node.column_index,
+            bottom_limit,
+            content_width,
+            metric_scratch,
+        ));
+    }
+    std.mem.sort(HierarchyFlow, flows.items, {}, hierarchyFlowLessThan);
+    const node_flow_indices = try allocator.alloc(usize, nodes.len);
+    defer allocator.free(node_flow_indices);
+    @memset(node_flow_indices, std.math.maxInt(usize));
+    for (nodes) |node| {
+        for (flows.items, 0..) |flow, flow_index| {
+            if (flow.column_index != node.column_index) continue;
+            node_flow_indices[node.id] = flow_index;
+            break;
+        }
+        if (node_flow_indices[node.id] == std.math.maxInt(usize)) return error.InvalidHierarchyFlow;
+    }
+
+    // Sibling blocks inherit only the order of their coherent parent flow.
+    for (flows.items) |flow| {
+        if (!flow.primary) continue;
+        var source = firstUsableInFlow(nodes, blocks, normalized, flow.column_index, bottom_limit);
+        while (source) |source_id| {
+            const target = nextUsableInFlow(
+                nodes,
+                blocks,
+                normalized,
+                flow.column_index,
+                bottom_limit,
+                source_id,
+            ) orelse break;
+            var evidence = EvidenceKind.hierarchy_sibling.mask();
+            if (nodes[source_id].kind == .heading) evidence |= EvidenceKind.spanning_boundary.mask();
+            try mergeOrAppendProposal(allocator, proposals, .{
+                .source = source_id,
+                .target = target,
+                .relation = .precedes,
+                .confidence = 0.86,
+                .evidence = evidence,
+            });
+            source = target;
+        }
+    }
+
+    // Consecutive coherent flows get one boundary edge, never a global chain
+    // through every geometric x-position. Overlapping flows use the block
+    // nearest the local boundary; clearly separated flows use column order.
+    var previous_primary: ?HierarchyFlow = null;
+    for (flows.items) |flow| {
+        if (!flow.primary) continue;
+        if (previous_primary) |previous| {
+            const left_first = firstUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse continue;
+            const left_last = lastUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse continue;
+            const right_first = firstUsableInFlow(nodes, blocks, normalized, flow.column_index, bottom_limit) orelse continue;
+            const horizontal_overlap = @min(previous.core_x0 + previous.core_width, flow.core_x0 + flow.core_width) -
+                @max(previous.core_x0, flow.core_x0);
+            const separated = horizontal_overlap <= @min(previous.core_width, flow.core_width) * 0.15;
+            var source = left_last;
+            var target = right_first;
+            if (!separated) {
+                const right_is_upper_prelude = flow.usable_count >= previous.usable_count * 2 and
+                    flow.top_y > previous.top_y + @max(1.0, body_font_size * 0.75);
+                if (right_is_upper_prelude) {
+                    source = boundarySourceAbove(
+                        nodes,
+                        blocks,
+                        normalized,
+                        flow.column_index,
+                        bottom_limit,
+                        nodes[left_first],
+                        true,
+                    ) orelse right_first;
+                    target = left_first;
+                } else {
+                    source = boundarySourceAbove(
+                        nodes,
+                        blocks,
+                        normalized,
+                        previous.column_index,
+                        bottom_limit,
+                        nodes[right_first],
+                        false,
+                    ) orelse left_last;
+                }
+            }
+            try mergeOrAppendProposal(allocator, proposals, .{
+                .source = source,
+                .target = target,
+                .relation = .precedes,
+                .confidence = 0.82,
+                .evidence = EvidenceKind.local_boundary.mask(),
+            });
+        }
+        previous_primary = flow;
+    }
+
+    const repeated_callout = try allocator.alloc(bool, nodes.len);
+    defer allocator.free(repeated_callout);
+    @memset(repeated_callout, false);
+
+    // Repeated pull quotes are anchored by their duplicated body text. When the
+    // callout sits beside the following paragraph, attach it there so it does
+    // not impose an order on an unrelated sibling flow.
+    for (nodes) |callout| {
+        const callout_flow = flows.items[node_flow_indices[callout.id]];
+        if (callout_flow.primary or callout.kind != .heading or
+            !hierarchyNodeUsable(callout, blocks[callout.original_block_index], normalized[callout.id], bottom_limit) or
+            normalized[callout.id].len < 50)
+        {
+            continue;
+        }
+        var match: ?NodeId = null;
+        var match_size: usize = 0;
+        for (nodes) |candidate| {
+            const candidate_flow = flows.items[node_flow_indices[candidate.id]];
+            if (!candidate_flow.primary or candidate.kind != .paragraph) continue;
+            const shared = normalizedContainmentSize(normalized[callout.id], normalized[candidate.id]);
+            if (shared < @min(normalized[callout.id].len, normalized[candidate.id].len) * 7 / 10) continue;
+            if (shared > match_size) {
+                match = candidate.id;
+                match_size = shared;
+            }
+        }
+        const matched = match orelse continue;
+        var target = matched;
+        if (nextUsableInFlow(
+            nodes,
+            blocks,
+            normalized,
+            nodes[matched].column_index,
+            bottom_limit,
+            matched,
+        )) |successor| {
+            if (verticalOverlap(callout.bounds, nodes[successor].bounds) > 0) target = successor;
+        }
+        try mergeOrAppendProposal(allocator, proposals, .{
+            .source = callout.id,
+            .target = target,
+            .relation = .precedes,
+            .confidence = 0.88,
+            .evidence = EvidenceKind.repeated_callout.mask(),
+        });
+        repeated_callout[callout.id] = true;
+    }
+
+    // A heading broken across aligned source flows keeps its left-to-right
+    // baseline order. At least the source flow must be coherent, which avoids
+    // chaining stat cards and decorative fragments.
+    for (nodes) |source| {
+        const source_flow = flows.items[node_flow_indices[source.id]];
+        if (!source_flow.primary or source.kind != .heading or isVerticalNode(source)) continue;
+        for (nodes) |target| {
+            if (target.id == source.id or target.column_index == source.column_index or target.kind != .heading or
+                isVerticalNode(target) or source.bounds.x0 >= target.bounds.x0)
+            {
+                continue;
+            }
+            const overlap = verticalOverlap(source.bounds, target.bounds);
+            const min_height = @min(nodeHeight(source), nodeHeight(target));
+            if (overlap < min_height * 0.65 or target.bounds.x0 - source.bounds.x0 >= content_width * 0.25) continue;
+            try mergeOrAppendProposal(allocator, proposals, .{
+                .source = source.id,
+                .target = target.id,
+                .relation = .precedes,
+                .confidence = 0.84,
+                .evidence = EvidenceKind.spanning_boundary.mask(),
+            });
+        }
+    }
+
+    // A wide right-side callout on the same baseline follows its unique nearest
+    // coherent block. Repeated callouts were handled above and are excluded.
+    for (nodes) |target| {
+        const target_flow = flows.items[node_flow_indices[target.id]];
+        if (target_flow.primary or repeated_callout[target.id] or target.kind != .heading or
+            isVerticalNode(target) or normalized[target.id].len < 60 or
+            nodeWidth(target) < content_width * 0.35)
+        {
+            continue;
+        }
+        var source: ?NodeId = null;
+        var best_delta = std.math.inf(f64);
+        var ambiguous = false;
+        for (nodes) |candidate| {
+            const candidate_flow = flows.items[node_flow_indices[candidate.id]];
+            if (!candidate_flow.primary or candidate.bounds.x0 >= target.bounds.x0 or
+                verticalOverlap(candidate.bounds, target.bounds) <= 0)
+            {
+                continue;
+            }
+            const delta = @abs(candidate.bounds.y0 - target.bounds.y0);
+            if (delta + 0.01 < best_delta) {
+                source = candidate.id;
+                best_delta = delta;
+                ambiguous = false;
+            } else if (@abs(delta - best_delta) <= 0.01) {
+                ambiguous = true;
+            }
+        }
+        if (source == null or ambiguous) continue;
+        try mergeOrAppendProposal(allocator, proposals, .{
+            .source = source.?,
+            .target = target.id,
+            .relation = .precedes,
+            .confidence = 0.80,
+            .evidence = EvidenceKind.spanning_boundary.mask(),
+        });
+    }
+}
+
+fn summarizeHierarchyFlow(
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    normalized: []const []const u8,
+    column_index: u32,
+    bottom_limit: f64,
+    content_width: f64,
+    scratch: []f64,
+) HierarchyFlow {
+    var metric_count: usize = 0;
+    var usable_count: usize = 0;
+    var broad_paragraph_count: usize = 0;
+    var very_broad_paragraph = false;
+    var top_y = -std.math.inf(f64);
+    for (nodes) |node| {
+        if (node.column_index != column_index or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit))
+        {
+            continue;
+        }
+        usable_count += 1;
+        top_y = @max(top_y, node.bounds.y1);
+        scratch[metric_count] = node.bounds.x0;
+        metric_count += 1;
+        if (node.kind == .paragraph and normalized[node.id].len >= 60 and
+            nodeWidth(node) >= @max(100.0, content_width * 0.22))
+        {
+            broad_paragraph_count += 1;
+            very_broad_paragraph = very_broad_paragraph or nodeWidth(node) >= content_width * 0.42;
+        }
+    }
+    std.mem.sort(f64, scratch[0..metric_count], {}, comptime std.sort.asc(f64));
+    const core_x0 = if (metric_count == 0) 0 else scratch[(metric_count - 1) / 2];
+    metric_count = 0;
+    for (nodes) |node| {
+        if (node.column_index != column_index or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit))
+        {
+            continue;
+        }
+        scratch[metric_count] = nodeWidth(node);
+        metric_count += 1;
+    }
+    std.mem.sort(f64, scratch[0..metric_count], {}, comptime std.sort.asc(f64));
+    const core_width = if (metric_count == 0) 0 else scratch[(metric_count - 1) / 2];
+    return .{
+        .column_index = column_index,
+        .core_x0 = core_x0,
+        .core_width = core_width,
+        .top_y = top_y,
+        .usable_count = usable_count,
+        .primary = broad_paragraph_count >= 2 or very_broad_paragraph,
+    };
+}
+
+fn hierarchyFlowLessThan(_: void, left: HierarchyFlow, right: HierarchyFlow) bool {
+    if (left.core_x0 != right.core_x0) return left.core_x0 < right.core_x0;
+    return left.column_index < right.column_index;
+}
+
+fn hierarchyNodeUsable(node: BlockNode, block: layout.LayoutBlock, normalized: []const u8, bottom_limit: f64) bool {
+    return !block.removed and block.lines.len > 0 and normalized.len >= 8 and
+        node.bounds.y1 > bottom_limit and !isVerticalNode(node);
+}
+
+fn firstUsableInFlow(
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    normalized: []const []const u8,
+    column_index: u32,
+    bottom_limit: f64,
+) ?NodeId {
+    var best: ?BlockNode = null;
+    for (nodes) |node| {
+        if (node.column_index != column_index or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit))
+        {
+            continue;
+        }
+        if (best == null or visualLessThan({}, node, best.?)) best = node;
+    }
+    return if (best) |node| node.id else null;
+}
+
+fn lastUsableInFlow(
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    normalized: []const []const u8,
+    column_index: u32,
+    bottom_limit: f64,
+) ?NodeId {
+    var best: ?BlockNode = null;
+    for (nodes) |node| {
+        if (node.column_index != column_index or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit))
+        {
+            continue;
+        }
+        if (best == null or visualLessThan({}, best.?, node)) best = node;
+    }
+    return if (best) |node| node.id else null;
+}
+
+fn nextUsableInFlow(
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    normalized: []const []const u8,
+    column_index: u32,
+    bottom_limit: f64,
+    source_id: NodeId,
+) ?NodeId {
+    var best: ?BlockNode = null;
+    const source = nodes[source_id];
+    for (nodes) |node| {
+        if (node.column_index != column_index or node.id == source_id or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit) or
+            !visualLessThan({}, source, node))
+        {
+            continue;
+        }
+        if (best == null or visualLessThan({}, node, best.?)) best = node;
+    }
+    return if (best) |node| node.id else null;
+}
+
+fn boundarySourceAbove(
+    nodes: []const BlockNode,
+    blocks: []const layout.LayoutBlock,
+    normalized: []const []const u8,
+    column_index: u32,
+    bottom_limit: f64,
+    target: BlockNode,
+    strict_baseline: bool,
+) ?NodeId {
+    var best: ?BlockNode = null;
+    for (nodes) |node| {
+        if (node.column_index != column_index or
+            !hierarchyNodeUsable(node, blocks[node.original_block_index], normalized[node.id], bottom_limit))
+        {
+            continue;
+        }
+        const qualifies = if (strict_baseline)
+            node.bounds.y0 >= target.bounds.y0
+        else
+            node.bounds.y1 >= target.bounds.y0;
+        if (!qualifies) continue;
+        if (best == null or node.bounds.y0 < best.?.bounds.y0 or
+            (node.bounds.y0 == best.?.bounds.y0 and node.original_position > best.?.original_position))
+        {
+            best = node;
+        }
+    }
+    return if (best) |node| node.id else null;
+}
+
+fn normalizedBlockText(allocator: std.mem.Allocator, block: layout.LayoutBlock) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (block.bounds.text) |byte| {
+        if (std.ascii.isAlphanumeric(byte)) try text.append(allocator, std.ascii.toLower(byte));
+    }
+    return text.toOwnedSlice(allocator);
+}
+
+fn normalizedContainmentSize(left: []const u8, right: []const u8) usize {
+    if (left.len == 0 or right.len == 0) return 0;
+    if (left.len <= right.len and std.mem.indexOf(u8, right, left) != null) return left.len;
+    if (right.len < left.len and std.mem.indexOf(u8, left, right) != null) return right.len;
+    return 0;
+}
+
+fn nodeWidth(node: BlockNode) f64 {
+    return node.bounds.x1 - node.bounds.x0;
+}
+
+fn nodeHeight(node: BlockNode) f64 {
+    return node.bounds.y1 - node.bounds.y0;
+}
+
+fn isVerticalNode(node: BlockNode) bool {
+    return nodeHeight(node) > nodeWidth(node) * 1.8;
+}
+
+fn verticalOverlap(left: layout.BBox, right: layout.BBox) f64 {
+    return @max(0.0, @min(left.y1, right.y1) - @max(left.y0, right.y0));
 }
 
 fn appendGeometryEvidence(
@@ -709,6 +1200,10 @@ fn evidencePriority(mask: EvidenceMask) u8 {
         .caption_candidate,
         .footnote_marker,
         .spanning_heading,
+        .repeated_callout,
+        .spanning_boundary,
+        .hierarchy_sibling,
+        .local_boundary,
         .same_column_successor,
         .column_transition,
         .sidebar_anchor,
@@ -916,6 +1411,139 @@ test "two-column geometry is sparse and deterministic" {
     try std.testing.expectEqual(@as(usize, 3), graph.edges.len);
 }
 
+test "hierarchy evidence orders body siblings and leaves side material disconnected" {
+    const allocator = std.testing.allocator;
+    const body_a = testSpan(
+        "A substantive body paragraph with enough text to identify a coherent reading flow.",
+        20,
+        160,
+        230,
+        175,
+        null,
+    );
+    const body_b = testSpan(
+        "A second substantive body paragraph continues the same coherent reading flow safely.",
+        20,
+        130,
+        230,
+        145,
+        null,
+    );
+    const side_label = testSpan("rotated side label", 2, 40, 12, 180, null);
+    const stat = testSpan("$42M statistic", 280, 100, 350, 120, null);
+    const lines = [_]layout.TextLine{
+        .{ .bounds = body_a, .words = &.{}, .baseline_y = body_a.y0 },
+        .{ .bounds = body_b, .words = &.{}, .baseline_y = body_b.y0 },
+        .{ .bounds = side_label, .words = &.{}, .baseline_y = side_label.y0 },
+        .{ .bounds = stat, .words = &.{}, .baseline_y = stat.y0 },
+    };
+    const blocks = [_]layout.LayoutBlock{
+        testBlock(body_a, lines[0..1], 0, .paragraph),
+        testBlock(body_b, lines[1..2], 0, .paragraph),
+        testBlock(side_label, lines[2..3], 1, .heading),
+        testBlock(stat, lines[3..4], 2, .heading),
+    };
+
+    var graph = try buildFromParts(allocator, 0, &blocks, &.{}, 12, .{
+        .include_structure = false,
+        .include_semantics = false,
+        .geometry_model = .hierarchy,
+    });
+    defer graph.deinit();
+
+    try std.testing.expect(graph.validity);
+    var saw_sibling = false;
+    for (graph.edges) |edge| {
+        if (edge.source == 0 and edge.target == 1 and
+            edge.evidence & EvidenceKind.hierarchy_sibling.mask() != 0)
+        {
+            saw_sibling = true;
+        }
+        try std.testing.expect(edge.source < 2 and edge.target < 2);
+    }
+    try std.testing.expect(saw_sibling);
+}
+
+test "hierarchy repeated callout attaches to the overlapping body successor" {
+    const allocator = std.testing.allocator;
+    const repeated_text = "A repeated pull quote carries this sufficiently long source sentence into the margin.";
+    const body = testSpan(repeated_text, 20, 120, 240, 135, null);
+    const successor = testSpan(
+        "The following substantive paragraph is the unambiguous continuation of that body flow.",
+        20,
+        90,
+        240,
+        105,
+        null,
+    );
+    const callout = testSpan(repeated_text, 260, 88, 480, 108, null);
+    const lines = [_]layout.TextLine{
+        .{ .bounds = body, .words = &.{}, .baseline_y = body.y0 },
+        .{ .bounds = successor, .words = &.{}, .baseline_y = successor.y0 },
+        .{ .bounds = callout, .words = &.{}, .baseline_y = callout.y0 },
+    };
+    const blocks = [_]layout.LayoutBlock{
+        testBlock(body, lines[0..1], 0, .paragraph),
+        testBlock(successor, lines[1..2], 0, .paragraph),
+        testBlock(callout, lines[2..3], 1, .heading),
+    };
+
+    var graph = try buildFromParts(allocator, 0, &blocks, &.{}, 12, .{
+        .include_structure = false,
+        .include_semantics = false,
+        .geometry_model = .hierarchy,
+    });
+    defer graph.deinit();
+
+    var saw_callout = false;
+    for (graph.edges) |edge| {
+        if (edge.source == 2 and edge.target == 1 and
+            edge.evidence & EvidenceKind.repeated_callout.mask() != 0)
+        {
+            saw_callout = true;
+        }
+    }
+    try std.testing.expect(saw_callout);
+}
+
+test "hierarchy overlapping flows use one local boundary edge" {
+    const allocator = std.testing.allocator;
+    const spans = [_]layout.TextSpan{
+        testSpan("Left flow paragraph one is deliberately long enough to establish coherent body text.", 20, 160, 230, 175, null),
+        testSpan("Left flow paragraph two remains independently ordered inside its parent flow.", 20, 130, 230, 145, null),
+        testSpan("Indented flow paragraph one starts at the local continuation boundary on this page.", 40, 150, 250, 165, null),
+        testSpan("Indented flow paragraph two follows only within the same local hierarchy branch.", 40, 120, 250, 135, null),
+    };
+    const lines = [_]layout.TextLine{
+        .{ .bounds = spans[0], .words = &.{}, .baseline_y = spans[0].y0 },
+        .{ .bounds = spans[1], .words = &.{}, .baseline_y = spans[1].y0 },
+        .{ .bounds = spans[2], .words = &.{}, .baseline_y = spans[2].y0 },
+        .{ .bounds = spans[3], .words = &.{}, .baseline_y = spans[3].y0 },
+    };
+    const blocks = [_]layout.LayoutBlock{
+        testBlock(spans[0], lines[0..1], 0, .paragraph),
+        testBlock(spans[1], lines[1..2], 0, .paragraph),
+        testBlock(spans[2], lines[2..3], 1, .paragraph),
+        testBlock(spans[3], lines[3..4], 1, .paragraph),
+    };
+
+    var graph = try buildFromParts(allocator, 0, &blocks, &.{}, 12, .{
+        .include_structure = false,
+        .include_semantics = false,
+        .geometry_model = .hierarchy,
+    });
+    defer graph.deinit();
+
+    var boundary_count: usize = 0;
+    for (graph.edges) |edge| {
+        if (edge.evidence & EvidenceKind.local_boundary.mask() == 0) continue;
+        boundary_count += 1;
+        try std.testing.expectEqual(@as(NodeId, 0), edge.source);
+        try std.testing.expectEqual(@as(NodeId, 2), edge.target);
+    }
+    try std.testing.expectEqual(@as(usize, 1), boundary_count);
+}
+
 test "edge fanout beyond the resource bound falls back" {
     const allocator = std.testing.allocator;
     var spans: [10]layout.TextSpan = undefined;
@@ -1033,4 +1661,39 @@ fn allocationProbe(allocator: std.mem.Allocator) !void {
 
 test "graph ownership is safe across every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationProbe, .{});
+}
+
+fn hierarchyAllocationProbe(allocator: std.mem.Allocator) !void {
+    const first = testSpan(
+        "The first sufficiently long paragraph establishes a coherent hierarchy allocation path.",
+        10,
+        90,
+        220,
+        102,
+        null,
+    );
+    const second = testSpan(
+        "The second sufficiently long paragraph exercises owned normalization and flow summaries.",
+        10,
+        70,
+        220,
+        82,
+        null,
+    );
+    const first_lines = [_]layout.TextLine{.{ .bounds = first, .words = &.{}, .baseline_y = first.y0 }};
+    const second_lines = [_]layout.TextLine{.{ .bounds = second, .words = &.{}, .baseline_y = second.y0 }};
+    const blocks = [_]layout.LayoutBlock{
+        testBlock(first, &first_lines, 0, .paragraph),
+        testBlock(second, &second_lines, 0, .paragraph),
+    };
+    var graph = try buildFromParts(allocator, 0, &blocks, &.{}, 12, .{
+        .include_structure = false,
+        .include_semantics = false,
+        .geometry_model = .hierarchy,
+    });
+    graph.deinit();
+}
+
+test "hierarchy graph ownership is safe across every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, hierarchyAllocationProbe, .{});
 }

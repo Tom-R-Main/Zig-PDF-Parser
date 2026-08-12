@@ -381,13 +381,30 @@ paragraph without depending on prediction order. All 46 development and all 50
 holdout anchors now resolve one-to-one, with no missing, ambiguous, or collided
 anchors. Frozen truth was unchanged.
 
-The representation result does not promote graph projection. The existing graph
-geometry still assumes flat columns: mean precedence F1 was 0.598 on development
-and 0.502 on holdout, below the respective legacy means of 0.787 and 0.791.
-The next experiment must generate hierarchy-native edges—parent headings before
-child flows, order within sibling flows, explicit spanning boundaries, and no
-invented relation for ambiguous side material—before structure evidence or
-projection is reconsidered.
+The original graph geometry still assumed flat columns: mean precedence F1 was
+0.598 on development and 0.502 on holdout, below the respective legacy means of
+0.787 and 0.791. `PDF-READORDER-03` replaced that evidence in diagnostic mode
+with sparse ordering inside coherent body flows, local rather than global flow
+boundaries, aligned heading fragments, and duplicate-text pull-quote anchors.
+Rotated labels and stat-only flows remain disconnected by default.
+
+The first development treatment passed without a tuning revision: mean F1 rose
+to 0.981 versus 0.787 for legacy, 28 of 29 required relations were recovered,
+all nine ambiguous pairs were preserved, and every projection was valid. The
+frozen holdout also showed a large F1 gain, 0.943 versus 0.791, but failed three
+safety gates: required-edge recall was 27/29 (93.1%), ambiguity preservation was
+12/13 (92.3%), and only five of six projections satisfied all truth constraints.
+Forbidden paths and accepted cycles remained zero. The preregistered stop rule
+therefore keeps both the hierarchy and its edges diagnostic-only. Five matched
+ReleaseFast runs showed no latency regression (53.485 ms diagnostic versus
+53.806 ms legacy median total fixture time), but that operational pass cannot
+override the failed quality gates. Graph ordering is not promoted and no
+post-holdout threshold revision is made.
+
+A subsequent experiment must model explicit section branches and continuation
+boundaries rather than infer them from pairwise geometry. Because this holdout
+has now been exposed, new rule development requires a newly frozen corpus or a
+preregistered treatment before evaluation.
 
 `--reading-graph-audit` is an evaluator-only diagnostic. It emits every truth
 anchor status and match, every live graph node, the internal region hierarchy,

@@ -765,6 +765,7 @@ pub fn extractDocument(
                     .{
                         .include_structure = false,
                         .include_semantics = false,
+                        .geometry_model = .hierarchy,
                     },
                 );
             } else try reading_order_graph.build(allocator, page_index, &page_layout, .{

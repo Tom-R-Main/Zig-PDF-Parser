@@ -1,5 +1,5 @@
 {
-  "milestone": "PDF-READORDER-02",
+  "milestone": "PDF-READORDER-03",
   "source_sha256": "943cec3d492a966b4b29a15154aaf7c46a81465c958510c44301b0ffa01e4d5e",
   "fixture_count": 12,
   "representable_fixture_count": 12,
@@ -49,13 +49,59 @@
     "forbidden_path_rate": 0.0,
     "decision": "Do not promote projection. The hierarchy proves representation, but the old flat-column geometry evidence does not express parent, sibling-flow, or spanning-region order."
   },
+  "hierarchy_native_edge_result": {
+    "tuning_revisions_used": 0,
+    "development": {
+      "mean_precedence_f1": 0.981482,
+      "mean_legacy_precedence_f1": 0.787322,
+      "gain_percentage_points": 19.416,
+      "required_edges_satisfied": 28,
+      "required_edges_total": 29,
+      "required_edge_recall": 0.965517,
+      "ambiguous_pairs_preserved": 9,
+      "ambiguous_pairs_total": 9,
+      "forbidden_paths": 0,
+      "valid_projections": 6,
+      "fixture_count": 6
+    },
+    "holdout": {
+      "mean_precedence_f1": 0.943020,
+      "mean_legacy_precedence_f1": 0.791060,
+      "gain_percentage_points": 15.196,
+      "required_edges_satisfied": 27,
+      "required_edges_total": 29,
+      "required_edge_recall": 0.931034,
+      "ambiguous_pairs_preserved": 12,
+      "ambiguous_pairs_total": 13,
+      "ambiguity_preservation": 0.923077,
+      "forbidden_paths": 0,
+      "valid_projections": 5,
+      "fixture_count": 6
+    },
+    "cycle_rate": 0.0,
+    "releasefast_profile": {
+      "matched_runs_per_mode": 5,
+      "legacy_median_total_ms": 53.806042,
+      "diagnostic_median_total_ms": 53.485000,
+      "median_overhead_percent": -0.597,
+      "guardrail_percent": 15.0,
+      "guardrail_passed": true
+    },
+    "result": "quality_gain_supported_safety_gates_falsified",
+    "decision": "Retain hierarchy-native edges as diagnostic infrastructure. Holdout required-edge recall, ambiguity preservation, and valid-projection gates failed despite a 15.196-point F1 gain. The frozen stop rule prohibits projection promotion or post-holdout tuning."
+  },
   "determinism": {
+    "extraction_fixture": "reading-order-real-sec-005-dev",
+    "extraction_source_id": "reading-order-determinism",
     "repeated_audit_runs": 2,
     "audit_byte_identical": true,
+    "audit_sha256": "7989e52790192d4ddccc1b42e5de09357748a4c242811f0eee57b0a6585c1822",
     "repeated_artifact_jsonl_runs": 5,
     "artifact_jsonl_byte_identical": true,
+    "artifact_jsonl_sha256": "224b604658e75fa9880d2a4accf55bf87d899a3b24e4afb0f2e0381961f5942e",
     "repeated_stream_jsonl_runs": 5,
     "stream_payload_identical_after_elapsed_ms_normalization": true,
+    "normalized_stream_jsonl_sha256": "f1136d503b1614369bcd327291957ce6f390873957dfe7949e0e95f90e6fcdb7",
     "stream_byte_identical": false,
     "stream_difference": "Only document_finished.elapsed_ms varied; record order and all non-timing payload fields were identical."
   },
@@ -122,6 +168,17 @@
       "collision_anchor_count": 0,
       "result": "representation_gate_passed",
       "reason": "Both development and holdout anchors resolve completely without changing frozen truth. Diagnostic graph projection remains below legacy because its geometry evidence still assumes flat page columns."
+    },
+    {
+      "work_item": "PDF-READORDER-03",
+      "treatment": "sparse hierarchy-native sibling, local-boundary, spanning-fragment, and repeated-callout evidence with non-body side flows left disconnected",
+      "development_mean_precedence_f1": 0.981482,
+      "holdout_mean_precedence_f1": 0.943020,
+      "holdout_required_edge_recall": 0.931034,
+      "holdout_ambiguity_preservation": 0.923077,
+      "holdout_valid_projection_rate": 0.833333,
+      "result": "diagnostic_only_stop_rule_applied",
+      "reason": "The first frozen treatment materially outperformed legacy, but missed two holdout required relations, asserted one declared ambiguous comparison, and produced one projection that violated truth. No post-holdout revision was permitted."
     }
   ],
   "baseline_fixtures": [
@@ -138,5 +195,5 @@
     {"doc_id": "reading-order-real-sec-043-holdout", "error": "NodeAnchorCollision"},
     {"doc_id": "reading-order-real-sec-049-holdout", "error": "NodeAnchorNotFound"}
   ],
-  "decision": "Retain the hierarchical representation as diagnostic infrastructure. Next, replace flat column transitions with hierarchy-native edges: parent headings before child flows, stable order within sibling flows, explicit spanning-region boundaries, and disconnected ambiguous side material. Rerun geometry-only and structure-tree ablations before any projection experiment."
+  "decision": "Retain the hierarchical representation and hierarchy-native edges as diagnostic infrastructure. Do not promote projection. The next experiment must represent explicit section branches and continuation boundaries rather than infer them from pairwise geometry, and it must use a newly frozen corpus or preregistered rule before evaluation to avoid tuning on this exposed holdout."
 }
