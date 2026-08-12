@@ -305,10 +305,24 @@ pub const ReadingOrderApplication = enum {
     formula_specialist_enabled,
 };
 
+/// Owned diagnostic summary for every layout block, including furniture that
+/// is intentionally excluded from graph nodes. It is retained only when a
+/// non-legacy reading-order mode builds an internal graph.
+pub const ReadingOrderBlock = struct {
+    page_index: u32,
+    original_block_index: u32,
+    bounds: BBox,
+    kind: BlockKind,
+    column_index: u32,
+    removed: bool,
+    text: []u8,
+};
+
 pub const PageReadingOrder = struct {
     page_index: u32,
     graph: reading_order_graph.PageReadingOrderGraph,
     node_texts: [][]u8,
+    blocks: []ReadingOrderBlock,
     application: ReadingOrderApplication,
     structure_enabled: bool,
     eligible: bool,
@@ -316,6 +330,8 @@ pub const PageReadingOrder = struct {
     pub fn deinit(self: *PageReadingOrder) void {
         for (self.node_texts) |text| self.graph.allocator.free(text);
         self.graph.allocator.free(self.node_texts);
+        for (self.blocks) |block| self.graph.allocator.free(block.text);
+        self.graph.allocator.free(self.blocks);
         self.graph.deinit();
         self.* = undefined;
     }
@@ -720,6 +736,9 @@ pub fn extractDocument(
             const node_texts = try copyGraphNodeTexts(allocator, &page_layout, &page_graph);
             var node_texts_transferred = false;
             defer if (!node_texts_transferred) freeOwnedStrings(allocator, node_texts);
+            const block_summaries = try copyReadingOrderBlocks(allocator, page_index, &page_layout);
+            var block_summaries_transferred = false;
+            defer if (!block_summaries_transferred) freeReadingOrderBlocks(allocator, block_summaries);
 
             const base_eligible = page_graph.validity and
                 native_result.quality.quality_pass and
@@ -777,12 +796,14 @@ pub fn extractDocument(
                 .page_index = page_index,
                 .graph = page_graph,
                 .node_texts = node_texts,
+                .blocks = block_summaries,
                 .application = application,
                 .structure_enabled = options.reading_order_include_structure,
                 .eligible = graph_eligible,
             });
             graph_transferred = true;
             node_texts_transferred = true;
+            block_summaries_transferred = true;
         }
 
         for (page_layout.tables) |table| {
@@ -1490,25 +1511,60 @@ fn copyGraphNodeTexts(
 
     for (graph.nodes, 0..) |node, node_index| {
         if (node.original_block_index >= page_layout.blocks.len) return error.InvalidReadingOrderProjection;
-        const block = page_layout.blocks[node.original_block_index];
-        var text: std.ArrayList(u8) = .empty;
-        errdefer text.deinit(allocator);
-        for (block.lines, 0..) |line, line_index| {
-            const owned_line = try lineTextOwned(allocator, &line);
-            defer allocator.free(owned_line);
-            if (owned_line.len == 0) continue;
-            if (line_index > 0 and text.items.len > 0) try text.append(allocator, ' ');
-            try text.appendSlice(allocator, owned_line);
-        }
-        texts[node_index] = try text.toOwnedSlice(allocator);
+        texts[node_index] = try layoutBlockTextOwned(allocator, &page_layout.blocks[node.original_block_index]);
         initialized += 1;
     }
     return texts;
 }
 
+fn copyReadingOrderBlocks(
+    allocator: std.mem.Allocator,
+    page_index: u32,
+    page_layout: *const layout.LayoutResult,
+) ![]ReadingOrderBlock {
+    const blocks = try allocator.alloc(ReadingOrderBlock, page_layout.blocks.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (blocks[0..initialized]) |block| allocator.free(block.text);
+        allocator.free(blocks);
+    }
+
+    for (page_layout.blocks, 0..) |*block, block_index| {
+        blocks[block_index] = .{
+            .page_index = page_index,
+            .original_block_index = @intCast(block_index),
+            .bounds = block.bounds.bbox,
+            .kind = block.kind,
+            .column_index = block.column_index,
+            .removed = block.removed,
+            .text = try layoutBlockTextOwned(allocator, block),
+        };
+        initialized += 1;
+    }
+    return blocks;
+}
+
+fn layoutBlockTextOwned(allocator: std.mem.Allocator, block: *const layout.LayoutBlock) ![]u8 {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (block.lines) |*line| {
+        const owned_line = try lineTextOwned(allocator, line);
+        defer allocator.free(owned_line);
+        if (owned_line.len == 0) continue;
+        if (text.items.len > 0) try text.append(allocator, ' ');
+        try text.appendSlice(allocator, owned_line);
+    }
+    return text.toOwnedSlice(allocator);
+}
+
 fn freeOwnedStrings(allocator: std.mem.Allocator, strings: [][]u8) void {
     for (strings) |string| allocator.free(string);
     allocator.free(strings);
+}
+
+fn freeReadingOrderBlocks(allocator: std.mem.Allocator, blocks: []ReadingOrderBlock) void {
+    for (blocks) |block| allocator.free(block.text);
+    allocator.free(blocks);
 }
 
 fn horizontalLeftToRight(spans: []const layout.TextSpan) bool {
@@ -2439,6 +2495,43 @@ fn testSpan(text: []const u8, x0: f64, y0: f64, x1: f64, y1: f64) layout.TextSpa
         .text = text,
         .font = .{ .name = "Body", .size = y1 - y0, .has_to_unicode = true },
     });
+}
+
+fn readingOrderBlockAllocationProbe(allocator: std.mem.Allocator) !void {
+    const span = testSpan("Owned block text", 10, 20, 100, 32);
+    const words = [_]layout.TextWord{.{ .bounds = span, .spans = &.{span} }};
+    const lines = [_]layout.TextLine{.{ .bounds = span, .words = &words, .baseline_y = 20 }};
+    const blocks = [_]layout.LayoutBlock{.{
+        .bounds = span,
+        .lines = &lines,
+        .column_index = 0,
+        .kind = .paragraph,
+    }};
+    const page_layout: layout.LayoutResult = .{
+        .spans = &.{},
+        .lines = &.{},
+        .columns = &.{},
+        .paragraphs = &.{},
+        .blocks = &blocks,
+        .tables = &.{},
+        .candidates = &.{},
+        .reading_order = &.{},
+        .body_font_size = 12,
+        .allocator = allocator,
+    };
+    const summaries = try copyReadingOrderBlocks(allocator, 3, &page_layout);
+    defer freeReadingOrderBlocks(allocator, summaries);
+    if (summaries.len != 1 or !std.mem.eql(u8, summaries[0].text, "Owned block text")) {
+        return error.InvalidReadingOrderBlockSummary;
+    }
+}
+
+test "reading-order block diagnostics clean up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        readingOrderBlockAllocationProbe,
+        .{},
+    );
 }
 
 test "page route records native fast path for clean native text" {

@@ -9,6 +9,18 @@
     "NodeAnchorCollision": 5,
     "NodeAnchorAmbiguous": 1
   },
+  "exact_anchor_audit": {
+    "anchor_count": 96,
+    "resolved_one_to_one": 51,
+    "not_found": 11,
+    "ambiguous": 5,
+    "collision": 29,
+    "not_found_causes": {
+      "present_in_removed_header_block": 7,
+      "straight_vs_curly_apostrophe_truth_transcription": 4
+    },
+    "interpretation": "After separating truth transcription defects, every missing source phrase is present in layout output. The dominant representation failure is multiple intended regions collapsing into one live block, followed by page titles being removed as headers without cross-page recurrence evidence."
+  },
   "follow_up_experiments": [
     {
       "work_item": "PDF-LAYOUT-02",

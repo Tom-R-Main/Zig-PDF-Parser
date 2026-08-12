@@ -106,6 +106,33 @@ pub const Evaluation = struct {
     }
 };
 
+pub const AnchorStatus = enum {
+    resolved,
+    not_found,
+    ambiguous,
+    collision,
+};
+
+/// One audit entry per truth node. Truth strings and predicted node text stay
+/// borrowed; only `matched_node_ids` and the enclosing slice are owned.
+pub const AnchorDiagnostic = struct {
+    truth_index: u32,
+    status: AnchorStatus,
+    matched_node_ids: []u32,
+    collision_with_truth_index: ?u32 = null,
+};
+
+pub const AnchorAudit = struct {
+    diagnostics: []AnchorDiagnostic,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *AnchorAudit) void {
+        for (self.diagnostics) |diagnostic| self.allocator.free(diagnostic.matched_node_ids);
+        self.allocator.free(self.diagnostics);
+        self.* = undefined;
+    }
+};
+
 pub const Error = error{
     InvalidTruthJson,
     UnsupportedTruthVersion,
@@ -216,6 +243,72 @@ pub fn evaluate(
         .truth_to_prediction = truth_to_prediction,
         .allocator = allocator,
     };
+}
+
+/// Resolves every anchor without aborting on representation failures. This is
+/// an evaluator diagnostic, not a relaxed scoring path: `evaluate` continues
+/// to require an exact one-to-one mapping.
+pub fn auditAnchors(
+    allocator: std.mem.Allocator,
+    truth: *const Truth,
+    predicted_nodes: []const PredictedNode,
+) !AnchorAudit {
+    try validatePrediction(.{
+        .nodes = predicted_nodes,
+        .edges = &.{},
+        .projection = &.{},
+    });
+
+    const document = truth.document();
+    const diagnostics = try allocator.alloc(AnchorDiagnostic, document.nodes.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (diagnostics[0..initialized]) |diagnostic| allocator.free(diagnostic.matched_node_ids);
+        allocator.free(diagnostics);
+    }
+
+    for (document.nodes, 0..) |truth_node, truth_index| {
+        const normalized_anchor = try normalizeWhitespace(allocator, truth_node.text_anchor);
+        defer allocator.free(normalized_anchor);
+
+        var matches: std.ArrayList(u32) = .empty;
+        errdefer matches.deinit(allocator);
+        for (predicted_nodes) |predicted_node| {
+            if (predicted_node.page_index != truth_node.page_index) continue;
+            const normalized_text = try normalizeWhitespace(allocator, predicted_node.text);
+            defer allocator.free(normalized_text);
+            if (std.mem.indexOf(u8, normalized_text, normalized_anchor) != null) {
+                try matches.append(allocator, predicted_node.id);
+            }
+        }
+
+        var status: AnchorStatus = if (matches.items.len == 0)
+            .not_found
+        else if (matches.items.len > 1)
+            .ambiguous
+        else
+            .resolved;
+        var collision_with: ?u32 = null;
+        if (status == .resolved) {
+            for (diagnostics[0..initialized]) |prior| {
+                if (prior.matched_node_ids.len == 1 and prior.matched_node_ids[0] == matches.items[0]) {
+                    status = .collision;
+                    collision_with = prior.truth_index;
+                    break;
+                }
+            }
+        }
+
+        diagnostics[truth_index] = .{
+            .truth_index = @intCast(truth_index),
+            .status = status,
+            .matched_node_ids = try matches.toOwnedSlice(allocator),
+            .collision_with_truth_index = collision_with,
+        };
+        initialized += 1;
+    }
+
+    return .{ .diagnostics = diagnostics, .allocator = allocator };
 }
 
 const PrecedenceScore = struct {
@@ -875,6 +968,40 @@ test "unmatched and ambiguous anchors are evaluation errors" {
     }));
 }
 
+test "anchor audit reports every representation failure without aborting" {
+    const json =
+        \\{
+        \\  "version":1,
+        \\  "nodes":[
+        \\    {"id":"first","page_index":0,"text_anchor":"shared"},
+        \\    {"id":"collision","page_index":0,"text_anchor":"shared"},
+        \\    {"id":"missing","page_index":0,"text_anchor":"absent"},
+        \\    {"id":"ambiguous","page_index":0,"text_anchor":"duplicate"}
+        \\  ]
+        \\}
+    ;
+    var truth = try parseTruth(std.testing.allocator, json);
+    defer truth.deinit();
+    const nodes = [_]PredictedNode{
+        .{ .id = 10, .page_index = 0, .text = "shared text" },
+        .{ .id = 20, .page_index = 0, .text = "duplicate one" },
+        .{ .id = 30, .page_index = 0, .text = "duplicate two" },
+    };
+
+    var audit = try auditAnchors(std.testing.allocator, &truth, &nodes);
+    defer audit.deinit();
+
+    try std.testing.expectEqual(@as(usize, 4), audit.diagnostics.len);
+    try std.testing.expectEqual(AnchorStatus.resolved, audit.diagnostics[0].status);
+    try std.testing.expectEqualSlices(u32, &.{10}, audit.diagnostics[0].matched_node_ids);
+    try std.testing.expectEqual(AnchorStatus.collision, audit.diagnostics[1].status);
+    try std.testing.expectEqual(@as(?u32, 0), audit.diagnostics[1].collision_with_truth_index);
+    try std.testing.expectEqual(AnchorStatus.not_found, audit.diagnostics[2].status);
+    try std.testing.expectEqual(@as(usize, 0), audit.diagnostics[2].matched_node_ids.len);
+    try std.testing.expectEqual(AnchorStatus.ambiguous, audit.diagnostics[3].status);
+    try std.testing.expectEqualSlices(u32, &.{ 20, 30 }, audit.diagnostics[3].matched_node_ids);
+}
+
 test "cycles forbidden paths and asserted ambiguity are measured" {
     var truth = try parseTruth(std.testing.allocator, complete_truth_json);
     defer truth.deinit();
@@ -991,6 +1118,8 @@ fn allocationProbe(allocator: std.mem.Allocator) !void {
         .{ .id = 2, .page_index = 0, .text = "Beta" },
     };
     const edges = [_]PredictedEdge{.{ .from = 1, .to = 2, .relation = .precedes }};
+    var audit = try auditAnchors(allocator, &truth, &nodes);
+    defer audit.deinit();
     var result = try evaluate(allocator, &truth, .{
         .nodes = &nodes,
         .edges = &edges,

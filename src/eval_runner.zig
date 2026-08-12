@@ -40,6 +40,7 @@ pub const Options = struct {
     reading_order_mode: zpdf.adaptive.ReadingOrderMode = .legacy,
     reading_order_include_structure: bool = true,
     reading_order_structure_hard: bool = true,
+    reading_graph_audit: bool = false,
     reading_order_score: ?f64 = null,
     table_f1: ?f64 = null,
     teds: ?f64 = null,
@@ -366,6 +367,14 @@ pub fn evaluateOneToJsonl(allocator: std.mem.Allocator, options: Options) ![]u8 
     var reading_graph_metrics: eval.ReadingGraphMetrics = .{};
     if (truth_reading_graph) |truth_json| {
         const adaptive_result = if (extraction.adaptive) |*result| result else return error.ReadingGraphRequiresAdaptiveExtraction;
+        if (options.reading_graph_audit) {
+            return renderReadingGraphAudit(
+                allocator,
+                docIdForMetrics(options, pdf_path),
+                adaptive_result,
+                truth_json,
+            );
+        }
         reading_graph_metrics = try evaluateReadingGraph(allocator, adaptive_result, truth_json);
     }
 
@@ -598,6 +607,97 @@ fn evaluateReadingGraph(
         .eligible_pages = eligible_pages,
         .fallback_pages = fallback_pages,
     };
+}
+
+fn renderReadingGraphAudit(
+    allocator: std.mem.Allocator,
+    doc_id: []const u8,
+    result: *const zpdf.AdaptiveResult,
+    truth_json: []const u8,
+) ![]u8 {
+    var truth = try reading_order_eval.parseTruth(allocator, truth_json);
+    defer truth.deinit();
+    var predictions = try buildReadingPredictions(allocator, result.reading_order_pages);
+    defer predictions.deinit();
+    var audit = try reading_order_eval.auditAnchors(allocator, &truth, predictions.nodes);
+    defer audit.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const writer = runtime.arrayListWriter(&out, allocator);
+    try writer.writeAll("{\"record_type\":\"reading_graph_audit\",\"doc_id\":\"");
+    try writeJsonEscaped(writer, doc_id);
+    try writer.writeAll("\",\"anchors\":[");
+    const document = truth.document();
+    for (audit.diagnostics, 0..) |diagnostic, index| {
+        if (index > 0) try writer.writeByte(',');
+        const truth_node = document.nodes[diagnostic.truth_index];
+        try writer.writeAll("{\"truth_id\":\"");
+        try writeJsonEscaped(writer, truth_node.id);
+        try writer.print("\",\"page_index\":{},\"text_anchor\":\"", .{truth_node.page_index});
+        try writeJsonEscaped(writer, truth_node.text_anchor);
+        try writer.print("\",\"status\":\"{s}\",\"matched_node_ids\":[", .{@tagName(diagnostic.status)});
+        for (diagnostic.matched_node_ids, 0..) |node_id, match_index| {
+            if (match_index > 0) try writer.writeByte(',');
+            try writer.print("{}", .{node_id});
+        }
+        try writer.writeByte(']');
+        if (diagnostic.collision_with_truth_index) |collision_index| {
+            try writer.writeAll(",\"collision_with_truth_id\":\"");
+            try writeJsonEscaped(writer, document.nodes[collision_index].id);
+            try writer.writeByte('"');
+        }
+        try writer.writeByte('}');
+    }
+
+    try writer.writeAll("],\"nodes\":[");
+    var global_node_offset: u32 = 0;
+    var node_output_index: usize = 0;
+    for (result.reading_order_pages) |page| {
+        if (page.node_texts.len != page.graph.nodes.len) return error.InvalidReadingGraphSummary;
+        for (page.graph.nodes, page.node_texts) |node, text_value| {
+            if (node_output_index > 0) try writer.writeByte(',');
+            try writer.print("{{\"id\":{},\"page_index\":{},\"original_block_index\":{},\"column_index\":{},\"kind\":\"{s}\",\"bbox\":[{d},{d},{d},{d}],\"text\":\"", .{
+                global_node_offset + node.id,
+                node.page_index,
+                node.original_block_index,
+                node.column_index,
+                @tagName(node.kind),
+                node.bounds.x0,
+                node.bounds.y0,
+                node.bounds.x1,
+                node.bounds.y1,
+            });
+            try writeJsonEscaped(writer, text_value);
+            try writer.writeAll("\"}");
+            node_output_index += 1;
+        }
+        global_node_offset += @intCast(page.graph.nodes.len);
+    }
+
+    try writer.writeAll("],\"blocks\":[");
+    var block_output_index: usize = 0;
+    for (result.reading_order_pages) |page| {
+        for (page.blocks) |block| {
+            if (block_output_index > 0) try writer.writeByte(',');
+            try writer.print("{{\"page_index\":{},\"original_block_index\":{},\"column_index\":{},\"kind\":\"{s}\",\"removed\":{},\"bbox\":[{d},{d},{d},{d}],\"text\":\"", .{
+                block.page_index,
+                block.original_block_index,
+                block.column_index,
+                @tagName(block.kind),
+                block.removed,
+                block.bounds.x0,
+                block.bounds.y0,
+                block.bounds.x1,
+                block.bounds.y1,
+            });
+            try writeJsonEscaped(writer, block.text);
+            try writer.writeAll("\"}");
+            block_output_index += 1;
+        }
+    }
+    try writer.writeAll("]}\n");
+    return out.toOwnedSlice(allocator);
 }
 
 fn buildReadingPredictions(
@@ -1832,6 +1932,8 @@ fn parseArgs(args: []const []const u8) !Options {
             options.reading_order_include_structure = false;
         } else if (std.mem.eql(u8, arg, "--reading-order-soft-structure")) {
             options.reading_order_structure_hard = false;
+        } else if (std.mem.eql(u8, arg, "--reading-graph-audit")) {
+            options.reading_graph_audit = true;
         } else if (std.mem.eql(u8, arg, "--disable-ocr")) {
             options.enable_ocr = false;
         } else if (std.mem.eql(u8, arg, "--ocr-executable")) {
@@ -1923,6 +2025,7 @@ fn printUsage() !void {
         \\  --reading-order-mode MODE legacy, diagnostic, or graph (default: legacy)
         \\  --reading-order-no-structure Run geometry/semantic graph ablation
         \\  --reading-order-soft-structure Treat tagged order as soft evidence
+        \\  --reading-graph-audit   Emit internal anchor/node/block audit JSONL instead of scores
         \\  --disable-ocr           Keep adaptive OCR routes traceable but do not invoke OCR
         \\  --ocr-executable FILE   Tesseract executable for adaptive OCR
         \\  --ocr-rasterizer FILE   pdftoppm-compatible rasterizer for adaptive OCR
@@ -1990,6 +2093,7 @@ test "eval runner parses category and options" {
         "graph",
         "--reading-order-no-structure",
         "--reading-order-soft-structure",
+        "--reading-graph-audit",
         "--ocr-executable",
         "fake-tesseract",
         "--ocr-rasterizer",
@@ -2013,6 +2117,7 @@ test "eval runner parses category and options" {
     try std.testing.expectEqual(zpdf.adaptive.ReadingOrderMode.graph, options.reading_order_mode);
     try std.testing.expect(!options.reading_order_include_structure);
     try std.testing.expect(!options.reading_order_structure_hard);
+    try std.testing.expect(options.reading_graph_audit);
     try std.testing.expectEqual(eval.CorpusCategory.scientific_math, options.category);
     try std.testing.expectEqual(zpdf.FullTextMode.fast, options.mode);
     try std.testing.expectApproxEqAbs(@as(f64, 0.75), options.reading_order_score.?, 0.0001);

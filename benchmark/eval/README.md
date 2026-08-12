@@ -338,7 +338,8 @@ derives six development and six frozen holdout pages from a real annual report:
 python3 benchmark/eval/generate_reading_order_real_corpus.py
 zig build eval -- --adaptive --disable-ocr \
   --manifest benchmark/eval/reading_order_real/manifest.tsv \
-  --reading-order-mode diagnostic --reading-order-no-structure
+  --reading-order-mode diagnostic --reading-order-no-structure \
+  --reading-graph-audit --output /tmp/reading-graph-audit.jsonl
 ```
 
 The derived PDFs and full page-text transcriptions stay ignored and must be
@@ -369,6 +370,16 @@ dependency is a section-local layout-region representation that preserves
 fragment-to-line-to-region identity instead of flattening the page to spans and
 then attempting to rediscover regions. Only after that representation gate
 passes should graph edges or structure-tree corroboration be retested.
+
+`--reading-graph-audit` is an evaluator-only diagnostic. It emits every truth
+anchor status and match, every live graph node, and every layout block,
+including removed furniture, with text and geometry. It does not alter normal
+evaluation JSONL or any extraction schema. The complete audit found 51 of 96
+anchors mapped one-to-one, 29 collisions, five ambiguous anchors, and 11
+not-found anchors. Seven of the latter were present in blocks incorrectly
+removed as page headers; the other four were straight-versus-curly apostrophe
+transcription mismatches in truth. The dominant parser failure is therefore
+block granularity, not text recall.
 
 ## Corpus Layout
 
