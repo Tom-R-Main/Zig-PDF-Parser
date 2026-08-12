@@ -11,6 +11,7 @@ const ocr = @import("ocr.zig");
 const reconcile = @import("reconcile.zig");
 const runtime = @import("runtime.zig");
 const reading_order_graph = @import("reading_order_graph.zig");
+const reading_order_regions = @import("reading_order_regions.zig");
 const schema = @import("schema.zig");
 const specialist_protocol = @import("specialist_protocol.zig");
 const specialists = @import("specialists.zig");
@@ -318,11 +319,32 @@ pub const ReadingOrderBlock = struct {
     text: []u8,
 };
 
+/// Owned diagnostic copy of the geometric spans used to build page layout.
+/// This preserves the pre-block substrate for representation experiments.
+pub const ReadingOrderSourceSpan = struct {
+    page_index: u32,
+    span_index: u32,
+    bounds: BBox,
+    font_size: f64,
+    text: []u8,
+};
+
+pub const ReadingOrderRegion = struct {
+    page_index: u32,
+    id: u32,
+    parent_id: ?u32,
+    kind: reading_order_regions.RegionKind,
+    bounds: BBox,
+    source_span_count: usize,
+};
+
 pub const PageReadingOrder = struct {
     page_index: u32,
     graph: reading_order_graph.PageReadingOrderGraph,
     node_texts: [][]u8,
     blocks: []ReadingOrderBlock,
+    source_spans: []ReadingOrderSourceSpan,
+    regions: []ReadingOrderRegion,
     application: ReadingOrderApplication,
     structure_enabled: bool,
     eligible: bool,
@@ -332,6 +354,9 @@ pub const PageReadingOrder = struct {
         self.graph.allocator.free(self.node_texts);
         for (self.blocks) |block| self.graph.allocator.free(block.text);
         self.graph.allocator.free(self.blocks);
+        for (self.source_spans) |span| self.graph.allocator.free(span.text);
+        self.graph.allocator.free(self.source_spans);
+        self.graph.allocator.free(self.regions);
         self.graph.deinit();
         self.* = undefined;
     }
@@ -726,21 +751,51 @@ pub fn extractDocument(
                 }
             }
 
-            var page_graph = try reading_order_graph.build(allocator, page_index, &page_layout, .{
+            var region_tree: ?reading_order_regions.Result = null;
+            defer if (region_tree) |*tree| tree.deinit();
+            const graph_structure_enabled = options.reading_order_include_structure and
+                options.reading_order_mode != .diagnostic;
+            var page_graph = if (options.reading_order_mode == .diagnostic) diagnostic_graph: {
+                region_tree = try reading_order_regions.build(allocator, &page_layout);
+                break :diagnostic_graph try reading_order_graph.buildForBlocks(
+                    allocator,
+                    page_index,
+                    region_tree.?.blocks,
+                    page_layout.body_font_size,
+                    .{
+                        .include_structure = false,
+                        .include_semantics = false,
+                    },
+                );
+            } else try reading_order_graph.build(allocator, page_index, &page_layout, .{
                 .structure_mcid_order = structure_mcids.items,
-                .include_structure = options.reading_order_include_structure,
+                .include_structure = graph_structure_enabled,
                 .structure_is_hard = options.reading_order_structure_hard,
             });
             var graph_transferred = false;
             defer if (!graph_transferred) page_graph.deinit();
-            const node_texts = try copyGraphNodeTexts(allocator, &page_layout, &page_graph);
+            const graph_blocks = if (region_tree) |*tree| tree.blocks else page_layout.blocks;
+            const node_texts = try copyGraphNodeTexts(allocator, graph_blocks, &page_graph);
             var node_texts_transferred = false;
             defer if (!node_texts_transferred) freeOwnedStrings(allocator, node_texts);
-            const block_summaries = try copyReadingOrderBlocks(allocator, page_index, &page_layout);
+            const block_summaries = try copyReadingOrderBlocks(allocator, page_index, graph_blocks);
             var block_summaries_transferred = false;
             defer if (!block_summaries_transferred) freeReadingOrderBlocks(allocator, block_summaries);
+            const source_span_summaries = if (region_tree != null)
+                try copyReadingOrderSourceSpans(allocator, page_index, page_layout.spans)
+            else
+                try allocator.alloc(ReadingOrderSourceSpan, 0);
+            var source_span_summaries_transferred = false;
+            defer if (!source_span_summaries_transferred) freeReadingOrderSourceSpans(allocator, source_span_summaries);
+            const region_summaries = if (region_tree) |*tree|
+                try copyReadingOrderRegions(allocator, page_index, tree.nodes)
+            else
+                try allocator.alloc(ReadingOrderRegion, 0);
+            var region_summaries_transferred = false;
+            defer if (!region_summaries_transferred) allocator.free(region_summaries);
 
-            const base_eligible = page_graph.validity and
+            const base_eligible = options.reading_order_mode != .diagnostic and
+                page_graph.validity and
                 native_result.quality.quality_pass and
                 page_ocr_spans == null and
                 options.formula_specialist == null and
@@ -797,13 +852,17 @@ pub fn extractDocument(
                 .graph = page_graph,
                 .node_texts = node_texts,
                 .blocks = block_summaries,
+                .source_spans = source_span_summaries,
+                .regions = region_summaries,
                 .application = application,
-                .structure_enabled = options.reading_order_include_structure,
+                .structure_enabled = graph_structure_enabled,
                 .eligible = graph_eligible,
             });
             graph_transferred = true;
             node_texts_transferred = true;
             block_summaries_transferred = true;
+            source_span_summaries_transferred = true;
+            region_summaries_transferred = true;
         }
 
         for (page_layout.tables) |table| {
@@ -1499,7 +1558,7 @@ const RankedReadableSpan = struct {
 
 fn copyGraphNodeTexts(
     allocator: std.mem.Allocator,
-    page_layout: *const layout.LayoutResult,
+    blocks: []const layout.LayoutBlock,
     graph: *const reading_order_graph.PageReadingOrderGraph,
 ) ![][]u8 {
     const texts = try allocator.alloc([]u8, graph.nodes.len);
@@ -1510,8 +1569,8 @@ fn copyGraphNodeTexts(
     }
 
     for (graph.nodes, 0..) |node, node_index| {
-        if (node.original_block_index >= page_layout.blocks.len) return error.InvalidReadingOrderProjection;
-        texts[node_index] = try layoutBlockTextOwned(allocator, &page_layout.blocks[node.original_block_index]);
+        if (node.original_block_index >= blocks.len) return error.InvalidReadingOrderProjection;
+        texts[node_index] = try layoutBlockTextOwned(allocator, &blocks[node.original_block_index]);
         initialized += 1;
     }
     return texts;
@@ -1520,16 +1579,16 @@ fn copyGraphNodeTexts(
 fn copyReadingOrderBlocks(
     allocator: std.mem.Allocator,
     page_index: u32,
-    page_layout: *const layout.LayoutResult,
+    source_blocks: []const layout.LayoutBlock,
 ) ![]ReadingOrderBlock {
-    const blocks = try allocator.alloc(ReadingOrderBlock, page_layout.blocks.len);
+    const blocks = try allocator.alloc(ReadingOrderBlock, source_blocks.len);
     var initialized: usize = 0;
     errdefer {
         for (blocks[0..initialized]) |block| allocator.free(block.text);
         allocator.free(blocks);
     }
 
-    for (page_layout.blocks, 0..) |*block, block_index| {
+    for (source_blocks, 0..) |*block, block_index| {
         blocks[block_index] = .{
             .page_index = page_index,
             .original_block_index = @intCast(block_index),
@@ -1542,6 +1601,49 @@ fn copyReadingOrderBlocks(
         initialized += 1;
     }
     return blocks;
+}
+
+fn copyReadingOrderRegions(
+    allocator: std.mem.Allocator,
+    page_index: u32,
+    source_regions: []const reading_order_regions.RegionNode,
+) ![]ReadingOrderRegion {
+    const regions = try allocator.alloc(ReadingOrderRegion, source_regions.len);
+    for (source_regions, regions) |source, *region| {
+        region.* = .{
+            .page_index = page_index,
+            .id = source.id,
+            .parent_id = source.parent_id,
+            .kind = source.kind,
+            .bounds = source.bounds,
+            .source_span_count = source.source_span_count,
+        };
+    }
+    return regions;
+}
+
+fn copyReadingOrderSourceSpans(
+    allocator: std.mem.Allocator,
+    page_index: u32,
+    source_spans: []const layout.TextSpan,
+) ![]ReadingOrderSourceSpan {
+    const spans = try allocator.alloc(ReadingOrderSourceSpan, source_spans.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (spans[0..initialized]) |span| allocator.free(span.text);
+        allocator.free(spans);
+    }
+    for (source_spans, 0..) |source_span, span_index| {
+        spans[span_index] = .{
+            .page_index = page_index,
+            .span_index = @intCast(span_index),
+            .bounds = source_span.bbox,
+            .font_size = source_span.font_size,
+            .text = try allocator.dupe(u8, source_span.text),
+        };
+        initialized += 1;
+    }
+    return spans;
 }
 
 fn layoutBlockTextOwned(allocator: std.mem.Allocator, block: *const layout.LayoutBlock) ![]u8 {
@@ -1565,6 +1667,11 @@ fn freeOwnedStrings(allocator: std.mem.Allocator, strings: [][]u8) void {
 fn freeReadingOrderBlocks(allocator: std.mem.Allocator, blocks: []ReadingOrderBlock) void {
     for (blocks) |block| allocator.free(block.text);
     allocator.free(blocks);
+}
+
+fn freeReadingOrderSourceSpans(allocator: std.mem.Allocator, spans: []ReadingOrderSourceSpan) void {
+    for (spans) |span| allocator.free(span.text);
+    allocator.free(spans);
 }
 
 fn horizontalLeftToRight(spans: []const layout.TextSpan) bool {
@@ -2508,7 +2615,7 @@ fn readingOrderBlockAllocationProbe(allocator: std.mem.Allocator) !void {
         .kind = .paragraph,
     }};
     const page_layout: layout.LayoutResult = .{
-        .spans = &.{},
+        .spans = &.{span},
         .lines = &.{},
         .columns = &.{},
         .paragraphs = &.{},
@@ -2519,10 +2626,30 @@ fn readingOrderBlockAllocationProbe(allocator: std.mem.Allocator) !void {
         .body_font_size = 12,
         .allocator = allocator,
     };
-    const summaries = try copyReadingOrderBlocks(allocator, 3, &page_layout);
+    const summaries = try copyReadingOrderBlocks(allocator, 3, page_layout.blocks);
     defer freeReadingOrderBlocks(allocator, summaries);
     if (summaries.len != 1 or !std.mem.eql(u8, summaries[0].text, "Owned block text")) {
         return error.InvalidReadingOrderBlockSummary;
+    }
+    const source_summaries = try copyReadingOrderSourceSpans(allocator, 3, page_layout.spans);
+    defer freeReadingOrderSourceSpans(allocator, source_summaries);
+    if (source_summaries.len != 1 or !std.mem.eql(u8, source_summaries[0].text, "Owned block text")) {
+        return error.InvalidReadingOrderSourceSpanSummary;
+    }
+
+    const source_indices = [_]u32{0};
+    const source_regions = [_]reading_order_regions.RegionNode{.{
+        .id = 0,
+        .parent_id = null,
+        .kind = .root,
+        .bounds = span.bbox,
+        .source_span_count = 1,
+        .source_span_indices = &source_indices,
+    }};
+    const region_summaries = try copyReadingOrderRegions(allocator, 3, &source_regions);
+    defer allocator.free(region_summaries);
+    if (region_summaries.len != 1 or region_summaries[0].source_span_count != 1) {
+        return error.InvalidReadingOrderRegionSummary;
     }
 }
 

@@ -2,8 +2,9 @@
 //!
 //! This module is deliberately independent from the parser and layout types.
 //! Callers adapt their graph into `Prediction`, then evaluate it against a
-//! versioned truth document. Text anchors must resolve to exactly one predicted
-//! node on the declared page; missing and ambiguous anchors are hard errors.
+//! versioned truth document. Text anchors resolve to the uniquely most-specific
+//! containing node on the declared page; missing and tied-best anchors are hard
+//! errors.
 
 const std = @import("std");
 
@@ -271,16 +272,18 @@ pub fn auditAnchors(
         const normalized_anchor = try normalizeWhitespace(allocator, truth_node.text_anchor);
         defer allocator.free(normalized_anchor);
 
+        var match_indices: std.ArrayList(usize) = .empty;
+        defer match_indices.deinit(allocator);
+        try findBestAnchorMatches(
+            allocator,
+            normalized_anchor,
+            truth_node.page_index,
+            predicted_nodes,
+            &match_indices,
+        );
         var matches: std.ArrayList(u32) = .empty;
         errdefer matches.deinit(allocator);
-        for (predicted_nodes) |predicted_node| {
-            if (predicted_node.page_index != truth_node.page_index) continue;
-            const normalized_text = try normalizeWhitespace(allocator, predicted_node.text);
-            defer allocator.free(normalized_text);
-            if (std.mem.indexOf(u8, normalized_text, normalized_anchor) != null) {
-                try matches.append(allocator, predicted_node.id);
-            }
-        }
+        for (match_indices.items) |predicted_index| try matches.append(allocator, predicted_nodes[predicted_index].id);
 
         var status: AnchorStatus = if (matches.items.len == 0)
             .not_found
@@ -467,21 +470,48 @@ fn resolveAnchors(
         const normalized_anchor = try normalizeWhitespace(allocator, truth_node.text_anchor);
         defer allocator.free(normalized_anchor);
 
-        var match: ?usize = null;
-        for (predicted_nodes, 0..) |predicted_node, predicted_index| {
-            if (predicted_node.page_index != truth_node.page_index) continue;
-            const normalized_text = try normalizeWhitespace(allocator, predicted_node.text);
-            defer allocator.free(normalized_text);
-            if (std.mem.indexOf(u8, normalized_text, normalized_anchor) == null) continue;
-            if (match != null) return error.NodeAnchorAmbiguous;
-            match = predicted_index;
-        }
-        mapping[truth_index] = match orelse return error.NodeAnchorNotFound;
+        var matches: std.ArrayList(usize) = .empty;
+        defer matches.deinit(allocator);
+        try findBestAnchorMatches(
+            allocator,
+            normalized_anchor,
+            truth_node.page_index,
+            predicted_nodes,
+            &matches,
+        );
+        if (matches.items.len == 0) return error.NodeAnchorNotFound;
+        if (matches.items.len > 1) return error.NodeAnchorAmbiguous;
+        mapping[truth_index] = matches.items[0];
         for (mapping[0..truth_index]) |prior| {
             if (prior == mapping[truth_index]) return error.NodeAnchorCollision;
         }
     }
     return mapping;
+}
+
+/// Retains only containing nodes with the shortest normalized text. Pull quotes
+/// and stat cards commonly repeat a phrase from a longer body paragraph; the
+/// smaller region is the more specific anchor target. Equal best candidates
+/// remain ambiguous instead of depending on prediction order.
+fn findBestAnchorMatches(
+    allocator: std.mem.Allocator,
+    normalized_anchor: []const u8,
+    page_index: u32,
+    predicted_nodes: []const PredictedNode,
+    matches: *std.ArrayList(usize),
+) !void {
+    var best_text_len: usize = std.math.maxInt(usize);
+    for (predicted_nodes, 0..) |predicted_node, predicted_index| {
+        if (predicted_node.page_index != page_index) continue;
+        const normalized_text = try normalizeWhitespace(allocator, predicted_node.text);
+        defer allocator.free(normalized_text);
+        if (std.mem.indexOf(u8, normalized_text, normalized_anchor) == null) continue;
+        if (normalized_text.len < best_text_len) {
+            matches.clearRetainingCapacity();
+            best_text_len = normalized_text.len;
+        }
+        if (normalized_text.len == best_text_len) try matches.append(allocator, predicted_index);
+    }
 }
 
 fn buildReachability(allocator: std.mem.Allocator, prediction: Prediction) ![]bool {
@@ -958,14 +988,38 @@ test "unmatched and ambiguous anchors are evaluation errors" {
     }));
 
     const ambiguous = [_]PredictedNode{
-        .{ .id = 1, .page_index = 0, .text = "same" },
-        .{ .id = 2, .page_index = 0, .text = "also same" },
+        .{ .id = 1, .page_index = 0, .text = "same one" },
+        .{ .id = 2, .page_index = 0, .text = "same two" },
     };
     try std.testing.expectError(error.NodeAnchorAmbiguous, evaluate(std.testing.allocator, &truth, .{
         .nodes = &ambiguous,
         .edges = &.{},
         .projection = &.{ 1, 2 },
     }));
+}
+
+test "anchor resolution selects the uniquely most-specific repeated region" {
+    const json =
+        \\{"version":1,"nodes":[{"id":"quote","page_index":0,"text_anchor":"source of strength"}]}
+    ;
+    var truth = try parseTruth(std.testing.allocator, json);
+    defer truth.deinit();
+    const nodes = [_]PredictedNode{
+        .{ .id = 10, .page_index = 0, .text = "A long body paragraph contains the source of strength phrase and more material." },
+        .{ .id = 20, .page_index = 0, .text = "source of strength" },
+    };
+    var result = try evaluate(std.testing.allocator, &truth, .{
+        .nodes = &nodes,
+        .edges = &.{},
+        .projection = &.{ 10, 20 },
+    });
+    defer result.deinit();
+    try std.testing.expectEqualSlices(u32, &.{20}, result.truth_to_prediction);
+
+    var audit = try auditAnchors(std.testing.allocator, &truth, &nodes);
+    defer audit.deinit();
+    try std.testing.expectEqual(AnchorStatus.resolved, audit.diagnostics[0].status);
+    try std.testing.expectEqualSlices(u32, &.{20}, audit.diagnostics[0].matched_node_ids);
 }
 
 test "anchor audit reports every representation failure without aborting" {

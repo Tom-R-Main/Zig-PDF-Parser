@@ -371,20 +371,32 @@ corrected baseline, because flat vertical joins still did not recover stable
 paragraph and semantic-region boundaries. The exact treatment results are
 recorded in `reading_order_real/representation-audit.json`.
 
-The evidence rules out another global-gutter or flat-region threshold pass. The
-next dependency is a hierarchical rectilinear representation that preserves
-glyph-to-line-to-leaf-to-parent identity, represents whitespace cuts at multiple
-scales, and classifies recurrent furniture independently. Only after that
-representation gate passes should graph edges or structure-tree corroboration
-be retested.
+`PDF-LAYOUT-06` passed that representation gate. It retains deduplicated
+pre-block geometric spans in an explicit root-to-aligned-flow-to-paragraph-block
+hierarchy instead of rebuilding regions from already fused layout blocks. Text
+anchors use deterministic best-fit assignment: the uniquely shortest normalized
+containing region wins, while equally specific matches remain ambiguous. This
+handles pull quotes and stat cards that repeat a phrase from a longer body
+paragraph without depending on prediction order. All 46 development and all 50
+holdout anchors now resolve one-to-one, with no missing, ambiguous, or collided
+anchors. Frozen truth was unchanged.
+
+The representation result does not promote graph projection. The existing graph
+geometry still assumes flat columns: mean precedence F1 was 0.598 on development
+and 0.502 on holdout, below the respective legacy means of 0.787 and 0.791.
+The next experiment must generate hierarchy-native edges—parent headings before
+child flows, order within sibling flows, explicit spanning boundaries, and no
+invented relation for ambiguous side material—before structure evidence or
+projection is reconsidered.
 
 `--reading-graph-audit` is an evaluator-only diagnostic. It emits every truth
-anchor status and match, every live graph node, and every layout block,
-including removed furniture, with text and geometry. It does not alter normal
-evaluation JSONL or any extraction schema. Four objective straight-versus-curly
-apostrophe transcription mismatches were corrected in the generated truth. The
-corrected audit finds 52 of 96 anchors mapped one-to-one, 32 collisions, five
-ambiguous anchors, and seven not-found anchors. Every remaining missing phrase
+anchor status and match, every live graph node, the internal region hierarchy,
+the pre-block source spans, and every graph block with text and geometry. It
+does not alter normal evaluation JSONL or any extraction schema. Four objective
+straight-versus-curly apostrophe transcription mismatches were corrected in the
+generated truth. Against the old flat-block representation, that corrected
+audit found 52 of 96 anchors mapped one-to-one, 32 collisions, five ambiguous
+anchors, and seven not-found anchors. Every remaining missing phrase
 is present in a block incorrectly removed as a page header. The dominant parser
 failure is therefore block granularity and furniture classification, not text
 recall.

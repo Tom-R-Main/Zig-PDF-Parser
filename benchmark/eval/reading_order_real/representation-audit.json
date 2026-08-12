@@ -2,14 +2,14 @@
   "milestone": "PDF-READORDER-02",
   "source_sha256": "943cec3d492a966b4b29a15154aaf7c46a81465c958510c44301b0ffa01e4d5e",
   "fixture_count": 12,
-  "representable_fixture_count": 0,
-  "result": "falsified_before_edge_tuning",
-  "failure_counts": {
+  "representable_fixture_count": 12,
+  "result": "hierarchical_representation_supported_projection_not_promoted",
+  "baseline_failure_counts": {
     "NodeAnchorNotFound": 6,
     "NodeAnchorCollision": 5,
     "NodeAnchorAmbiguous": 1
   },
-  "exact_anchor_audit": {
+  "flat_block_baseline": {
     "anchor_count": 96,
     "resolved_one_to_one": 52,
     "not_found": 7,
@@ -20,6 +20,34 @@
       "straight_vs_curly_apostrophe_truth_transcription": 0
     },
     "interpretation": "Four objective straight-versus-curly apostrophe transcription defects were corrected in truth. Every remaining missing source phrase is present in a block removed as a header. The dominant representation failure remains multiple intended regions collapsing into one live block, followed by page titles being removed as headers without cross-page recurrence evidence."
+  },
+  "hierarchical_region_audit": {
+    "anchor_count": 96,
+    "resolved_one_to_one": 96,
+    "not_found": 0,
+    "ambiguous": 0,
+    "collision": 0,
+    "development": {
+      "anchor_count": 46,
+      "resolved_one_to_one": 46
+    },
+    "holdout": {
+      "anchor_count": 50,
+      "resolved_one_to_one": 50
+    },
+    "representation": "root to aligned-flow to paragraph-block hierarchy over deduplicated pre-block geometric spans",
+    "anchor_assignment": "uniquely shortest normalized containing region; equal best matches remain ambiguous",
+    "interpretation": "The pre-block spans retain coherent visual-line text. Preserving them in aligned local flows and splitting paragraph blocks before flat layout fusion makes every frozen truth anchor independently addressable."
+  },
+  "diagnostic_graph_result": {
+    "development_mean_precedence_f1": 0.597761,
+    "development_mean_legacy_precedence_f1": 0.787322,
+    "development_mean_required_recall": 0.644445,
+    "holdout_mean_precedence_f1": 0.502249,
+    "holdout_mean_legacy_precedence_f1": 0.791060,
+    "holdout_mean_required_recall": 0.483730,
+    "forbidden_path_rate": 0.0,
+    "decision": "Do not promote projection. The hierarchy proves representation, but the old flat-column geometry evidence does not express parent, sibling-flow, or spanning-region order."
   },
   "determinism": {
     "repeated_audit_runs": 2,
@@ -83,9 +111,20 @@
       "collision_anchor_count": 14,
       "result": "falsified_and_removed",
       "reason": "The strict bands prevented the observed character interleaving but still failed to recover stable paragraph and semantic-region boundaries. The result was below the corrected 52-anchor baseline and exhausted the permitted revision."
+    },
+    {
+      "work_item": "PDF-LAYOUT-06",
+      "treatment": "deduplicated pre-block visual lines grouped into stable x-aligned flows and paragraph blocks under an explicit root-flow-block hierarchy",
+      "anchor_count": 96,
+      "resolved_anchor_count": 96,
+      "not_found_anchor_count": 0,
+      "ambiguous_anchor_count": 0,
+      "collision_anchor_count": 0,
+      "result": "representation_gate_passed",
+      "reason": "Both development and holdout anchors resolve completely without changing frozen truth. Diagnostic graph projection remains below legacy because its geometry evidence still assumes flat page columns."
     }
   ],
-  "fixtures": [
+  "baseline_fixtures": [
     {"doc_id": "reading-order-real-sec-005-dev", "error": "NodeAnchorNotFound"},
     {"doc_id": "reading-order-real-sec-006-dev", "error": "NodeAnchorCollision"},
     {"doc_id": "reading-order-real-sec-008-dev", "error": "NodeAnchorNotFound"},
@@ -99,5 +138,5 @@
     {"doc_id": "reading-order-real-sec-043-holdout", "error": "NodeAnchorCollision"},
     {"doc_id": "reading-order-real-sec-049-holdout", "error": "NodeAnchorNotFound"}
   ],
-  "decision": "Do not tune or promote graph evidence. The next representation must be hierarchical: preserve glyph-to-line identity, infer rectilinear whitespace cuts at multiple scales, retain parent and leaf regions, and classify recurrent furniture separately. Repeat this frozen representation gate before any projection experiment."
+  "decision": "Retain the hierarchical representation as diagnostic infrastructure. Next, replace flat column transitions with hierarchy-native edges: parent headings before child flows, stable order within sibling flows, explicit spanning-region boundaries, and disconnected ambiguous side material. Rerun geometry-only and structure-tree ablations before any projection experiment."
 }

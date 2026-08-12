@@ -696,6 +696,47 @@ fn renderReadingGraphAudit(
             block_output_index += 1;
         }
     }
+    try writer.writeAll("],\"regions\":[");
+    var region_output_index: usize = 0;
+    for (result.reading_order_pages) |page| {
+        for (page.regions) |region| {
+            if (region_output_index > 0) try writer.writeByte(',');
+            try writer.print("{{\"page_index\":{},\"id\":{},\"parent_id\":", .{ region.page_index, region.id });
+            if (region.parent_id) |parent_id| {
+                try writer.print("{}", .{parent_id});
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.print(",\"kind\":\"{s}\",\"source_span_count\":{},\"bbox\":[{d},{d},{d},{d}]}}", .{
+                @tagName(region.kind),
+                region.source_span_count,
+                region.bounds.x0,
+                region.bounds.y0,
+                region.bounds.x1,
+                region.bounds.y1,
+            });
+            region_output_index += 1;
+        }
+    }
+    try writer.writeAll("],\"source_spans\":[");
+    var source_span_output_index: usize = 0;
+    for (result.reading_order_pages) |page| {
+        for (page.source_spans) |span| {
+            if (source_span_output_index > 0) try writer.writeByte(',');
+            try writer.print("{{\"page_index\":{},\"span_index\":{},\"font_size\":{d},\"bbox\":[{d},{d},{d},{d}],\"text\":\"", .{
+                span.page_index,
+                span.span_index,
+                span.font_size,
+                span.bounds.x0,
+                span.bounds.y0,
+                span.bounds.x1,
+                span.bounds.y1,
+            });
+            try writeJsonEscaped(writer, span.text);
+            try writer.writeAll("\"}");
+            source_span_output_index += 1;
+        }
+    }
     try writer.writeAll("]}\n");
     return out.toOwnedSlice(allocator);
 }

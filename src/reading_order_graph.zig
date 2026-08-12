@@ -117,6 +117,18 @@ pub fn build(
     );
 }
 
+/// Builds an owned graph over an alternate internal block representation.
+/// Used only by diagnostic representation experiments.
+pub fn buildForBlocks(
+    allocator: std.mem.Allocator,
+    page_index: u32,
+    blocks: []const layout.LayoutBlock,
+    body_font_size: f64,
+    options: BuildOptions,
+) !PageReadingOrderGraph {
+    return buildFromParts(allocator, page_index, blocks, &.{}, body_font_size, options);
+}
+
 fn buildFromParts(
     allocator: std.mem.Allocator,
     page_index: u32,
