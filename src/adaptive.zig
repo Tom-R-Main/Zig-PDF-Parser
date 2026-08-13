@@ -47,10 +47,10 @@ pub const ExtractOptions = struct {
     /// Internal experiment control. Public JSON/JSONL schemas never expose the
     /// graph or this switch.
     reading_order_mode: ReadingOrderMode = .legacy,
-    /// Enables the tagged-PDF MCID ablation without requiring another binary.
+    /// Enables tagged-PDF MCID evidence for the projectable V0 flat graph.
+    /// Hierarchy diagnostics use synthetic regions without MCID mappings.
     reading_order_include_structure: bool = true,
-    /// Structure order begins as a hard constraint; the evaluator can rerun it
-    /// as high-priority soft evidence when tagged holdouts falsify that policy.
+    /// Controls whether V0 flat-graph structure order is hard or soft evidence.
     reading_order_structure_hard: bool = true,
 };
 
@@ -740,9 +740,11 @@ pub fn extractDocument(
 
         var applied_projected_order: ?[]const u32 = null;
         if (options.reading_order_mode != .legacy) {
+            const graph_structure_enabled = options.reading_order_mode == .graph and
+                options.reading_order_include_structure;
             var structure_mcids: std.ArrayList(i32) = .empty;
             defer structure_mcids.deinit(allocator);
-            if (options.reading_order_include_structure) {
+            if (graph_structure_enabled) {
                 if (document.pageMarkedContentOrder(page_idx)) |marked_order| {
                     for (marked_order) |marked| {
                         if (marked.stream_ref != null) continue;
@@ -753,8 +755,6 @@ pub fn extractDocument(
 
             var region_tree: ?reading_order_regions.Result = null;
             defer if (region_tree) |*tree| tree.deinit();
-            const graph_structure_enabled = options.reading_order_include_structure and
-                options.reading_order_mode != .diagnostic;
             var page_graph = if (options.reading_order_mode == .diagnostic) diagnostic_graph: {
                 region_tree = try reading_order_regions.build(allocator, &page_layout);
                 break :diagnostic_graph try reading_order_graph.buildForBlocks(
@@ -768,11 +768,17 @@ pub fn extractDocument(
                         .geometry_model = .hierarchy,
                     },
                 );
-            } else try reading_order_graph.build(allocator, page_index, &page_layout, .{
-                .structure_mcid_order = structure_mcids.items,
-                .include_structure = graph_structure_enabled,
-                .structure_is_hard = options.reading_order_structure_hard,
-            });
+            } else projectable_v0_graph: {
+                // The projectable mode still uses V0 flat layout blocks. The
+                // measured hierarchy model above uses synthetic region blocks;
+                // it cannot be promoted until those regions map uniquely back
+                // to source spans.
+                break :projectable_v0_graph try reading_order_graph.build(allocator, page_index, &page_layout, .{
+                    .structure_mcid_order = structure_mcids.items,
+                    .include_structure = graph_structure_enabled,
+                    .structure_is_hard = options.reading_order_structure_hard,
+                });
+            };
             var graph_transferred = false;
             defer if (!graph_transferred) page_graph.deinit();
             const graph_blocks = if (region_tree) |*tree| tree.blocks else page_layout.blocks;

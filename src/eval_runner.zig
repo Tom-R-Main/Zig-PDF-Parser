@@ -475,6 +475,11 @@ fn extractForEvaluation(
                 .diagnostic
             else
                 options.reading_order_mode;
+            try validateReadingOrderExperimentOptions(
+                reading_order_mode,
+                options.reading_order_include_structure,
+                options.reading_order_structure_hard,
+            );
             var result = try doc.extractAdaptive(allocator, .{
                 .enable_ocr = options.enable_ocr,
                 .ocr_config = options.ocr_config,
@@ -491,6 +496,16 @@ fn extractForEvaluation(
                 .adaptive = result,
             };
         },
+    }
+}
+
+fn validateReadingOrderExperimentOptions(
+    mode: zpdf.adaptive.ReadingOrderMode,
+    include_structure: bool,
+    structure_hard: bool,
+) !void {
+    if (mode == .diagnostic and (!include_structure or !structure_hard)) {
+        return error.StructureAblationUnavailableForHierarchyDiagnostics;
     }
 }
 
@@ -2064,8 +2079,8 @@ fn printUsage() !void {
         \\  --accuracy              Use accuracy extraction mode (default)
         \\  --adaptive              Use adaptive extraction, including OCR when routed
         \\  --reading-order-mode MODE legacy, diagnostic, or graph (default: legacy)
-        \\  --reading-order-no-structure Run geometry/semantic graph ablation
-        \\  --reading-order-soft-structure Treat tagged order as soft evidence
+        \\  --reading-order-no-structure Flat graph only; omit tagged-order evidence
+        \\  --reading-order-soft-structure Flat graph only; treat tagged order as soft evidence
         \\  --reading-graph-audit   Emit internal anchor/node/block audit JSONL instead of scores
         \\  --disable-ocr           Keep adaptive OCR routes traceable but do not invoke OCR
         \\  --ocr-executable FILE   Tesseract executable for adaptive OCR
@@ -2174,6 +2189,19 @@ test "eval runner parses category and options" {
     try std.testing.expectEqual(@as(u32, 200), options.ocr_config.dpi);
     try std.testing.expect(!options.ocr_config.rasterize_grayscale);
     try std.testing.expectEqual(@as(u32, 1), options.ocr_pages.?);
+}
+
+test "hierarchy diagnostics reject inert structure ablations" {
+    try validateReadingOrderExperimentOptions(.diagnostic, true, true);
+    try std.testing.expectError(
+        error.StructureAblationUnavailableForHierarchyDiagnostics,
+        validateReadingOrderExperimentOptions(.diagnostic, false, true),
+    );
+    try std.testing.expectError(
+        error.StructureAblationUnavailableForHierarchyDiagnostics,
+        validateReadingOrderExperimentOptions(.diagnostic, true, false),
+    );
+    try validateReadingOrderExperimentOptions(.graph, false, false);
 }
 
 test "eval runner parses manifest option" {

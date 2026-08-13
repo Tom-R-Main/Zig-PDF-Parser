@@ -481,6 +481,12 @@ const HierarchyFlow = struct {
     primary: bool,
 };
 
+const max_repeated_callouts = 64;
+const max_repeated_callout_candidates = 256;
+const max_repeated_callout_comparisons = 1024;
+const max_repeated_callout_text_bytes = 1024;
+const max_repeated_callout_candidate_text_bytes = 8192;
+
 /// Generates sparse evidence from the diagnostic root/flow/block hierarchy.
 /// Synthetic region blocks use `column_index` as their parent-flow identity.
 /// Only coherent body flows participate in cross-flow ordering; rotated labels,
@@ -598,9 +604,18 @@ fn appendHierarchyEvidence(
     for (flows.items) |flow| {
         if (!flow.primary) continue;
         if (previous_primary) |previous| {
-            const left_first = firstUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse continue;
-            const left_last = lastUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse continue;
-            const right_first = firstUsableInFlow(nodes, blocks, normalized, flow.column_index, bottom_limit) orelse continue;
+            const left_first = firstUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse {
+                previous_primary = flow;
+                continue;
+            };
+            const left_last = lastUsableInFlow(nodes, blocks, normalized, previous.column_index, bottom_limit) orelse {
+                previous_primary = flow;
+                continue;
+            };
+            const right_first = firstUsableInFlow(nodes, blocks, normalized, flow.column_index, bottom_limit) orelse {
+                previous_primary = flow;
+                continue;
+            };
             const horizontal_overlap = @min(previous.core_x0 + previous.core_width, flow.core_x0 + flow.core_width) -
                 @max(previous.core_x0, flow.core_x0);
             const separated = horizontal_overlap <= @min(previous.core_width, flow.core_width) * 0.15;
@@ -646,6 +661,8 @@ fn appendHierarchyEvidence(
     const repeated_callout = try allocator.alloc(bool, nodes.len);
     defer allocator.free(repeated_callout);
     @memset(repeated_callout, false);
+    var repeated_callouts_considered: usize = 0;
+    var repeated_callout_comparisons: usize = 0;
 
     // Repeated pull quotes are anchored by their duplicated body text. When the
     // callout sits beside the following paragraph, attach it there so it does
@@ -654,15 +671,41 @@ fn appendHierarchyEvidence(
         const callout_flow = flows.items[node_flow_indices[callout.id]];
         if (callout_flow.primary or callout.kind != .heading or
             !hierarchyNodeUsable(callout, blocks[callout.original_block_index], normalized[callout.id], bottom_limit) or
-            normalized[callout.id].len < 50)
+            normalized[callout.id].len < 50 or
+            normalized[callout.id].len > max_repeated_callout_text_bytes)
         {
             continue;
         }
+        if (repeated_callouts_considered >= max_repeated_callouts) break;
+        repeated_callouts_considered += 1;
+
+        var candidate_count: usize = 0;
+        for (nodes) |candidate| {
+            const candidate_flow = flows.items[node_flow_indices[candidate.id]];
+            if (!candidate_flow.primary or candidate.kind != .paragraph or
+                normalized[candidate.id].len > max_repeated_callout_candidate_text_bytes)
+            {
+                continue;
+            }
+            candidate_count += 1;
+            if (candidate_count > max_repeated_callout_candidates) break;
+        }
+        if (candidate_count == 0 or candidate_count > max_repeated_callout_candidates or
+            candidate_count > max_repeated_callout_comparisons - repeated_callout_comparisons)
+        {
+            continue;
+        }
+        repeated_callout_comparisons += candidate_count;
+
         var match: ?NodeId = null;
         var match_size: usize = 0;
         for (nodes) |candidate| {
             const candidate_flow = flows.items[node_flow_indices[candidate.id]];
-            if (!candidate_flow.primary or candidate.kind != .paragraph) continue;
+            if (!candidate_flow.primary or candidate.kind != .paragraph or
+                normalized[candidate.id].len > max_repeated_callout_candidate_text_bytes)
+            {
+                continue;
+            }
             const shared = normalizedContainmentSize(normalized[callout.id], normalized[candidate.id]);
             if (shared < @min(normalized[callout.id].len, normalized[candidate.id].len) * 7 / 10) continue;
             if (shared > match_size) {
@@ -1504,6 +1547,42 @@ test "hierarchy repeated callout attaches to the overlapping body successor" {
         }
     }
     try std.testing.expect(saw_callout);
+}
+
+test "hierarchy repeated callout matching stops at the candidate bound" {
+    const allocator = std.testing.allocator;
+    const block_count = max_repeated_callout_candidates + 2;
+    const repeated_text = "A repeated pull quote with enough normalized text to qualify for conservative matching.";
+    var spans: [block_count]layout.TextSpan = undefined;
+    var lines: [block_count]layout.TextLine = undefined;
+    var blocks: [block_count]layout.LayoutBlock = undefined;
+
+    for (0..block_count - 1) |index| {
+        const y0 = 5000.0 - @as(f64, @floatFromInt(index * 12));
+        spans[index] = testSpan(repeated_text, 20, y0, 240, y0 + 10, null);
+        lines[index] = .{ .bounds = spans[index], .words = &.{}, .baseline_y = y0 };
+        blocks[index] = testBlock(spans[index], lines[index .. index + 1], 0, .paragraph);
+    }
+    const callout_index = block_count - 1;
+    spans[callout_index] = testSpan(repeated_text, 260, 100, 470, 110, null);
+    lines[callout_index] = .{ .bounds = spans[callout_index], .words = &.{}, .baseline_y = 100 };
+    blocks[callout_index] = testBlock(
+        spans[callout_index],
+        lines[callout_index .. callout_index + 1],
+        1,
+        .heading,
+    );
+
+    var graph = try buildFromParts(allocator, 0, &blocks, &.{}, 12, .{
+        .include_structure = false,
+        .include_semantics = false,
+        .geometry_model = .hierarchy,
+    });
+    defer graph.deinit();
+
+    for (graph.edges) |edge| {
+        try std.testing.expect(edge.evidence & EvidenceKind.repeated_callout.mask() == 0);
+    }
 }
 
 test "hierarchy overlapping flows use one local boundary edge" {

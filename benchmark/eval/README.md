@@ -294,21 +294,19 @@ zig build eval -- --adaptive --disable-ocr \
   --manifest benchmark/eval/reading_order/manifest.tsv \
   --reading-order-mode diagnostic
 
-# Geometry/semantic ablation and structure demotion treatment.
-zig-out/bin/pdf-parser-eval --adaptive --disable-ocr \
-  --manifest benchmark/eval/reading_order/manifest.tsv \
-  --reading-order-mode diagnostic --reading-order-no-structure
-zig-out/bin/pdf-parser-eval --adaptive --disable-ocr \
-  --manifest benchmark/eval/reading_order/manifest.tsv \
-  --reading-order-mode diagnostic --reading-order-soft-structure
 ```
 
 The evaluator emits precedence precision/recall/F1, required-edge recall,
 forbidden-path rate, caption/footnote F1, cycle rate, ambiguity preservation,
 valid-projection rate, graph eligibility/fallback counts, and the existing text
-quality metrics. `diagnostic` constructs the graph but never changes extraction
-order; `graph` applies its stable projection only to eligible native,
-horizontal, non-OCR pages. The default remains `legacy`.
+quality metrics. `diagnostic` constructs the hierarchy-native graph but never
+changes extraction order. The structure switches apply only to the historical
+flat-block `graph` treatment and are rejected with `diagnostic`; hierarchy
+regions do not yet carry MCID mappings. `graph` can apply a stable projection
+only for its V0 graph over fused layout blocks. It does **not** contain the
+hierarchy-native model measured below. Promoting that model requires a unique
+region-block-to-source-span projection and a new frozen experiment. The default
+remains `legacy`.
 
 The frozen V0 run did not meet promotion gates. On the eight holdouts,
 geometry-only graph and legacy both measured 97.73% macro precedence F1 (a
