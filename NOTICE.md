@@ -10,7 +10,7 @@ The inherited CC0 license text is preserved in
 `LICENSES/CC0-1.0.txt`. New implementation work in this repository is
 licensed under the MIT License in `LICENSE`.
 
-The public package/tool identity for this fork is `pdf-parser` for CLI usage
+The public package/tool identity for this project is `pdf-parser` for CLI usage
 and `pdf_parser` for Zig artifacts. Existing `zpdf_*` C/WASM symbols remain as
 compatibility exports while the native parser model is being rebuilt.
 

@@ -706,6 +706,6 @@ layout debugging matter more than a native Zig pipeline.
 
 ## License
 
-MIT for new implementation work. This fork began from `Lulzx/zpdf` at commit
+MIT for new implementation work. This project began from `Lulzx/zpdf` at commit
 `5eba7ade759d32b0d425eb905c17106b484dee30`, which was released under CC0-1.0;
 see `NOTICE.md` and `LICENSES/CC0-1.0.txt` for provenance.
